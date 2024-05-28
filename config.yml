@@ -1,0 +1,35 @@
+rabbitmq:
+  # Connection in the form of 'amqp://[user]:[password]@[host]:[port]?heartbeat=[heartbeat]'
+  connection:
+    # RabbitMQ host
+    host: ${RABBITMQ_HOST}:localhost
+    # RabbitMQ AMQP port. Used by AMQP 0-9-1 and 1.0 clients without and with TLS
+    port: ${RABBITMQ_PORT}:5672
+    # RabbitMQ user
+    user: ${RABBITMQ_USER}:alkemio-admin
+    # RabbitMQ password
+    password: ${RABBITMQ_PASSWORD}:alkemio!
+    # heartbeat
+    heartbeat: ${RABBITMQ_HEARTBEAT}:30
+
+monitoring:
+  logging:
+    # A flag setting whether Winston Console transport will be enabled.
+    # If the flag is set to true logs of the appropriate level (see below) will be outputted to the console
+    # after the application has been bootstrapped.
+    # The NestJS bootstrap process is handled by the internal NestJS logging.
+    enabled: ${LOGGING_CONSOLE_ENABLED}:true
+    # Logging level for outputs to console.
+    # Valid values are log|error|warn|debug|verbose.
+    level: ${LOGGING_LEVEL_CONSOLE}:verbose
+    # The logging format will be in json - useful for parsing
+    # if disabled - will be in a human-readable form
+    json: ${LOGGING_FORMAT_JSON}:false
+
+settings:
+  # application level settings
+  application:
+    # authentication & authorization queue
+    auth_queue: ${QUEUE}:auth
+    # MILLISECONDS wait time for a response after a request on the message queue
+    response_timeout: ${QUEUE_RESPONSE_TIMEOUT}:10000
