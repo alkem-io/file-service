@@ -4,7 +4,10 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
+import fastifyCookie from '@fastify/cookie';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { ConfigType } from './config';
 
 (async () => {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -22,5 +25,11 @@ import { AppModule } from './app.module';
   );
   const logger = app.get(WINSTON_MODULE_NEST_PROVIDER);
   app.useLogger(logger);
-  await app.listen(4003);
+
+  await app.register(fastifyCookie);
+
+  const configService: ConfigService<ConfigType, true> = app.get(ConfigService);
+  const port = configService.get('settings.application.port', { infer: true });
+
+  await app.listen(port);
 })();
