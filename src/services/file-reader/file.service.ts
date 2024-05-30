@@ -1,23 +1,22 @@
 import * as path from 'path';
 import { promisify } from 'util';
 import { readFile } from 'fs';
+import { Readable } from 'stream';
 import { ConfigService } from '@nestjs/config';
-import { Injectable, StreamableFile } from '@nestjs/common';
-import { FileAdapterService } from './file.adapter.service';
-import { CanReadInputData } from './inputs';
 import { ConfigType } from '../../config';
 import { pathResolve } from '../../core/utils/files';
-import { LocalStorageReadFailedException } from './exceptions/local.storage.read.failed.exception';
-import { Readable } from 'stream';
-import { CanReadOutputData, ReadOutputErrorCode } from './outputs';
-import { FileReadException } from './exceptions';
+import { Injectable, StreamableFile } from '@nestjs/common';
+import { FileAdapterService } from './file.adapter.service';
+import { FileInfoInputData } from './inputs';
+import { FileInfoOutputData, isFileInfoOutputWithErrorData } from './outputs';
+import {
+  FileInfoException,
+  FileReadException,
+  LocalStorageReadFailedException,
+} from './exceptions';
+import { DocumentData } from './types';
 
 const readFileAsync = promisify(readFile);
-
-type ReadDocumentError = {
-  message: string;
-  code: ReadOutputErrorCode;
-};
 
 @Injectable()
 export class FileService {
@@ -31,31 +30,34 @@ export class FileService {
       'settings.application.storage',
       { infer: true },
     );
-    const pathFromConfig = process.env.NODE_ENV
-      ? mapped_storage_path
-      : local_storage_path;
+    const pathFromConfig =
+      process.env.NODE_ENV === 'production'
+        ? mapped_storage_path
+        : local_storage_path;
     this.storagePath = pathResolve(pathFromConfig);
   }
 
-  public async canRead(
+  public async fileInfo(
     docId: string,
     auth: {
       cookie?: string;
       authorization?: string;
       token?: string;
     },
-  ): Promise<CanReadOutputData> {
+  ): Promise<FileInfoOutputData> {
     const cookie = auth.cookie;
     const token = auth?.token ?? auth?.authorization?.split(' ')?.[1];
-    // todo rename to file info
-    return this.adapter.canRead(new CanReadInputData(docId, { cookie, token }));
+
+    return this.adapter.fileInfo(
+      new FileInfoInputData(docId, { cookie, token }),
+    );
   }
 
   /**
    *
    * @param docId
    * @param auth
-   * @throws FileReadException
+   * @throws FileInfoException
    */
   public async readDocument(
     docId: string,
@@ -64,20 +66,28 @@ export class FileService {
       authorization?: string;
       token?: string;
     },
-  ): Promise<StreamableFile | never> {
-    const { read, error, errorCode, fileName } = await this.canRead(
-      docId,
-      auth,
-    );
-    // todo: is error
-    if (!read) {
-      // todo: remove !
-      throw new FileReadException('Error while reading file', errorCode!, {
-        originalMessage: error,
+  ): Promise<DocumentData | never> {
+    const { data } = await this.fileInfo(docId, auth);
+
+    if (isFileInfoOutputWithErrorData(data)) {
+      throw new FileInfoException('Error while reading file', data.errorCode, {
+        originalMessage: data.error,
       });
     }
-    // todo remove !
-    return this.readFile(fileName!);
+
+    let fileStream: StreamableFile | undefined;
+    try {
+      fileStream = await this.readFileToStream(data.fileName);
+    } catch (e) {
+      throw new FileReadException('Error while trying to read file to stream', {
+        originalException: e,
+      });
+    }
+
+    return {
+      file: fileStream,
+      mimeType: data.mimeType,
+    };
   }
 
   /**
@@ -85,7 +95,7 @@ export class FileService {
    * @param fileName
    * @throws Error
    */
-  public readFile(fileName: string): Promise<StreamableFile> {
+  public readFileToStream(fileName: string): Promise<StreamableFile> {
     if (!fileName) {
       // todo better exception
       throw new Error('File name not provided');

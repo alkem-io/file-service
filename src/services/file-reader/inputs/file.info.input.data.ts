@@ -1,6 +1,6 @@
 import { BaseInputData } from './base.input.data';
 
-export class CanReadInputData extends BaseInputData {
+export class FileInfoInputData extends BaseInputData {
   constructor(
     public docId: string,
     public auth: {
@@ -8,6 +8,6 @@ export class CanReadInputData extends BaseInputData {
       token?: string;
     },
   ) {
-    super('can-read-input');
+    super('file-info-input');
   }
 }

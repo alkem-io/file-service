@@ -5,7 +5,7 @@ import * as logform from 'logform';
 import { ConfigService } from '@nestjs/config';
 import { ConfigType } from './config.type';
 
-const LOG_LABEL = 'alkemio-whiteboard-collaboration';
+const LOG_LABEL = 'alkemio-file-service';
 
 const consoleLoggingStandardFormat: logform.Format[] = [
   winston.format.timestamp(),

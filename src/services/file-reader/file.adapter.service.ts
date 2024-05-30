@@ -10,8 +10,8 @@ import {
 } from '@nestjs/microservices';
 import { ConfigType } from 'src/config';
 import { FileMessagePatternEnum } from './file.message.pattern.enum';
-import { CanReadInputData } from './inputs';
-import { CanReadOutputData } from './outputs';
+import { FileInfoInputData } from './inputs';
+import { FileInfoOutputData } from './outputs';
 
 @Injectable()
 export class FileAdapterService {
@@ -58,16 +58,18 @@ export class FileAdapterService {
   }
 
   /**
-   * Reads a file.
+   * Give information about a file. Access of the requester to that file and metadata.
    * This method sends a request to the queue and waits for a response.
    *
-   * @param {CanReadInputData} data - The read request data.
-   * @returns {Promise<CanReadOutputData | never>} - Returns a promise that resolves to the file or throws an error.
+   * @param {FileInfoInputData} data - The read request data.
+   * @returns {Promise<FileInfoOutputData | never>} - Returns a promise that resolves or throws an error.
    * @throws Error
    */
-  public canRead(data: CanReadInputData): Promise<CanReadOutputData | never> {
-    return this.sendWithResponse<CanReadOutputData, CanReadInputData>(
-      FileMessagePatternEnum.CAN_READ,
+  public fileInfo(
+    data: FileInfoInputData,
+  ): Promise<FileInfoOutputData | never> {
+    return this.sendWithResponse<FileInfoOutputData, FileInfoInputData>(
+      FileMessagePatternEnum.FILE_INFO,
       data,
     );
   }

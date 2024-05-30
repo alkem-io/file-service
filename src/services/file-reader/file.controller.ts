@@ -4,8 +4,6 @@ import {
   Param,
   Res,
   StreamableFile,
-  NotImplementedException,
-  Req,
   Headers,
   HttpException,
   InternalServerErrorException,
@@ -17,8 +15,9 @@ import {
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { FastifyReply } from 'fastify';
 import { FileService } from './file.service';
-import { ReadOutputErrorCode } from './outputs';
-import { FileReadException } from './exceptions';
+import { FileInfoErrorCode } from './types';
+import { FileInfoException } from './exceptions';
+import { DocumentData } from './types';
 
 @Controller('/rest/storage')
 export class FileController {
@@ -34,42 +33,43 @@ export class FileController {
     @Headers('cookie') cookie: string | undefined,
     @Res({ passthrough: true }) res: FastifyReply,
   ): Promise<StreamableFile> {
-    return this.fileService
-      .readDocument(id, {
+    let documentData: DocumentData | undefined;
+
+    try {
+      documentData = await this.fileService.readDocument(id, {
         cookie,
         authorization,
-      })
-      .catch((e) => {
-        throw this.handleReadErrorByCode(e);
       });
-    // const { read, fileName, error, errorCode } = await this.fileService.canRead(
-    //   id,
-    //   cookie,
-    //   authorization,
-    // );
-    // return this.fileService.canRead(id, cookie, authorization).catch((e) => {
-    //   /* todo catch */
-    //   throw new InternalServerErrorException();
-    // });
-  }
-
-  private handleReadErrorByCode = (err: FileReadException): HttpException => {
-    this.logger.error(err);
-
-    switch (err.code) {
-      case ReadOutputErrorCode.USER_NOT_IDENTIFIED:
-      case ReadOutputErrorCode.NO_READ_ACCESS:
-      case ReadOutputErrorCode.NO_AUTH_PROVIDED:
-        return new ForbiddenException(
-          'Insufficient privileges to read this document',
-        );
-      case ReadOutputErrorCode.DOCUMENT_NOT_FOUND:
-      case ReadOutputErrorCode.FILE_NOT_FOUND:
-        return new NotFoundException('Document not found');
-      default:
-        return new InternalServerErrorException(
-          'Unknown error while reading file',
-        );
+    } catch (e) {
+      this.logger.error(e, e?.stack);
+      throw handleReadErrorByCode(e);
     }
-  };
+
+    res.headers({
+      'Content-Type': `${documentData.mimeType}`,
+      'Cache-Control': 'public, max-age=15552000',
+      Pragma: 'public',
+      Expires: new Date(Date.now() + 15552000 * 1000).toUTCString(),
+    });
+
+    return documentData.file;
+  }
 }
+
+const handleReadErrorByCode = (err: FileInfoException): HttpException => {
+  switch (err.code) {
+    case FileInfoErrorCode.USER_NOT_IDENTIFIED:
+    case FileInfoErrorCode.NO_READ_ACCESS:
+    case FileInfoErrorCode.NO_AUTH_PROVIDED:
+      return new ForbiddenException(
+        'Insufficient privileges to read this document',
+      );
+    case FileInfoErrorCode.DOCUMENT_NOT_FOUND:
+    case FileInfoErrorCode.FILE_NOT_FOUND:
+      return new NotFoundException('Document not found');
+    default:
+      return new InternalServerErrorException(
+        'Unknown error while reading file',
+      );
+  }
+};

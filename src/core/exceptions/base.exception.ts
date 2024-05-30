@@ -1,5 +1,6 @@
 type StaticExceptionDetails = {
   originalException?: Error;
+  originalMessage?: string;
   // static fields to be added here, e.g. 'cause', 'userId'
 };
 export type ExceptionDetails = Record<string, unknown> & StaticExceptionDetails;
