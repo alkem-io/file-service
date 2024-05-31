@@ -34,9 +34,11 @@ const isProd = process.env.NODE_ENV === 'production';
 
   const configService: ConfigService<ConfigType, true> = app.get(ConfigService);
   const port = configService.get('settings.application.port', { infer: true });
+  const address = configService.get('settings.application.address', {
+    infer: true,
+  });
 
-  const address = '0.0.0.0';
   await app.listen(port, address, () => {
-    logger.verbose(`File service listening on port ${port}`);
+    logger.verbose(`File service listening on ${address}:${port}`);
   });
 })();
