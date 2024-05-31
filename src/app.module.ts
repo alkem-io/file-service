@@ -5,11 +5,7 @@ import { WinstonConfigService } from './config';
 import { AppController } from './app.controller';
 import configuration from './config/configuration';
 import { FileModule } from './services/file-reader';
-import {
-  BaseExceptionFilter,
-  BaseExceptionFilterProvider,
-} from './core/filters';
-import { APP_FILTER } from '@nestjs/core';
+import { BaseExceptionFilterProvider } from './core/filters';
 
 @Module({
   imports: [

@@ -42,14 +42,14 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
-      token?: string;
+      apiToken?: string;
     },
   ): Promise<FileInfoOutputData> {
     const cookie = auth.cookie;
-    const token = auth?.token ?? auth?.authorization?.split(' ')?.[1];
+    const apiToken = auth?.apiToken ?? auth?.authorization?.split(' ')?.[1];
 
     return this.adapter.fileInfo(
-      new FileInfoInputData(docId, { cookie, token }),
+      new FileInfoInputData(docId, { cookie, apiToken }),
     );
   }
 
@@ -66,7 +66,7 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
-      token?: string;
+      apiToken?: string;
     },
   ): Promise<DocumentData | never> {
     const { data } = await this.fileInfo(docId, auth);
