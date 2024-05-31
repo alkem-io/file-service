@@ -14,7 +14,7 @@ import {
   FileReadException,
   LocalStorageReadFailedException,
 } from './exceptions';
-import { DocumentData } from './types';
+import { DocumentData, FileInfoErrorCode } from './types';
 
 const readFileAsync = promisify(readFile);
 
@@ -58,6 +58,8 @@ export class FileService {
    * @param docId
    * @param auth
    * @throws FileInfoException
+   * @throws FileReadException
+   * @throws LocalStorageReadFailedException
    */
   public async readDocument(
     docId: string,
@@ -70,19 +72,16 @@ export class FileService {
     const { data } = await this.fileInfo(docId, auth);
 
     if (isFileInfoOutputWithErrorData(data)) {
-      throw new FileInfoException('Error while reading file', data.errorCode, {
-        originalMessage: data.error,
-      });
+      throw new FileInfoException(
+        'Error while reading file info',
+        data.errorCode,
+        {
+          originalMessage: data.error,
+        },
+      );
     }
 
-    let fileStream: StreamableFile | undefined;
-    try {
-      fileStream = await this.readFileToStream(data.fileName);
-    } catch (e) {
-      throw new FileReadException('Error while trying to read file to stream', {
-        originalException: e,
-      });
-    }
+    const fileStream = await this.readFileToStream(data.fileName);
 
     return {
       file: fileStream,
@@ -93,12 +92,12 @@ export class FileService {
   /**
    *
    * @param fileName
-   * @throws Error
+   * @throws FileReadException
+   * @throws LocalStorageReadFailedException
    */
   public readFileToStream(fileName: string): Promise<StreamableFile> {
     if (!fileName) {
-      // todo better exception
-      throw new Error('File name not provided');
+      throw new FileReadException('File name not provided');
     }
 
     const filePath = this.getFilePath(fileName);
