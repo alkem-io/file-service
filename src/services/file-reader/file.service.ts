@@ -5,7 +5,12 @@ import { Readable } from 'stream';
 import { ConfigService } from '@nestjs/config';
 import { ConfigType } from '../../config';
 import { pathResolve } from '../../core/utils/files';
-import { Injectable, StreamableFile } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  LoggerService,
+  StreamableFile,
+} from '@nestjs/common';
 import { FileAdapterService } from './file.adapter.service';
 import { FileInfoInputData } from './inputs';
 import { FileInfoOutputData, isFileInfoOutputWithErrorData } from './outputs';
@@ -14,7 +19,8 @@ import {
   FileReadException,
   LocalStorageReadFailedException,
 } from './exceptions';
-import { DocumentData, FileInfoErrorCode } from './types';
+import { DocumentData } from './types';
+import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 
 const readFileAsync = promisify(readFile);
 
@@ -23,6 +29,8 @@ export class FileService {
   private readonly storagePath: string;
 
   constructor(
+    @Inject(WINSTON_MODULE_NEST_PROVIDER)
+    private readonly logger: LoggerService,
     private readonly adapter: FileAdapterService,
     private readonly configService: ConfigService<ConfigType, true>,
   ) {
@@ -35,6 +43,7 @@ export class FileService {
         ? mapped_storage_path
         : local_storage_path;
     this.storagePath = pathResolve(pathFromConfig);
+    this.logger.verbose?.(`Serving files from ${this.storagePath}`);
   }
 
   public async fileInfo(
