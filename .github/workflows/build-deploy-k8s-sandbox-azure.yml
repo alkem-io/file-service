@@ -19,8 +19,8 @@ jobs:
 
       - name: 'Build & Push image'
         run: |
-          docker build -f Dockerfile . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-whiteboard-collaboration-service:${{ github.sha }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-whiteboard-collaboration-service:latest
-          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-whiteboard-collaboration-service:${{ github.sha }}
+          docker build -f Dockerfile . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service:${{ github.sha }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service:latest
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service:${{ github.sha }}
   deploy:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +42,7 @@ jobs:
           container-registry-url: ${{ secrets.REGISTRY_LOGIN_SERVER }}
           container-registry-username: ${{ secrets.REGISTRY_USERNAME }}
           container-registry-password: ${{ secrets.REGISTRY_PASSWORD }}
-          secret-name: alkemio-whiteboard-collaboration-service-secret
+          secret-name: alkemio-file-service-secret
 
       - uses: azure/setup-kubectl@v3.2
         with:
@@ -52,8 +52,8 @@ jobs:
       - uses: Azure/k8s-deploy@v4.10
         with:
           manifests: |
-            manifests/25-whiteboard-collaboration-service-deployment-dev.yaml
+            manifests/25-file-service-deployment-dev.yaml
           images: |
-            ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-whiteboard-collaboration-service:${{ github.sha }}
+            ${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service:${{ github.sha }}
           imagepullsecrets: |
-            alkemio-whiteboard-collaboration-service-secret
+            alkemio-file-service-secret
