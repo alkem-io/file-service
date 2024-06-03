@@ -4,6 +4,8 @@ import { ConfigModule } from '@nestjs/config';
 import { WinstonConfigService } from './config';
 import { AppController } from './app.controller';
 import configuration from './config/configuration';
+import { FileModule } from './services/file-reader';
+import { BaseExceptionFilterProvider } from './core/filters';
 
 @Module({
   imports: [
@@ -15,8 +17,9 @@ import configuration from './config/configuration';
     WinstonModule.forRootAsync({
       useClass: WinstonConfigService,
     }),
+    FileModule,
   ],
   controllers: [AppController],
-  providers: [],
+  providers: [BaseExceptionFilterProvider],
 })
 export class AppModule {}

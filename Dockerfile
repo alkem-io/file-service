@@ -19,14 +19,14 @@ RUN npm install
 
 # Bundle app source & config files for TypeORM & TypeScript
 COPY ./src ./src
-COPY ../file-service/tsconfig.json .
-COPY ../file-service/tsconfig.build.json .
+COPY ./tsconfig.json .
+COPY ./tsconfig.build.json .
 COPY ./config.yml .
 
 RUN npm run build
 
 ENV NODE_ENV=${ENV_ARG}
 
-EXPOSE 4002
+EXPOSE 4003
 
 CMD ["/bin/sh", "-c", "npm run start:prod NODE_OPTIONS=--max-old-space-size=4096"]

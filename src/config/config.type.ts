@@ -17,6 +17,12 @@ export interface ConfigType {
   };
   settings: {
     application: {
+      storage: {
+        local_storage_path: string;
+        mapped_storage_path: string;
+      };
+      address: string;
+      port: number;
       auth_queue: string;
       response_timeout: number;
     };
