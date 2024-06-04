@@ -51,6 +51,8 @@ export class FileController {
       Expires: new Date(Date.now() + 15552000 * 1000).toUTCString(),
     });
 
+    this.logger.verbose?.(`Serving document ${id}`);
+
     return documentData.file;
   }
 }
