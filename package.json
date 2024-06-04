@@ -1,6 +1,6 @@
 {
   "name": "file-service",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A file serving microservice for the Alkemio platform",
   "main": "main.ts",
   "scripts": {
