@@ -31,9 +31,7 @@ settings:
   application:
     storage:
       # Absolute path to the local storage of the files
-      local_storage_path: ${DEV_LOCAL_STORAGE_PATH}:../server/.storage
-      # Absolute path to the mapped volume, storing the files
-      mapped_storage_path: ${LOCAL_STORAGE_PATH}:/storage
+      storage_path: ${LOCAL_STORAGE_PATH}:../server/.storage
     # Address
     address: ${ADDRESS}:0.0.0.0
     # The port on which the service is running
