@@ -20,6 +20,6 @@ The request consists of a form of identification of the user (cookie/authorizati
 ## Configuration
 The current implementation reads the file from the file system.
 This requires when ran locally to configure where your local storage folder is located.
-By default, it's configured at '../server/.storage' via `DEV_LOCAL_STORAGE_PATH`.
+By default, it's configured at '../server/.storage' via `LOCAL_STORAGE_PATH`.
 When running on the cloud you need to mount your storage volume to be accessible by the service
 and configure the path via `LOCAL_STORAGE_PATH` env variable shared by both server and file service.
