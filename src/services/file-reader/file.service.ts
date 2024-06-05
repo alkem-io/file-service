@@ -5,11 +5,20 @@ import { Readable } from 'stream';
 import { ConfigService } from '@nestjs/config';
 import { ConfigType } from '../../config';
 import { pathResolve } from '../../core/utils/files';
-import { Inject, Injectable, LoggerService, StreamableFile } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  LoggerService,
+  StreamableFile,
+} from '@nestjs/common';
 import { FileAdapterService } from './file.adapter.service';
 import { FileInfoInputData } from './inputs';
 import { FileInfoOutputData, isFileInfoOutputWithErrorData } from './outputs';
-import { FileInfoException, FileReadException, LocalStorageReadFailedException } from './exceptions';
+import {
+  FileInfoException,
+  FileReadException,
+  LocalStorageReadFailedException,
+} from './exceptions';
 import { DocumentData } from './types';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 
@@ -38,14 +47,12 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
-      apiToken?: string;
     },
   ): Promise<FileInfoOutputData> {
-    const cookie = auth.cookie;
-    const apiToken = auth?.apiToken ?? auth?.authorization?.split(' ')?.[1];
+    const { cookie, authorization } = auth;
 
     return this.adapter.fileInfo(
-      new FileInfoInputData(docId, { cookie, apiToken }),
+      new FileInfoInputData(docId, { cookie, authorization }),
     );
   }
 
@@ -62,7 +69,6 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
-      apiToken?: string;
     },
   ): Promise<DocumentData | never> {
     const { data } = await this.fileInfo(docId, auth);
