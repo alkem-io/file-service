@@ -2,10 +2,10 @@ import { WinstonModule } from 'nest-winston';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { WinstonConfigService } from './config';
-import { HealthController } from './health.controller';
 import configuration from './config/configuration';
 import { FileModule } from './services/file-reader';
 import { BaseExceptionFilterProvider } from './core/filters';
+import { HealthModule } from './services/health';
 
 @Module({
   imports: [
@@ -18,8 +18,8 @@ import { BaseExceptionFilterProvider } from './core/filters';
       useClass: WinstonConfigService,
     }),
     FileModule,
+    HealthModule,
   ],
-  controllers: [HealthController],
   providers: [BaseExceptionFilterProvider],
 })
 export class AppModule {}

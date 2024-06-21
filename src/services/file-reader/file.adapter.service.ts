@@ -3,7 +3,6 @@ import { firstValueFrom, map, timeInterval, timeout } from 'rxjs';
 import { Inject, Injectable, LoggerService } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
-  ClientProxy,
   ClientProxyFactory,
   RmqOptions,
   Transport,
@@ -11,11 +10,13 @@ import {
 import { ConfigType } from 'src/config';
 import { FileMessagePatternEnum } from './file.message.pattern.enum';
 import { FileInfoInputData } from './inputs';
-import { FileInfoOutputData } from './outputs';
+import { FileInfoOutputData, HealthCheckOutputData } from './outputs';
+import { ClientRMQ } from '@nestjs/microservices/client/client-rmq';
+import { RMQConnectionError } from './types';
 
 @Injectable()
 export class FileAdapterService {
-  private readonly client: ClientProxy | undefined;
+  private readonly client: ClientRMQ | undefined;
   private readonly timeoutMs: number;
 
   constructor(
@@ -49,12 +50,27 @@ export class FileAdapterService {
           'Client proxy successfully connected to RabbitMQ',
         );
       })
-      .catch(this.logger.error);
+      .catch(({ err }: RMQConnectionError) =>
+        this.logger.error(err, err.stack),
+      );
 
     this.timeoutMs = this.configService.get(
       'settings.application.response_timeout',
       { infer: true },
     );
+  }
+
+  /**
+   * Is there a healthy connection to the queue
+   */
+  public async isConnected(): Promise<boolean> {
+    return this.sendWithResponse<HealthCheckOutputData, string>(
+      FileMessagePatternEnum.HEALTH_CHECK,
+      'healthy?',
+      { timeoutMs: 3000 },
+    )
+      .then((resp) => resp.healthy)
+      .catch(() => false);
   }
 
   /**
@@ -79,15 +95,19 @@ export class FileAdapterService {
    * Each consumer needs to manually handle failures, returning the proper type.
    * @param pattern
    * @param data
+   * @param options
    * @throws Error
    */
   private sendWithResponse = async <TResult, TInput>(
     pattern: FileMessagePatternEnum,
     data: TInput,
+    options?: { timeoutMs?: number },
   ): Promise<TResult | never> => {
     if (!this.client) {
       throw new Error(`Connection was not established. Send failed.`);
     }
+
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
 
     const result$ = this.client.send<TResult, TInput>(pattern, data).pipe(
       timeInterval(),
@@ -100,17 +120,17 @@ export class FileAdapterService {
         });
         return x.value;
       }),
-      timeout({ each: this.timeoutMs }),
+      timeout({ each: timeoutMs }),
     );
 
-    return firstValueFrom(result$).catch((err) => {
+    return firstValueFrom(result$).catch(({ err }: RMQConnectionError) => {
       this.logger.error(
-        err?.message ?? err,
-        err?.stack,
+        err.message,
+        err.stack,
         JSON.stringify({
           pattern,
           data,
-          timeout: this.timeoutMs,
+          timeout: timeoutMs,
         }),
       );
 
@@ -129,7 +149,7 @@ const authQueueClientProxyFactory = (
     queue: string;
   },
   logger: LoggerService,
-): ClientProxy | undefined => {
+): ClientRMQ | undefined => {
   const { host, port, user, password, heartbeat: _heartbeat, queue } = config;
   const heartbeat =
     process.env.NODE_ENV === 'production' ? _heartbeat : _heartbeat * 3;
@@ -153,7 +173,7 @@ const authQueueClientProxyFactory = (
         noAck: true,
       },
     };
-    return ClientProxyFactory.create(options);
+    return ClientProxyFactory.create(options) as ClientRMQ;
   } catch (err) {
     logger.error(`Could not connect to RabbitMQ: ${err}`);
     return undefined;

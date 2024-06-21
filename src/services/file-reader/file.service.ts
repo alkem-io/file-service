@@ -42,6 +42,10 @@ export class FileService {
     this.logger.verbose?.(`Serving files from ${this.storagePath}`);
   }
 
+  public isConnected(): Promise<boolean> {
+    return this.adapter.isConnected();
+  }
+
   public async fileInfo(
     docId: string,
     auth: {
