@@ -45,6 +45,9 @@ spec:
                 name: alkemio-secrets
             - configMapRef:
                 name: alkemio-config
+          volumeMounts:
+            - name: file-storage
+              mountPath: /storage
       volumes:
         - name: file-storage
           persistentVolumeClaim:
