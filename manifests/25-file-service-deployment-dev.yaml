@@ -45,3 +45,7 @@ spec:
                 name: alkemio-secrets
             - configMapRef:
                 name: alkemio-config
+      volumes:
+        - name: file-storage
+          persistentVolumeClaim:
+            claimName: file-storage-pvc
