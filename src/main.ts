@@ -4,9 +4,10 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
+import { ConfigService } from '@nestjs/config';
 import helmet from '@fastify/helmet';
 import fastifyCookie from '@fastify/cookie';
-import { ConfigService } from '@nestjs/config';
+import cors from '@fastify/cors';
 import { AppModule } from './app.module';
 import { ConfigType } from './config';
 
@@ -29,18 +30,9 @@ const isProd = process.env.NODE_ENV === 'production';
   const logger = app.get(WINSTON_MODULE_NEST_PROVIDER);
   app.useLogger(logger);
 
-  app.enableCors({
-    origin: '*',
-    allowedHeaders: [
-      'Origin,X-Requested-With',
-      'Content-Type,Accept',
-      'Authorization',
-    ],
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
-  });
-
   await app.register(fastifyCookie);
   await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(cors, { origin: false });
 
   const configService: ConfigService<ConfigType, true> = app.get(ConfigService);
   const port = configService.get('settings.application.port', { infer: true });
