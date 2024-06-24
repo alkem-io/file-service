@@ -12,8 +12,9 @@ import {
   Res,
   StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
-import { FastifyReply } from 'fastify';
+// import { FastifyReply } from 'fastify';
 import { FileService } from './file.service';
 import { DocumentData, FileInfoErrorCode } from './types';
 import { FileInfoException } from './exceptions';
@@ -30,7 +31,8 @@ export class FileController {
     @Param('id') id: string,
     @Headers('authorization') authorization: string | undefined,
     @Headers('cookie') cookie: string | undefined,
-    @Res({ passthrough: true }) res: FastifyReply,
+    // @Res({ passthrough: true }) res: FastifyReply,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
     let documentData: DocumentData | undefined;
 
@@ -44,12 +46,21 @@ export class FileController {
       throw handleReadErrorByCode(e);
     }
 
-    res.headers({
-      'Content-Type': `${documentData.mimeType}`,
-      'Cache-Control': 'public, max-age=15552000',
-      Pragma: 'public',
-      Expires: new Date(Date.now() + 15552000 * 1000).toUTCString(),
-    });
+    // res.headers({
+    //   'Content-Type': `${documentData.mimeType}`,
+    //   'Cache-Control': 'public, max-age=15552000',
+    //   Pragma: 'public',
+    //   Expires: new Date(Date.now() + 15552000 * 1000).toUTCString(),
+    // });
+    res.setHeader('Content-Type', `${documentData.mimeType}`);
+
+    // Set caching headers
+    res.setHeader('Cache-Control', 'public, max-age=15552000');
+    res.setHeader('Pragma', 'public');
+    res.setHeader(
+      'Expires',
+      new Date(Date.now() + 15552000 * 1000).toUTCString(),
+    );
 
     this.logger.verbose?.(`Serving document ${id}`);
 
