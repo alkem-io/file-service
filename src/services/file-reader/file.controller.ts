@@ -12,18 +12,27 @@ import {
   Res,
   StreamableFile,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { FastifyReply } from 'fastify';
 import { FileService } from './file.service';
 import { DocumentData, FileInfoErrorCode } from './types';
 import { FileInfoException } from './exceptions';
+import { ConfigType } from '../../config';
 
 @Controller('/rest/storage')
 export class FileController {
+  private readonly documentMaxAge: number;
   constructor(
     private readonly fileService: FileService,
+    private readonly configService: ConfigService<ConfigType, true>,
     @Inject(WINSTON_MODULE_NEST_PROVIDER) private logger: LoggerService,
-  ) {}
+  ) {
+    this.documentMaxAge = this.configService.get(
+      'settings.application.document_max_age',
+      { infer: true },
+    );
+  }
 
   @Get('document/:id')
   public async file(
@@ -46,11 +55,11 @@ export class FileController {
 
     res.headers({
       'Content-Type': `${documentData.mimeType}`,
-      'Cache-Control': 'public, max-age=15552000',
+      'Cache-Control': `public, max-age=${this.documentMaxAge}`,
       Pragma: 'public',
-      Expires: new Date(Date.now() + 15552000 * 1000).toUTCString(),
+      Expires: new Date(Date.now() + this.documentMaxAge * 1000).toUTCString(),
+      etag: id,
     });
-
     this.logger.verbose?.(`Serving document ${id}`);
 
     return documentData.file;
