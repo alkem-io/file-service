@@ -40,3 +40,6 @@ settings:
     auth_queue: ${AUTH_QUEUE}:alkemio-files
     # MILLISECONDS wait time for a response after a request on the message queue
     response_timeout: ${QUEUE_RESPONSE_TIMEOUT}:10000
+    # TTL in seconds, how much time a document should be cached for
+    # The service tell browser clients to cache the resource via the 'Cache-Control' and 'Etag' headers
+    document_max_age: ${DOCUMENT_MAX_AGE}:86400
