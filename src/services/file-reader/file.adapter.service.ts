@@ -37,12 +37,17 @@ export class FileAdapterService {
       },
       this.logger,
     );
+    this.timeoutMs = this.configService.get(
+      'settings.application.response_timeout',
+      { infer: true },
+    );
+  }
 
+  public async startConnection(): Promise<void> {
     if (!this.client) {
       this.logger.error(`${FileAdapterService.name} not initialized`);
       return;
     }
-
     this.client
       .connect()
       .then(() => {
@@ -53,11 +58,6 @@ export class FileAdapterService {
       .catch(({ err }: RMQConnectionError) =>
         this.logger.error(err, err.stack),
       );
-
-    this.timeoutMs = this.configService.get(
-      'settings.application.response_timeout',
-      { infer: true },
-    );
   }
 
   /**

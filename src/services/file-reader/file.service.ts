@@ -40,6 +40,7 @@ export class FileService {
     );
     this.storagePath = pathResolve(storage_path);
     this.logger.verbose?.(`Serving files from ${this.storagePath}`);
+    this.adapter.startConnection();
   }
 
   public isConnected(): Promise<boolean> {
