@@ -1,9 +1,10 @@
 ---
 name: User Story
 about: A valuable increment of functionality, testable by the users
-title: ""
-labels: "user story, file service, Atlas Team"
-assignees: ""
+title: ''
+labels: Atlas Team, user story
+assignees: ''
+
 ---
 
 ## Description
