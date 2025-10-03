@@ -1,9 +1,11 @@
 ---
 name: Epic
-about: A theme of work that contain sub-tasks required to complete the larger goal / larger user-story
-title: ""
-labels: "epic, file service, Atlas Team"
-assignees: ""
+about: A theme of work that contain sub-tasks required to complete the larger goal
+  / larger user-story
+title: ''
+labels: Atlas Team
+assignees: ''
+
 ---
 
 ## Description

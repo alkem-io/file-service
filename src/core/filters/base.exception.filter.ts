@@ -3,9 +3,7 @@ import {
   Catch,
   ClassProvider,
   ExceptionFilter,
-  HttpException,
   HttpStatus,
-  Inject,
 } from '@nestjs/common';
 import { APP_FILTER, HttpAdapterHost } from '@nestjs/core';
 import { BaseException } from '../exceptions';
