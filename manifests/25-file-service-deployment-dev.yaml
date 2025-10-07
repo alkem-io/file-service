@@ -45,3 +45,13 @@ spec:
                 name: alkemio-secrets
             - configMapRef:
                 name: alkemio-config
+          volumeMounts:
+            - name: file-storage
+              mountPath: /storage
+              readOnly: true
+      volumes:
+        - name: file-storage
+          persistentVolumeClaim:
+            claimName: file-storage-pvc2
+            readOnly: true
+
