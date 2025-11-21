@@ -39,6 +39,7 @@ export class FileController {
     @Param('id') id: string,
     @Headers('authorization') authorization: string | undefined,
     @Headers('cookie') cookie: string | undefined,
+    @Headers('x-guest-name') guestName: string | undefined,
     @Res({ passthrough: true }) res: FastifyReply,
   ): Promise<StreamableFile> {
     let documentData: DocumentData | undefined;
@@ -47,6 +48,7 @@ export class FileController {
       documentData = await this.fileService.readDocument(id, {
         cookie,
         authorization,
+        guestName,
       });
     } catch (e) {
       this.logger.error(e, e?.stack);
