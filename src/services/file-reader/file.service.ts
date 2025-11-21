@@ -51,12 +51,13 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
+      guestName?: string
     },
   ): Promise<FileInfoOutputData> {
-    const { cookie, authorization } = auth;
+    const { cookie, authorization, guestName } = auth;
 
     return this.adapter.fileInfo(
-      new FileInfoInputData(docId, { cookie, authorization }),
+      new FileInfoInputData(docId, { cookie, authorization, guestName }),
     );
   }
 
@@ -73,6 +74,7 @@ export class FileService {
     auth: {
       cookie?: string;
       authorization?: string;
+      guestName?: string
     },
   ): Promise<DocumentData | never> {
     const { data } = await this.fileInfo(docId, auth);
