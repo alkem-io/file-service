@@ -9,7 +9,7 @@ jobs:
       - run: |
           echo "🔥 Starting finite stress test."
       
-          DURATION=90      # how long to run in seconds
+          DURATION=180      # how long to run in seconds
           RAM_MB=600       # how many MB of RAM to allocate
       
           echo "CPU stress for $DURATION seconds on $(nproc) cores"
