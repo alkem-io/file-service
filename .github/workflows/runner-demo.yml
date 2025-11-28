@@ -3,8 +3,46 @@ on:
   workflow_dispatch:
 
 jobs:
-  Explore-GitHub-Actions:
+  Finite-CPU-RAM-Stress-Test:
     runs-on: arc-runner-set
     steps:
-      - run: echo "🎉 This job uses runner scale set runners!"
-      - run: sleep 60
+      - run: |
+          echo "🔥 Starting finite stress test."
+      
+          DURATION=20      # how long to run in seconds
+          RAM_MB=256       # how many MB of RAM to allocate
+      
+          echo "CPU stress for $DURATION seconds on $(nproc) cores"
+          echo "RAM allocation: ${RAM_MB} MB"
+      
+          # ---- CPU Load (finite) ----
+          for i in $(seq 1 $(nproc)); do
+            (
+              end=$((SECONDS + DURATION))
+              while [ $SECONDS -lt $end ]; do
+                sha256sum <<< "$RANDOM$RANDOM" > /dev/null
+              done
+            ) &
+          done
+      
+          # ---- RAM Load (finite) ----
+          python3 - << EOF
+          import time
+          
+          MB = 1024 * 1024
+          blocks = []
+          ram_mb = $RAM_MB
+          duration = $DURATION
+          
+          print(f"Allocating {ram_mb} MB RAM")
+          for i in range(ram_mb):
+              blocks.append(bytearray(MB))
+              if (i+1) % 50 == 0:
+                  print(f"Allocated {i+1} MB")
+                  
+          print(f"Holding memory for {duration} seconds...")
+          time.sleep(duration)
+          EOF
+  
+          wait
+          echo "✅ Stress test completed."
