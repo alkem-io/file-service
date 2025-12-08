@@ -1,32 +1,46 @@
-FROM node:22.20.0-alpine
+# Stage 1: Build the application
+FROM node:22-bookworm AS build
 
-# Create app directory
 WORKDIR /usr/src/app
 
-# Define graphql server port
-ARG ENV_ARG=production
-
-# Install app dependencies
-# A wildcard is used to ensure both package.json AND package-lock.json are copied
-# where available (npm@5+)
+# Copy package files first to leverage Docker cache
 COPY package*.json ./
 
-RUN npm i -g npm@10.9.3
-RUN npm install
+# Install all dependencies (including devDependencies) for building
+RUN npm ci
 
-# If you are building your code for production
-# RUN npm ci --only=production
+# Copy the rest of the application source code
+COPY . .
 
-# Bundle app source & config files for TypeORM & TypeScript
-COPY ./src ./src
-COPY ./tsconfig.json .
-COPY ./tsconfig.build.json .
-COPY ./config.yml .
-
+# Build the application
 RUN npm run build
 
-ENV NODE_ENV=${ENV_ARG}
+# Remove devDependencies to reduce image size
+RUN npm prune --production
 
+# Stage 2: Create the production image
+# Use distroless image for smaller size and better security
+FROM gcr.io/distroless/nodejs22-debian12
+
+WORKDIR /usr/src/app
+
+# Copy built application from the build stage
+COPY --from=build --chown=nonroot:nonroot /usr/src/app/dist ./dist
+COPY --from=build --chown=nonroot:nonroot /usr/src/app/node_modules ./node_modules
+
+# Copy necessary configuration files
+COPY --from=build --chown=nonroot:nonroot /usr/src/app/config.yml ./config.yml
+
+# Set environment variables
+ARG ENV_ARG=production
+ENV NODE_ENV=${ENV_ARG}
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+
+# Explicitly define the user (good practice)
+USER nonroot
+
+# Expose the application port
 EXPOSE 4003
 
-CMD ["/bin/sh", "-c", "npm run start:prod NODE_OPTIONS=--max-old-space-size=4096"]
+# Start the application
+CMD ["dist/main.js"]
