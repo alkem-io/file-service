@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: alkemio-file-service
-          image: alkemio.azurecr.io/alkemio-file-service:latest
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-web:latest
           env:
             - name: RABBITMQ_HOST
               valueFrom:
