@@ -1,32 +1,55 @@
-FROM node:22.20.0-alpine
+# ======================
+# Builder stage (dev deps)
+# ======================
+FROM node:22.20.0-bookworm AS builder
 
-# Create app directory
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Define graphql server port
-ARG ENV_ARG=production
-
-# Install app dependencies
-# A wildcard is used to ensure both package.json AND package-lock.json are copied
-# where available (npm@5+)
+# Dependency manifests
 COPY package*.json ./
 
-RUN npm i -g npm@10.9.3
-RUN npm install
+# Deterministic install (includes dev deps)
+RUN npm ci
 
-# If you are building your code for production
-# RUN npm ci --only=production
+# Build inputs
+COPY tsconfig*.json ./
+COPY src ./src
+COPY config.yml .
 
-# Bundle app source & config files for TypeORM & TypeScript
-COPY ./src ./src
-COPY ./tsconfig.json .
-COPY ./tsconfig.build.json .
-COPY ./config.yml .
-
+# Build TypeScript → dist
 RUN npm run build
 
-ENV NODE_ENV=${ENV_ARG}
 
+# ======================
+# Prod deps stage (NO dev deps)
+# ======================
+FROM node:22.20.0-bookworm AS prod-deps
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm ci --omit=dev \
+ && npm cache clean --force
+
+
+# ======================
+# Runtime stage (distroless)
+# ======================
+FROM gcr.io/distroless/nodejs22-debian12
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Copy only what is required at runtime
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=builder  /app/dist ./dist
+COPY --from=builder  /app/config.yml ./config.yml
+COPY --from=builder  /app/package.json ./package.json
+
+# Distroless runs as non-root by default
 EXPOSE 4003
 
-CMD ["/bin/sh", "-c", "npm run start:prod NODE_OPTIONS=--max-old-space-size=4096"]
+# No shell, no npm, direct execution
+CMD ["dist/main.js"]
