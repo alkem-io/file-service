@@ -35,9 +35,6 @@ COPY --from=build --chown=65532:65532 /usr/src/app/config.yml ./config.yml
 ARG ENV_ARG=production
 ENV NODE_ENV=${ENV_ARG}
 
-# Explicitly define the user (good practice)
-USER nonroot
-
 # Expose the application port
 EXPOSE 4003
 
