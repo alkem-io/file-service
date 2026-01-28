@@ -1,55 +1,45 @@
-# ======================
-# Builder stage (dev deps)
-# ======================
-FROM node:22.20.0-bookworm AS builder
+# Stage 1: Build the application
+FROM node:22-bookworm AS build
 
-WORKDIR /app
+WORKDIR /usr/src/app
 
-# Dependency manifests
+# Copy package files first to leverage Docker cache
 COPY package*.json ./
 
-# Deterministic install (includes dev deps)
+# Install all dependencies (including devDependencies) for building
 RUN npm ci
 
-# Build inputs
-COPY tsconfig*.json ./
-COPY src ./src
-COPY config.yml .
+# Copy the rest of the application source code
+COPY . .
 
-# Build TypeScript → dist
+# Build the application
 RUN npm run build
 
+# Remove devDependencies to reduce image size
+RUN npm prune --production
 
-# ======================
-# Prod deps stage (NO dev deps)
-# ======================
-FROM node:22.20.0-bookworm AS prod-deps
+# Stage 2: Create the production image
+# Use distroless image for smaller size and better security
+FROM gcr.io/distroless/nodejs22-debian12:nonroot
 
-WORKDIR /app
+WORKDIR /usr/src/app
 
-COPY package*.json ./
+# Copy built application from the build stage
+COPY --from=build --chown=65532:65532 /usr/src/app/dist ./dist
+COPY --from=build --chown=65532:65532 /usr/src/app/node_modules ./node_modules
 
-RUN npm ci --omit=dev \
- && npm cache clean --force
+# Copy necessary configuration files
+COPY --from=build --chown=65532:65532 /usr/src/app/config.yml ./config.yml
 
+# Set environment variables
+ARG ENV_ARG=production
+ENV NODE_ENV=${ENV_ARG}
 
-# ======================
-# Runtime stage (distroless)
-# ======================
-FROM gcr.io/distroless/nodejs22-debian12
+# Explicitly define the user (good practice)
+USER nonroot
 
-WORKDIR /app
-
-ENV NODE_ENV=production
-
-# Copy only what is required at runtime
-COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=builder  /app/dist ./dist
-COPY --from=builder  /app/config.yml ./config.yml
-COPY --from=builder  /app/package.json ./package.json
-
-# Distroless runs as non-root by default
+# Expose the application port
 EXPOSE 4003
 
-# No shell, no npm, direct execution
+# Start the application
 CMD ["dist/main.js"]

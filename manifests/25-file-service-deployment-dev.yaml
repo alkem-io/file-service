@@ -16,6 +16,9 @@ spec:
       labels:
         app: alkemio-file-service
     spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
       containers:
         - name: alkemio-file-service
           image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:latest
