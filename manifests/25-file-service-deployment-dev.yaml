@@ -16,9 +16,12 @@ spec:
       labels:
         app: alkemio-file-service
     spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
       containers:
         - name: alkemio-file-service
-          image: alkemio.azurecr.io/alkemio-file-service:latest
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:latest
           env:
             - name: RABBITMQ_HOST
               valueFrom:

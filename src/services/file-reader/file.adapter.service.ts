@@ -50,9 +50,10 @@ export class FileAdapterService {
           'Client proxy successfully connected to RabbitMQ',
         );
       })
-      .catch(({ err }: RMQConnectionError) =>
-        this.logger.error(err, err.stack),
-      );
+      .catch((error: unknown) => {
+        const err = (error as RMQConnectionError)?.err || (error as Error);
+        this.logger.error(err?.message || String(error), err?.stack);
+      });
 
     this.timeoutMs = this.configService.get(
       'settings.application.response_timeout',
@@ -123,10 +124,11 @@ export class FileAdapterService {
       timeout({ each: timeoutMs }),
     );
 
-    return firstValueFrom(result$).catch(({ err }: RMQConnectionError) => {
+    return firstValueFrom(result$).catch((error: unknown) => {
+      const err = (error as RMQConnectionError)?.err || (error as Error);
       this.logger.error(
-        err.message,
-        err.stack,
+        err?.message || String(error),
+        err?.stack,
         JSON.stringify({
           pattern,
           data,
