@@ -278,7 +278,7 @@ func TestConnString(t *testing.T) {
 		Name:     "mydb",
 	}
 	got := db.ConnString()
-	want := "postgres://user:pass@myhost:5432/mydb?sslmode=disable"
+	want := "postgres://user:pass@myhost:5432/mydb?sslmode=disable" //nolint:gosec // test expected value
 	if got != want {
 		t.Errorf("ConnString() = %q, want %q", got, want)
 	}
