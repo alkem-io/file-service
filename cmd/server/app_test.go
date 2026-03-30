@@ -15,12 +15,11 @@ import (
 )
 
 func TestConnectDatabase_Success(t *testing.T) {
-	dsn := "postgres://synapse:synapse@localhost:5432/alkemio?sslmode=disable"
 	cfg := config.DatabaseConfig{
 		Host:     "localhost",
 		Port:     5432,
 		Username: "synapse",
-		Password: "synapse",
+		Password: "synapse", //nolint:gosec // test credentials
 		Name:     "alkemio",
 	}
 
@@ -30,7 +29,6 @@ func TestConnectDatabase_Success(t *testing.T) {
 	}
 	defer pool.Close()
 
-	_ = dsn
 	if pool == nil {
 		t.Fatal("nil pool")
 	}

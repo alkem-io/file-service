@@ -73,7 +73,8 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 // Create handles POST /internal/document
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB max
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
