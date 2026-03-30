@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alkemio-file-service-deployment
+  labels:
+    app: alkemio-file-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alkemio-file-service
+  template:
+    metadata:
+      labels:
+        app: alkemio-file-service
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+      containers:
+        - name: alkemio-file-service
+          image: alkemio/file-service-go:latest
+          ports:
+            - containerPort: 4003
+          env:
+            - name: PORT
+              value: "4003"
+            - name: LOCAL_STORAGE_PATH
+              value: "/storage"
+            - name: STORAGE_TYPE
+              value: "local"
+            - name: DOCUMENT_MAX_AGE
+              value: "86400"
+          envFrom:
+            - configMapRef:
+                name: alkemio-config
+            - secretRef:
+                name: alkemio-secrets
+          volumeMounts:
+            - name: file-storage
+              mountPath: /storage
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4003
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: file-storage
+          persistentVolumeClaim:
+            claimName: file-storage-pvc2

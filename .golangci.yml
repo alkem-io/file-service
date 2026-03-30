@@ -1,0 +1,61 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - errorlint         # Catches direct error comparisons that fail on wrapped errors
+    - govet
+    - ineffassign
+    - staticcheck      # Includes stylecheck rules for error strings
+    - unused
+    - bodyclose
+    - gocyclo
+    - misspell
+    - unconvert
+    - unparam
+    - revive
+    - gocritic
+    - gosec
+    - prealloc
+    - whitespace
+  settings:
+    gocyclo:
+      min-complexity: 20
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"     # Don't require package comments (constitution: no obvious comments)
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: package-comments
+          disabled: true              # Don't require package comments
+        - name: exported
+          disabled: true              # Don't require comments on every export
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: defer
+        - name: constant-logical-expr
+        - name: bool-literal-in-expr
+        - name: atomic
+        - name: error-strings    # Error strings should not be capitalized or end with punctuation
+  exclusions:
+    presets: []  # No default exclusions - we want all linter warnings
+
+formatters:
+  enable:
+    - gofmt
+    - goimports       # Checks import sorting
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/alkem-io/file-service-go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

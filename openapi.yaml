@@ -1,0 +1,303 @@
+openapi: 3.1.1
+info:
+  title: Alkemio File Service
+  description: |
+    Universal file I/O gateway and document lifecycle manager for the Alkemio platform.
+    Provides authenticated file serving (public), document CRUD, image processing,
+    and MIME validation (internal).
+  version: 1.0.0
+  contact:
+    name: Alkemio Foundation
+    url: https://alkem.io
+    email: info@alkem.io
+  license:
+    name: EUPL-1.2
+    url: https://opensource.org/licenses/EUPL-1.2
+paths:
+  /internal/document:
+    post:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.Create
+      parameters:
+        - name: displayName
+          in: form
+          schema:
+            type: string
+        - name: storageBucketId
+          in: form
+          schema:
+            type: string
+        - name: authorizationId
+          in: form
+          schema:
+            type: string
+        - name: tagsetId
+          in: form
+          schema:
+            type: string
+        - name: createdBy
+          in: form
+          schema:
+            type: string
+        - name: temporaryLocation
+          in: form
+          schema:
+            type: string
+        - name: allowedMimeTypes
+          in: form
+          schema:
+            type: string
+        - name: maxFileSize
+          in: form
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.CreateDocumentResponse'
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+  /internal/document/{id}:
+    delete:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.Delete
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DeleteDocumentResponse'
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+    patch:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.Update
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.UpdateDocumentRequest'
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.UpdateDocumentResponse'
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+  /internal/document/{id}/content:
+    get:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.GetContent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+    put:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.ReplaceContent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.ReplaceContentResponse'
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+  /internal/document/{id}/meta:
+    get:
+      tags:
+        - /internal
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.GetMeta
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DocumentMetaResponse'
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+  /rest/storage/document/{id}:
+    get:
+      tags:
+        - /rest/storage
+      operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.PublicHandler.ServeDocument
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+        default:
+          description: Status code could not be determined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse'
+components:
+  schemas:
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.CreateDocumentResponse:
+      type: object
+      properties:
+        externalID:
+          type: string
+        id:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DeleteDocumentResponse:
+      type: object
+      properties:
+        authorizationId:
+          type: string
+        tagsetId:
+          type: string
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DocumentMetaResponse:
+      type: object
+      properties:
+        authorizationId:
+          type: string
+        createdBy:
+          type: string
+        createdDate:
+          type: string
+          format: date-time
+        displayName:
+          type: string
+        externalID:
+          type: string
+        id:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+        storageBucketId:
+          type: string
+        tagsetId:
+          type: string
+        temporaryLocation:
+          type: boolean
+        updatedDate:
+          type: string
+          format: date-time
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.ReplaceContentResponse:
+      type: object
+      properties:
+        externalID:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.UpdateDocumentRequest:
+      type: object
+      properties:
+        storageBucketId:
+          type: string
+        temporaryLocation:
+          type: boolean
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.UpdateDocumentResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        storageBucketId:
+          type: string
+        temporaryLocation:
+          type: boolean
+    github.com_alkem-io_file-service-go_internal_adapter_inbound_http.errorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string

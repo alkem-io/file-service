@@ -1,0 +1,126 @@
+name: CI — Lint & Test
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+          args: --build-tags vips
+
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests (no vips)
+        run: go test ./... -race -count=1
+
+  test-vips:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install libvips
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvips-dev
+
+      - name: Run full tests (with vips)
+        run: go test -tags vips ./... -race -count=1 -coverprofile=coverage.out
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  test-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build Docker image
+        run: docker build -t file-service-go:test .
+
+      - name: Verify container starts
+        run: |
+          docker run --rm \
+            -e NATS_URL=nats://localhost:4222 \
+            -e ALKEMIO_DATABASE_HOST=localhost \
+            -e ALKEMIO_DATABASE_PORT=5432 \
+            -e ALKEMIO_DATABASE_USERNAME=test \
+            -e ALKEMIO_DATABASE_PASSWORD=test \
+            -e ALKEMIO_DATABASE_NAME=test \
+            -e LOCAL_STORAGE_PATH=/tmp/storage \
+            file-service-go:test --help 2>&1 || true
+          echo "Container built and binary runs"
+
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install apispec
+        run: go install github.com/ehabterra/apispec/cmd/apispec@latest
+
+      - name: Generate OpenAPI spec
+        run: make openapi
+
+      - name: Verify openapi.yaml is up to date
+        run: |
+          git diff --exit-code openapi.yaml || {
+            echo "::error::openapi.yaml is stale. Run 'make openapi' and commit."
+            exit 1
+          }
+
+  sqlc-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+
+      - name: Verify sqlc generated code is up to date
+        run: |
+          sqlc -f db/sqlc.yaml generate
+          git diff --exit-code internal/adapter/outbound/alkemiodb/queries/

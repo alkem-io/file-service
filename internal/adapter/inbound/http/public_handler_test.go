@@ -1,0 +1,205 @@
+package http
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"github.com/alkem-io/file-service-go/internal/domain/model"
+)
+
+type mockDocRepo struct {
+	doc          model.Document
+	err          error
+	createErr    error
+	updateErr    error
+	deleteResult model.DeletedDocument
+	deleteErr    error
+	count        int
+}
+
+func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	return m.doc, m.err
+}
+func (m *mockDocRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, error) {
+	return doc.ID, m.createErr
+}
+func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+	return m.updateErr
+}
+func (m *mockDocRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool) error {
+	return m.updateErr
+}
+func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.deleteResult, m.deleteErr
+}
+func (m *mockDocRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
+	return m.count, nil
+}
+
+type mockAuth struct {
+	result model.AuthResult
+	err    error
+}
+
+func (m *mockAuth) CheckPrivilege(_ context.Context, _, _, _ string) (model.AuthResult, error) {
+	return m.result, m.err
+}
+
+type mockStorage struct {
+	data    []byte
+	err     error
+	saveErr error
+}
+
+func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
+	if m.saveErr != nil {
+		return model.StoredFile{}, m.saveErr
+	}
+	return model.StoredFile{ExternalID: "hash", Size: len(content)}, nil
+}
+func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
+func (m *mockStorage) Delete(_ string) error         { return nil }
+func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
+
+func TestPublicHandler_Authorized(t *testing.T) {
+	docID := uuid.New()
+	h := &PublicHandler{
+		Repo: &mockDocRepo{doc: model.Document{
+			ID:              docID,
+			ExternalID:      "abc123",
+			MimeType:        "application/pdf",
+			AuthorizationID: uuid.New(),
+		}},
+		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+		Storage: &mockStorage{data: []byte("file-content")},
+		MaxAge:  86400,
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Errorf("Content-Type = %q, want application/pdf", ct)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc == "" {
+		t.Error("missing Cache-Control header")
+	}
+	if etag := rr.Header().Get("ETag"); etag != docID.String() {
+		t.Errorf("ETag = %q, want %q", etag, docID.String())
+	}
+	if rr.Body.String() != "file-content" {
+		t.Errorf("body = %q, want %q", rr.Body.String(), "file-content")
+	}
+}
+
+func TestPublicHandler_Unauthorized(t *testing.T) {
+	h := &PublicHandler{
+		Repo: &mockDocRepo{doc: model.Document{
+			ID:              uuid.New(),
+			AuthorizationID: uuid.New(),
+		}},
+		Auth:    &mockAuth{result: model.AuthResult{Allowed: false, Reason: "denied"}},
+		Storage: &mockStorage{},
+		MaxAge:  86400,
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rr.Code)
+	}
+}
+
+func TestPublicHandler_DocumentNotFound(t *testing.T) {
+	h := &PublicHandler{
+		Repo:    &mockDocRepo{err: ErrDocumentNotFound},
+		Auth:    &mockAuth{},
+		Storage: &mockStorage{},
+		MaxAge:  86400,
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestPublicHandler_FileNotFound(t *testing.T) {
+	h := &PublicHandler{
+		Repo: &mockDocRepo{doc: model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "missing",
+			AuthorizationID: uuid.New(),
+		}},
+		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+		Storage: &mockStorage{err: errors.New("file not found")},
+		MaxAge:  86400,
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+func TestPublicHandler_ConditionalRequest304(t *testing.T) {
+	docID := uuid.New()
+	h := &PublicHandler{
+		Repo: &mockDocRepo{doc: model.Document{
+			ID:              docID,
+			ExternalID:      "abc123",
+			MimeType:        "application/pdf",
+			AuthorizationID: uuid.New(),
+		}},
+		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+		Storage: &mockStorage{data: []byte("file-content")},
+		MaxAge:  86400,
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+	req.Header.Set("If-None-Match", docID.String())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", rr.Code)
+	}
+}
