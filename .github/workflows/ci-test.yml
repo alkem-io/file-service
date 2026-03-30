@@ -22,7 +22,6 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: latest
-          args: --build-tags vips
 
   test-unit:
     runs-on: ubuntu-latest
