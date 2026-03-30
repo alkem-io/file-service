@@ -274,7 +274,7 @@ func TestConnString(t *testing.T) {
 		Host:     "myhost",
 		Port:     5432,
 		Username: "user",
-		Password: "pass",
+		Password: "pass", //nolint:gosec // test credentials
 		Name:     "mydb",
 	}
 	got := db.ConnString()

@@ -18,7 +18,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://synapse:synapse@localhost:5432/alkemio?sslmode=disable"
+		dsn = "postgres://synapse:synapse@localhost:5432/alkemio?sslmode=disable" //nolint:gosec // test credentials
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
