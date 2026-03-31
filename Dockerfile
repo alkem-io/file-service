@@ -1,7 +1,5 @@
-# Build Stage
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
-
-ARG TARGETARCH
+# Build Stage — runs on target platform (not cross-compiled)
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /app
 
@@ -11,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Download the wait script (architecture-specific)
+# Download the wait script
+ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
       wget -O /wait https://github.com/ufoscout/docker-compose-wait/releases/download/2.12.1/wait_aarch64; \
     elif [ "$TARGETARCH" = "amd64" ]; then \
@@ -30,9 +29,9 @@ RUN go mod download
 COPY . .
 
 # Build the application (CGO_ENABLED=1 required for libvips)
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -tags vips -o /bin/file-service ./cmd/server/
+RUN CGO_ENABLED=1 go build -tags vips -o /bin/file-service ./cmd/server/
 
-# Runtime Stage
+# Runtime Stage — same platform as builder, no QEMU issues
 FROM debian:bookworm-slim
 
 # Install libvips runtime only (no dev headers, no CA certs — TLS terminates at Traefik)
