@@ -43,18 +43,24 @@ func main() {
 	router := buildRouter(pool, nc, cfg, fileSvc, logger)
 	srv := newHTTPServer(cfg.Port, router)
 
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("server starting", zap.Int("port", cfg.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("server failed", zap.Error(err))
+			errCh <- err
 		}
 	}()
 
-	<-done
-	logger.Info("shutting down")
+	select {
+	case sig := <-sigCh:
+		logger.Info("received signal, shutting down", zap.String("signal", sig.String()))
+	case err := <-errCh:
+		logger.Error("server failed", zap.Error(err))
+	}
+
 	shutdownServer(srv, logger)
 	logger.Info("server stopped")
 }

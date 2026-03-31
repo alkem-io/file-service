@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
@@ -28,7 +27,7 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 	row, err := a.queries.GetDocumentByID(ctx, uuidToPgx(id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Document{}, httpAdapter.ErrDocumentNotFound
+			return model.Document{}, model.ErrDocumentNotFound
 		}
 		return model.Document{}, err
 	}
@@ -68,7 +67,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 		return err
 	}
 	if rows == 0 {
-		return httpAdapter.ErrDocumentNotFound
+		return model.ErrDocumentNotFound
 	}
 	return nil
 }
@@ -84,7 +83,7 @@ func (a *Adapter) UpdateLocation(ctx context.Context, id uuid.UUID, storageBucke
 		return err
 	}
 	if rows == 0 {
-		return httpAdapter.ErrDocumentNotFound
+		return model.ErrDocumentNotFound
 	}
 	return nil
 }
@@ -93,7 +92,7 @@ func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocume
 	row, err := a.queries.DeleteDocument(ctx, uuidToPgx(id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.DeletedDocument{}, httpAdapter.ErrDocumentNotFound
+			return model.DeletedDocument{}, model.ErrDocumentNotFound
 		}
 		return model.DeletedDocument{}, err
 	}

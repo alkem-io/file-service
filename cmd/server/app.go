@@ -56,10 +56,12 @@ func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc 
 			Auth:    fileSvc.Auth,
 			Storage: fileSvc.Storage,
 			MaxAge:  maxAge,
+			Logger:  logger,
 		},
 		DocumentHandler: &httpAdapter.DocumentHandler{
 			Service: fileSvc,
 			MaxAge:  maxAge,
+			Logger:  logger,
 		},
 		HealthHandler: &httpAdapter.HealthHandler{
 			DB:   pool,

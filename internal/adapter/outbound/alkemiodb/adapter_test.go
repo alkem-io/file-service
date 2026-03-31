@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
 
@@ -72,7 +71,7 @@ func TestGetByID_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-existent document")
 	}
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -149,7 +148,7 @@ func TestCreateAndDelete(t *testing.T) {
 
 	// Verify gone
 	_, err = a.GetByID(context.Background(), docID)
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected not found after delete, got %v", err)
 	}
 }
@@ -193,7 +192,7 @@ func TestUpdateFile_NotFound(t *testing.T) {
 	a := New(pool)
 
 	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1)
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -267,7 +266,7 @@ func TestUpdateLocation_NotFound(t *testing.T) {
 	a := New(pool)
 
 	err := a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -278,7 +277,7 @@ func TestDelete_NotFound(t *testing.T) {
 	a := New(pool)
 
 	_, err := a.Delete(context.Background(), uuid.New())
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }

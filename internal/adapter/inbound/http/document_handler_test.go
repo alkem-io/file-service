@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/service"
@@ -27,7 +28,7 @@ func newDocHandler() (*DocumentHandler, *mockDocRepo, *mockStorage) {
 		Storage:   storage,
 		Processor: &stubProcessor{},
 	}
-	return &DocumentHandler{Service: svc, MaxAge: 86400}, repo, storage
+	return &DocumentHandler{Service: svc, MaxAge: 86400, Logger: zap.NewNop()}, repo, storage
 }
 
 type stubProcessor struct{}
@@ -71,7 +72,7 @@ func TestDocumentHandler_GetMeta_Found(t *testing.T) {
 
 func TestDocumentHandler_GetMeta_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = ErrDocumentNotFound
+	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Get("/internal/document/{id}/meta", h.GetMeta)
@@ -111,7 +112,7 @@ func TestDocumentHandler_GetContent_Found(t *testing.T) {
 
 func TestDocumentHandler_GetContent_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = ErrDocumentNotFound
+	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Get("/internal/document/{id}/content", h.GetContent)
@@ -536,7 +537,7 @@ func TestDocumentHandler_Create_UnsupportedMIME(t *testing.T) {
 
 func TestDocumentHandler_Delete_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = ErrDocumentNotFound
+	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Delete("/internal/document/{id}", h.Delete)
@@ -569,7 +570,7 @@ func TestDocumentHandler_Delete_InvalidID(t *testing.T) {
 
 func TestDocumentHandler_Patch_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = ErrDocumentNotFound
+	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Patch("/internal/document/{id}", h.Update)
@@ -726,7 +727,7 @@ func TestDocumentMetaResponse_WithoutNullables(t *testing.T) {
 
 func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = ErrDocumentNotFound
+	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Put("/internal/document/{id}/content", h.ReplaceContent)
@@ -831,6 +832,7 @@ func TestPublicHandler_InvalidUUID(t *testing.T) {
 		Auth:    &mockAuth{},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -852,6 +854,7 @@ func TestPublicHandler_MissingActorID(t *testing.T) {
 		Auth:    &mockAuth{},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -876,6 +879,7 @@ func TestPublicHandler_AuthServiceUnavailable(t *testing.T) {
 		Auth:    &mockAuth{err: errors.New("NATS timeout")},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -897,6 +901,7 @@ func TestPublicHandler_DBInternalError(t *testing.T) {
 		Auth:    &mockAuth{},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()

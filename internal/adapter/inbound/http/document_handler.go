@@ -3,13 +3,14 @@ package http
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/service"
@@ -19,6 +20,7 @@ import (
 type DocumentHandler struct {
 	Service *service.FileService
 	MaxAge  int
+	Logger  *zap.Logger
 }
 
 // GetMeta handles GET /internal/document/{id}/meta
@@ -31,11 +33,12 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to lookup document")
+		h.Logger.Error("failed to lookup document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -52,11 +55,12 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to lookup document")
+		h.Logger.Error("failed to lookup document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -78,6 +82,11 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
@@ -134,12 +143,22 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var allowedMimeTypes []string
 	if v := r.FormValue("allowedMimeTypes"); v != "" {
-		allowedMimeTypes = strings.Split(v, ",")
+		parts := strings.Split(v, ",")
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				allowedMimeTypes = append(allowedMimeTypes, trimmed)
+			}
+		}
 	}
 
 	maxFileSize := 0
 	if v := r.FormValue("maxFileSize"); v != "" {
-		_, _ = fmt.Sscanf(v, "%d", &maxFileSize)
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid maxFileSize")
+			return
+		}
+		maxFileSize = parsed
 	}
 
 	input := model.CreateDocumentInput{
@@ -159,7 +178,8 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, service.ErrUnsupportedMediaType):
 			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
 		default:
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			h.Logger.Error("failed to create document", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
@@ -182,11 +202,12 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := h.Service.DeleteDocument(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		h.Logger.Error("failed to delete document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -223,11 +244,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// Get current doc to fill defaults
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		h.Logger.Error("failed to lookup document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -248,11 +270,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		h.Logger.Error("failed to update document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -279,11 +302,12 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 
 	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		h.Logger.Error("failed to replace content", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

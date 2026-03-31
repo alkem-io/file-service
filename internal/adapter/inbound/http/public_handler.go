@@ -8,11 +8,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
+	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/port"
 )
-
-var ErrDocumentNotFound = errors.New("document not found")
 
 // PublicHandler handles the authenticated public file serving endpoint.
 type PublicHandler struct {
@@ -20,6 +20,7 @@ type PublicHandler struct {
 	Auth    port.AuthPort
 	Storage port.StoragePort
 	MaxAge  int
+	Logger  *zap.Logger
 }
 
 // ServeDocument handles GET /rest/storage/document/{id}
@@ -39,17 +40,12 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, ErrDocumentNotFound) {
+		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to lookup document")
-		return
-	}
-
-	// ETag conditional request — check before auth to save a NATS call
-	if r.Header.Get("If-None-Match") == doc.ID.String() {
-		w.WriteHeader(http.StatusNotModified)
+		h.Logger.Error("failed to lookup document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -61,6 +57,13 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if !result.Allowed {
 		writeJSONError(w, http.StatusForbidden, "insufficient privileges")
+		return
+	}
+
+	// ETag conditional request — checked after authorization
+	etag := `"` + doc.ID.String() + `"`
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
@@ -76,7 +79,7 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", h.MaxAge))
 	w.Header().Set("Pragma", "public")
 	w.Header().Set("Expires", time.Now().Add(time.Duration(h.MaxAge)*time.Second).UTC().Format(http.TimeFormat))
-	w.Header().Set("ETag", doc.ID.String())
+	w.Header().Set("ETag", etag)
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)

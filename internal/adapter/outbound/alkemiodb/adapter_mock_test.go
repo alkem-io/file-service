@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pashagolub/pgxmock/v4"
 
-	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
 
@@ -82,7 +81,7 @@ func TestMock_GetByID_NotFound(t *testing.T) {
 
 	a := New(mock)
 	_, err = a.GetByID(context.Background(), uuid.New())
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -174,7 +173,7 @@ func TestMock_UpdateFile_NotFound(t *testing.T) {
 
 	a := New(mock)
 	err = a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1)
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -220,7 +219,7 @@ func TestMock_Delete_NotFound(t *testing.T) {
 
 	a := New(mock)
 	_, err = a.Delete(context.Background(), uuid.New())
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -277,7 +276,7 @@ func TestMock_UpdateLocation_NotFound(t *testing.T) {
 
 	a := New(mock)
 	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
-	if !errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
 }
@@ -298,7 +297,7 @@ func TestMock_GetByID_DBError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if errors.Is(err, model.ErrDocumentNotFound) {
 		t.Error("should not be ErrDocumentNotFound for connection error")
 	}
 }
@@ -355,7 +354,7 @@ func TestMock_Delete_DBError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if errors.Is(err, httpAdapter.ErrDocumentNotFound) {
+	if errors.Is(err, model.ErrDocumentNotFound) {
 		t.Error("should not be ErrDocumentNotFound for connection error")
 	}
 }

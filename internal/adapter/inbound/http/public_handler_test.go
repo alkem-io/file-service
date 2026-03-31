@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
@@ -79,6 +80,7 @@ func TestPublicHandler_Authorized(t *testing.T) {
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
 		Storage: &mockStorage{data: []byte("file-content")},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -98,8 +100,9 @@ func TestPublicHandler_Authorized(t *testing.T) {
 	if cc := rr.Header().Get("Cache-Control"); cc == "" {
 		t.Error("missing Cache-Control header")
 	}
-	if etag := rr.Header().Get("ETag"); etag != docID.String() {
-		t.Errorf("ETag = %q, want %q", etag, docID.String())
+	wantETag := `"` + docID.String() + `"`
+	if etag := rr.Header().Get("ETag"); etag != wantETag {
+		t.Errorf("ETag = %q, want %q", etag, wantETag)
 	}
 	if rr.Body.String() != "file-content" {
 		t.Errorf("body = %q, want %q", rr.Body.String(), "file-content")
@@ -115,6 +118,7 @@ func TestPublicHandler_Unauthorized(t *testing.T) {
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: false, Reason: "denied"}},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -132,10 +136,11 @@ func TestPublicHandler_Unauthorized(t *testing.T) {
 
 func TestPublicHandler_DocumentNotFound(t *testing.T) {
 	h := &PublicHandler{
-		Repo:    &mockDocRepo{err: ErrDocumentNotFound},
+		Repo:    &mockDocRepo{err: model.ErrDocumentNotFound},
 		Auth:    &mockAuth{},
 		Storage: &mockStorage{},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -161,6 +166,7 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
 		Storage: &mockStorage{err: errors.New("file not found")},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -188,6 +194,7 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
 		Storage: &mockStorage{data: []byte("file-content")},
 		MaxAge:  86400,
+		Logger:  zap.NewNop(),
 	}
 
 	r := chi.NewRouter()
@@ -195,7 +202,7 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
-	req.Header.Set("If-None-Match", docID.String())
+	req.Header.Set("If-None-Match", `"`+docID.String()+`"`)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
