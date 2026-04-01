@@ -86,6 +86,9 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	now := time.Now()
 	docID, err := uuid.NewV7()
 	if err != nil {
+		if stored.Created {
+			_ = s.Storage.Delete(stored.ExternalID)
+		}
 		return nil, fmt.Errorf("generate UUIDv7: %w", err)
 	}
 

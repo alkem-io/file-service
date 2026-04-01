@@ -19,35 +19,11 @@ paths:
       operationId: github.com/alkem-io/file-service-go/internal/adapter/inbound/http.Deps.DocumentHandler.Create
       parameters:
         - in: form
-          name: displayName
-          schema:
-            type: string
-        - in: form
           name: storageBucketId
           schema:
             type: string
         - in: form
           name: authorizationId
-          schema:
-            type: string
-        - in: form
-          name: tagsetId
-          schema:
-            type: string
-        - in: form
-          name: createdBy
-          schema:
-            type: string
-        - in: form
-          name: temporaryLocation
-          schema:
-            type: string
-        - in: form
-          name: allowedMimeTypes
-          schema:
-            type: string
-        - in: form
-          name: maxFileSize
           schema:
             type: string
       responses:

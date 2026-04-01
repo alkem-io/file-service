@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -81,56 +82,39 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// Create handles POST /internal/document
-func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
-	}()
-
+// parseCreateForm extracts and validates all fields from the multipart create request.
+func parseCreateForm(r *http.Request) (content []byte, input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
 	file, _, err := r.FormFile("file")
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "missing file part")
-		return
+		return nil, input, nil, 0, fmt.Errorf("missing file part")
 	}
 	defer func() { _ = file.Close() }()
 
-	content, err := io.ReadAll(file)
+	content, err = io.ReadAll(file)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to read file")
-		return
+		return nil, input, nil, 0, fmt.Errorf("failed to read file")
 	}
 
 	displayName := r.FormValue("displayName")
 	if displayName == "" {
-		writeJSONError(w, http.StatusBadRequest, "displayName is required")
-		return
+		return nil, input, nil, 0, fmt.Errorf("displayName is required")
 	}
 
 	storageBucketID, err := uuid.Parse(r.FormValue("storageBucketId"))
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid storageBucketId")
-		return
+		return nil, input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
 	authorizationID, err := uuid.Parse(r.FormValue("authorizationId"))
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
-		return
+		return nil, input, nil, 0, fmt.Errorf("invalid authorizationId")
 	}
 
 	var tagsetID *uuid.UUID
 	if v := r.FormValue("tagsetId"); v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid tagsetId")
-			return
+			return nil, input, nil, 0, fmt.Errorf("invalid tagsetId")
 		}
 		tagsetID = &parsed
 	}
@@ -139,15 +123,13 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("createdBy"); v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid createdBy")
-			return
+			return nil, input, nil, 0, fmt.Errorf("invalid createdBy")
 		}
 		createdBy = &parsed
 	}
 
 	temporaryLocation := r.FormValue("temporaryLocation") == "true"
 
-	var allowedMimeTypes []string
 	if v := r.FormValue("allowedMimeTypes"); v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
@@ -157,23 +139,48 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	maxFileSize := 0
 	if v := r.FormValue("maxFileSize"); v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid maxFileSize")
-			return
+			return nil, input, nil, 0, fmt.Errorf("invalid maxFileSize")
 		}
 		maxFileSize = parsed
 	}
 
-	input := model.CreateDocumentInput{
+	input = model.CreateDocumentInput{
 		DisplayName:       displayName,
 		CreatedBy:         createdBy,
 		TemporaryLocation: temporaryLocation,
 		StorageBucketID:   storageBucketID,
 		AuthorizationID:   authorizationID,
 		TagsetID:          tagsetID,
+	}
+
+	return content, input, allowedMimeTypes, maxFileSize, nil
+}
+
+// Create handles POST /internal/document
+func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
+	content, input, allowedMimeTypes, maxFileSize, err := parseCreateForm(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	doc, err := h.Service.CreateDocument(r.Context(), input, content, allowedMimeTypes, maxFileSize)
@@ -304,6 +311,11 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
 	content, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}

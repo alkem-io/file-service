@@ -160,10 +160,11 @@ func TestUpdateFile(t *testing.T) {
 
 	// Get a real document to update
 	var id [16]byte
-	var origExtID string
+	var origExtID, origMime string
+	var origSize int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "externalID" FROM document LIMIT 1`,
-	).Scan(&id, &origExtID)
+		`SELECT id, "externalID", "mimeType", size FROM document LIMIT 1`,
+	).Scan(&id, &origExtID, &origMime, &origSize)
 	if err != nil {
 		t.Skip("no documents")
 	}
@@ -175,9 +176,9 @@ func TestUpdateFile(t *testing.T) {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
-	// Restore original
+	// Restore original values
 	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, origExtID, "image/png", 0)
+		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
