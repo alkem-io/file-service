@@ -31,6 +31,7 @@ sqlc-generate:
 
 openapi:
 	apispec --dir . --output openapi.yaml --config apispec.yaml --skip-cgo
+	yq -i '(.paths[][].responses) = ((.paths[][].responses) | to_entries | sort_by(.key) | from_entries)' openapi.yaml
 
 setup-hooks:
 	git config core.hooksPath .githooks

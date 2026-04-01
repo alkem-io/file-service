@@ -53,12 +53,18 @@ paths:
           schema:
             type: string
       responses:
-        "201":
-          description: Created
+        "200":
+          description: OK
+          content:
+            application/json: {}
+        "304":
+          description: Not Modified
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.CreateDocumentResponse'
+                type: array
+                items:
+                  type: integer
         default:
           description: Status code could not be determined
           content:
@@ -80,9 +86,15 @@ paths:
         "200":
           description: OK
           content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DeleteDocumentResponse'
+                type: array
+                items:
+                  type: integer
         default:
           description: Status code could not be determined
           content:
@@ -108,9 +120,15 @@ paths:
         "200":
           description: OK
           content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.UpdateDocumentResponse'
+                type: array
+                items:
+                  type: integer
         default:
           description: Status code could not be determined
           content:
@@ -131,6 +149,10 @@ paths:
       responses:
         "200":
           description: OK
+          content:
+            application/json: {}
+        "304":
+          description: Not Modified
           content:
             application/json:
               schema:
@@ -157,9 +179,15 @@ paths:
         "200":
           description: OK
           content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.ReplaceContentResponse'
+                type: array
+                items:
+                  type: integer
         default:
           description: Status code could not be determined
           content:
@@ -181,9 +209,15 @@ paths:
         "200":
           description: OK
           content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
             application/json:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service-go_internal_adapter_inbound_http.DocumentMetaResponse'
+                type: array
+                items:
+                  type: integer
         default:
           description: Status code could not be determined
           content:
@@ -205,15 +239,15 @@ paths:
         "200":
           description: OK
           content:
+            application/json: {}
+        "304":
+          description: Not Modified
+          content:
             application/json:
               schema:
                 type: array
                 items:
                   type: integer
-        "304":
-          description: Not Modified
-          content:
-            application/json: {}
         default:
           description: Status code could not be determined
           content:

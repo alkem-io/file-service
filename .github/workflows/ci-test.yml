@@ -95,6 +95,11 @@ jobs:
       - name: Install apispec
         run: go install github.com/ehabterra/apispec/cmd/apispec@latest
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
       - name: Generate OpenAPI spec
         run: make openapi
 
