@@ -36,7 +36,7 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, err
 func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return m.updateErr
 }
-func (m *mockRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool) error {
+func (m *mockRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
 	return m.updateErr
 }
 func (m *mockRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -70,7 +70,7 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 		return model.StoredFile{}, m.saveErr
 	}
 	hash := ComputeHash(content)
-	return model.StoredFile{ExternalID: hash, Size: len(content)}, nil
+	return model.StoredFile{ExternalID: hash, Size: len(content), Created: true}, nil
 }
 func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.readErr }
 func (m *mockStorage) Delete(_ string) error         { m.deleted = true; return m.deleteErr }
@@ -196,8 +196,8 @@ func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
 	svc := &FileService{
 		Repo: &mockRepo{
 			doc:          model.Document{ExternalID: "abc"},
-			count:        1,
-			deleteResult: model.DeletedDocument{AuthorizationID: authID},
+			count:        0, // 0 remaining AFTER delete = last reference
+			deleteResult: model.DeletedDocument{ExternalID: "abc", AuthorizationID: authID},
 		},
 		Storage: storage,
 	}
@@ -219,8 +219,8 @@ func TestDeleteDocument_SharedFile_KeepsFile(t *testing.T) {
 	svc := &FileService{
 		Repo: &mockRepo{
 			doc:          model.Document{ExternalID: "shared"},
-			count:        2,
-			deleteResult: model.DeletedDocument{AuthorizationID: uuid.New()},
+			count:        1, // 1 remaining AFTER delete = other doc still references it
+			deleteResult: model.DeletedDocument{ExternalID: "shared", AuthorizationID: uuid.New()},
 		},
 		Storage: storage,
 	}
@@ -278,7 +278,7 @@ func TestUpdateDocumentLocation_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentLocation(context.Background(), docID, newBucket, false)
+	updated, err := svc.UpdateDocumentLocation(context.Background(), docID, newBucket, false, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,10 +289,10 @@ func TestUpdateDocumentLocation_Happy(t *testing.T) {
 
 func TestUpdateDocumentLocation_NotFound(t *testing.T) {
 	svc := &FileService{
-		Repo: &mockRepo{getErr: errors.New("not found")},
+		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false)
+	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
@@ -306,7 +306,7 @@ func TestUpdateDocumentLocation_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false)
+	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -351,7 +351,7 @@ func TestServeFile_StorageReadFails(t *testing.T) {
 
 func TestDeleteDocument_NotFound(t *testing.T) {
 	svc := &FileService{
-		Repo: &mockRepo{getErr: errors.New("not found")},
+		Repo: &mockRepo{deleteErr: errors.New("not found")},
 	}
 
 	_, err := svc.DeleteDocument(context.Background(), uuid.New())
@@ -437,18 +437,24 @@ func TestStoreAndLink_ProcessorFails(t *testing.T) {
 	}
 }
 
-func TestDeleteDocument_CountFails(t *testing.T) {
+func TestDeleteDocument_CountFails_StillSucceeds(t *testing.T) {
+	// Post-delete count failure is non-fatal — row is already deleted
+	storage := &mockStorage{}
 	svc := &FileService{
 		Repo: &mockRepo{
-			doc:      model.Document{ExternalID: "abc"},
-			countErr: errors.New("db error"),
+			deleteResult: model.DeletedDocument{ExternalID: "abc", AuthorizationID: uuid.New()},
+			countErr:     errors.New("db error"),
 		},
-		Storage: &mockStorage{},
+		Storage: storage,
 	}
 
 	_, err := svc.DeleteDocument(context.Background(), uuid.New())
-	if err == nil {
-		t.Fatal("expected error for count failure")
+	if err != nil {
+		t.Fatalf("count failure should not fail the delete: %v", err)
+	}
+	// File should NOT be deleted since count failed (we don't know if it's safe)
+	if storage.deleted {
+		t.Error("should not delete file when count fails")
 	}
 }
 
@@ -465,5 +471,114 @@ func TestDeleteDocument_DeleteRepoFails(t *testing.T) {
 	_, err := svc.DeleteDocument(context.Background(), uuid.New())
 	if err == nil {
 		t.Fatal("expected error for delete failure")
+	}
+}
+
+func TestStoreAndLink_CleansUpOldBlob(t *testing.T) {
+	storage := &mockStorage{}
+	svc := &FileService{
+		Repo: &mockRepo{
+			doc:   model.Document{ID: uuid.New(), ExternalID: "old-hash"},
+			count: 0, // old hash has no remaining references
+		},
+		Storage:   storage,
+		Processor: &mockProcessor{},
+	}
+
+	result, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("new content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// New content produces different hash than "old-hash"
+	if result.ExternalID == "old-hash" {
+		t.Skip("same hash — no cleanup needed")
+	}
+	if !storage.deleted {
+		t.Error("expected old blob cleanup when no remaining references")
+	}
+}
+
+func TestStoreAndLink_KeepsOldBlobWhenShared(t *testing.T) {
+	storage := &mockStorage{}
+	svc := &FileService{
+		Repo: &mockRepo{
+			doc:   model.Document{ID: uuid.New(), ExternalID: "shared-hash"},
+			count: 2, // other docs still reference old hash
+		},
+		Storage:   storage,
+		Processor: &mockProcessor{},
+	}
+
+	_, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("new content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storage.deleted {
+		t.Error("should NOT delete old blob when other docs reference it")
+	}
+}
+
+func TestUpdateDocumentLocation_VersionConflict(t *testing.T) {
+	svc := &FileService{
+		Repo: &mockRepo{
+			doc:       model.Document{ID: uuid.New(), Version: 5},
+			updateErr: model.ErrDocumentNotFound, // 0 rows = version mismatch
+		},
+	}
+
+	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 3)
+	if err == nil {
+		t.Fatal("expected error for version conflict")
+	}
+}
+
+func TestCreateDocument_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
+	storage := &mockStorage{}
+	// Override Save to return Created=false (dedup matched existing file)
+	dedupStorage := &dedupMockStorage{inner: storage}
+	svc := &FileService{
+		Repo:      &mockRepo{createErr: errors.New("db error")},
+		Storage:   dedupStorage,
+		Processor: &mockProcessor{},
+	}
+
+	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if dedupStorage.deleted {
+		t.Error("should NOT delete file on rollback when dedup matched (Created=false)")
+	}
+}
+
+// dedupMockStorage simulates dedup: Save returns Created=false
+type dedupMockStorage struct {
+	inner   *mockStorage
+	deleted bool
+}
+
+func (m *dedupMockStorage) Save(content []byte) (model.StoredFile, error) {
+	hash := ComputeHash(content)
+	return model.StoredFile{ExternalID: hash, Size: len(content), Created: false}, nil
+}
+func (m *dedupMockStorage) Read(id string) ([]byte, error) { return m.inner.Read(id) }
+func (m *dedupMockStorage) Delete(_ string) error          { m.deleted = true; return nil }
+func (m *dedupMockStorage) Exists(id string) (bool, error) { return m.inner.Exists(id) }
+
+func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
+	dedupStorage := &dedupMockStorage{}
+	svc := &FileService{
+		Repo:      &mockRepo{doc: model.Document{ID: uuid.New(), ExternalID: "old"}, updateErr: errors.New("db error")},
+		Storage:   dedupStorage,
+		Processor: &mockProcessor{},
+	}
+
+	_, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("content"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if dedupStorage.deleted {
+		t.Error("should NOT delete file on rollback when dedup matched (Created=false)")
 	}
 }

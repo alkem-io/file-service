@@ -27,6 +27,7 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 		return model.StoredFile{
 			ExternalID: externalID,
 			Size:       len(content),
+			Created:    false,
 		}, nil
 	}
 
@@ -60,6 +61,7 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 	return model.StoredFile{
 		ExternalID: externalID,
 		Size:       len(content),
+		Created:    true,
 	}, nil
 }
 

@@ -1,4 +1,6 @@
 package testdata
 
-// This file exists only to make Go recognize testdata as a package root for fixture generation.
-// Test fixtures are generated at test time, not committed as binary files.
+// This directory holds test fixture files for the imaging package.
+// Go excludes directories named "testdata" from package discovery (go help packages).
+// Fixtures are generated programmatically at test time in processor_test.go,
+// not committed as binary files.

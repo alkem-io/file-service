@@ -236,22 +236,24 @@ func TestUpdateLocation(t *testing.T) {
 
 	var id, bucketID [16]byte
 	var tempLoc bool
+	var version int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "temporaryLocation" FROM document LIMIT 1`,
-	).Scan(&id, &bucketID, &tempLoc)
+		`SELECT id, "storageBucketId", "temporaryLocation", version FROM document LIMIT 1`,
+	).Scan(&id, &bucketID, &tempLoc, &version)
 	if err != nil {
 		t.Skip("no documents")
 	}
 	docID := uuid.UUID(id)
 	origBucket := uuid.UUID(bucketID)
 
-	// Update and restore
-	err = a.UpdateLocation(context.Background(), docID, origBucket, !tempLoc)
+	// Update with current version (optimistic lock)
+	err = a.UpdateLocation(context.Background(), docID, origBucket, !tempLoc, int(version))
 	if err != nil {
 		t.Fatalf("UpdateLocation: %v", err)
 	}
 	defer func() {
-		_ = a.UpdateLocation(context.Background(), docID, origBucket, tempLoc)
+		// Restore with incremented version
+		_ = a.UpdateLocation(context.Background(), docID, origBucket, tempLoc, int(version+1))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -265,7 +267,7 @@ func TestUpdateLocation_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
+	err := a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}

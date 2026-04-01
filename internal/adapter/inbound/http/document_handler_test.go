@@ -538,7 +538,7 @@ func TestDocumentHandler_Create_UnsupportedMIME(t *testing.T) {
 
 func TestDocumentHandler_Delete_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.err = model.ErrDocumentNotFound
+	repo.deleteErr = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
 	r.Delete("/internal/document/{id}", h.Delete)
@@ -790,8 +790,27 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code == http.StatusOK {
-		t.Fatal("expected error status for update failure")
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for DB error", rr.Code)
+	}
+}
+
+func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New(), Version: 5}
+	repo.updateErr = model.ErrDocumentNotFound // 0 rows = version mismatch
+
+	r := chi.NewRouter()
+	r.Patch("/internal/document/{id}", h.Update)
+
+	body := `{"temporaryLocation": false}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 Conflict", rr.Code)
 	}
 }
 

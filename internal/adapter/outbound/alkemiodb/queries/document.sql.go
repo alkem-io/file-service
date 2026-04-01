@@ -68,10 +68,11 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 const deleteDocument = `-- name: DeleteDocument :one
 DELETE FROM document
 WHERE id = $1
-RETURNING "authorizationId", "tagsetId"
+RETURNING "externalID", "authorizationId", "tagsetId"
 `
 
 type DeleteDocumentRow struct {
+	ExternalID      string      `json:"externalID"`
 	AuthorizationId pgtype.UUID `json:"authorizationId"`
 	TagsetId        pgtype.UUID `json:"tagsetId"`
 }
@@ -79,7 +80,7 @@ type DeleteDocumentRow struct {
 func (q *Queries) DeleteDocument(ctx context.Context, id pgtype.UUID) (DeleteDocumentRow, error) {
 	row := q.db.QueryRow(ctx, deleteDocument, id)
 	var i DeleteDocumentRow
-	err := row.Scan(&i.AuthorizationId, &i.TagsetId)
+	err := row.Scan(&i.ExternalID, &i.AuthorizationId, &i.TagsetId)
 	return i, err
 }
 
@@ -158,8 +159,8 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 
 const updateDocumentLocation = `-- name: UpdateDocumentLocation :execrows
 UPDATE document
-SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4
-WHERE id = $1
+SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4, version = version + 1
+WHERE id = $1 AND version = $5
 `
 
 type UpdateDocumentLocationParams struct {
@@ -167,6 +168,7 @@ type UpdateDocumentLocationParams struct {
 	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
 	TemporaryLocation bool               `json:"temporaryLocation"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
+	Version           int32              `json:"version"`
 }
 
 func (q *Queries) UpdateDocumentLocation(ctx context.Context, arg UpdateDocumentLocationParams) (int64, error) {
@@ -175,6 +177,7 @@ func (q *Queries) UpdateDocumentLocation(ctx context.Context, arg UpdateDocument
 		arg.StorageBucketId,
 		arg.TemporaryLocation,
 		arg.UpdatedDate,
+		arg.Version,
 	)
 	if err != nil {
 		return 0, err

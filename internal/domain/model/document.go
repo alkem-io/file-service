@@ -20,6 +20,7 @@ type Document struct {
 	TagsetID          *uuid.UUID
 	CreatedDate       time.Time
 	UpdatedDate       time.Time
+	Version           int
 }
 
 // CreateDocumentInput contains fields needed to create a new document.
@@ -37,6 +38,7 @@ type StoredFile struct {
 	ExternalID string
 	MimeType   string
 	Size       int
+	Created    bool // true if a new file was written; false if dedup matched an existing file
 }
 
 // AuthResult represents the outcome of an authorization check.
@@ -47,6 +49,7 @@ type AuthResult struct {
 
 // DeletedDocument contains IDs the caller needs for cleanup after deletion.
 type DeletedDocument struct {
+	ExternalID      string
 	AuthorizationID uuid.UUID
 	TagsetID        *uuid.UUID
 }

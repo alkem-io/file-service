@@ -76,5 +76,6 @@ func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
 		TagsetID:          pgxToUUIDNullable(row.TagsetId),
 		CreatedDate:       pgxToTime(row.CreatedDate),
 		UpdatedDate:       pgxToTime(row.UpdatedDate),
+		Version:           int(row.Version),
 	}
 }

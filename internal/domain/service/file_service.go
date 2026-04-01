@@ -61,12 +61,12 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, ErrPayloadTooLarge
 	}
 
-	mimeType := strings.ToLower(strings.SplitN(s.Processor.DetectMIME(content), ";", 2)[0])
+	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
 
 	if len(allowedMimeTypes) > 0 {
 		normalized := make([]string, len(allowedMimeTypes))
 		for i, m := range allowedMimeTypes {
-			normalized[i] = strings.ToLower(strings.SplitN(m, ";", 2)[0])
+			normalized[i] = normalizeMIME(m)
 		}
 		if !contains(normalized, mimeType) {
 			return nil, ErrUnsupportedMediaType
@@ -106,8 +106,10 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 
 	_, err = s.Repo.Create(ctx, doc)
 	if err != nil {
-		// Cleanup: remove stored file if DB insert fails
-		_ = s.Storage.Delete(stored.ExternalID)
+		// Only delete file if this request actually created it (not a dedup match)
+		if stored.Created {
+			_ = s.Storage.Delete(stored.ExternalID)
+		}
 		return nil, fmt.Errorf("create document record: %w", err)
 	}
 
@@ -115,38 +117,41 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 }
 
 // DeleteDocument removes a document record and its file (if not shared).
+// Counts remaining references AFTER delete to avoid TOCTOU race.
 func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) (*model.DeletedDocument, error) {
-	doc, err := s.Repo.GetByID(ctx, documentID)
-	if err != nil {
-		return nil, err
-	}
-
-	count, err := s.Repo.CountByExternalID(ctx, doc.ExternalID)
-	if err != nil {
-		return nil, fmt.Errorf("count references: %w", err)
-	}
-
+	// Delete the row first — returns externalID for post-delete cleanup
 	deleted, err := s.Repo.Delete(ctx, documentID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Only delete file if this was the last document referencing it
-	if count <= 1 {
-		_ = s.Storage.Delete(doc.ExternalID) // best-effort; log warning on error
+	// Count remaining references AFTER delete (not before)
+	// This eliminates the TOCTOU race where two concurrent deletes
+	// both see count > 1 and skip file cleanup
+	count, err := s.Repo.CountByExternalID(ctx, deleted.ExternalID)
+	if err != nil {
+		// Row is already deleted; return success but log the count failure
+		return &deleted, nil
+	}
+
+	// Only delete file if no remaining documents reference it
+	if count == 0 {
+		_ = s.Storage.Delete(deleted.ExternalID)
 	}
 
 	return &deleted, nil
 }
 
 // StoreAndLink replaces file content for an existing document atomically.
+// Cleans up the old file if no other documents reference it.
 func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, content []byte) (*model.StoredFile, error) {
-	_, err := s.Repo.GetByID(ctx, documentID)
+	doc, err := s.Repo.GetByID(ctx, documentID)
 	if err != nil {
 		return nil, err
 	}
+	oldExternalID := doc.ExternalID
 
-	mimeType := s.Processor.DetectMIME(content)
+	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
 	processed, finalMIME, err := s.Processor.Process(content, mimeType)
 	if err != nil {
 		return nil, fmt.Errorf("image processing: %w", err)
@@ -159,22 +164,32 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, finalMIME, stored.Size)
 	if err != nil {
-		// Cleanup: delete the newly stored file
-		_ = s.Storage.Delete(stored.ExternalID)
+		// Only delete if this request actually created the file (not a dedup match)
+		if stored.Created {
+			_ = s.Storage.Delete(stored.ExternalID)
+		}
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
 
-	result := model.StoredFile{
+	// Clean up old file if content changed and no other documents reference it
+	if oldExternalID != stored.ExternalID {
+		count, countErr := s.Repo.CountByExternalID(ctx, oldExternalID)
+		if countErr == nil && count == 0 {
+			_ = s.Storage.Delete(oldExternalID)
+		}
+	}
+
+	return &model.StoredFile{
 		ExternalID: stored.ExternalID,
 		MimeType:   finalMIME,
 		Size:       stored.Size,
-	}
-	return &result, nil
+	}, nil
 }
 
 // UpdateDocumentLocation updates the storage bucket and temporary location flag.
-func (s *FileService) UpdateDocumentLocation(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool) (*model.Document, error) {
-	err := s.Repo.UpdateLocation(ctx, documentID, storageBucketID, temporaryLocation)
+// Uses optimistic locking via the version column to prevent concurrent overwrites.
+func (s *FileService) UpdateDocumentLocation(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) (*model.Document, error) {
+	err := s.Repo.UpdateLocation(ctx, documentID, storageBucketID, temporaryLocation, version)
 	if err != nil {
 		return nil, err
 	}
@@ -187,9 +202,15 @@ func (s *FileService) UpdateDocumentLocation(ctx context.Context, documentID uui
 
 var (
 	ErrForbidden            = errors.New("forbidden")
+	ErrConflict             = errors.New("conflict: document was modified concurrently")
 	ErrPayloadTooLarge      = errors.New("payload too large")
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
 )
+
+// normalizeMIME strips parameters and lowercases a MIME type.
+func normalizeMIME(mimeType string) string {
+	return strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+}
 
 func contains(slice []string, item string) bool {
 	for _, s := range slice {

@@ -33,7 +33,7 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, 
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return m.updateErr
 }
-func (m *mockDocRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool) error {
+func (m *mockDocRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
 	return m.updateErr
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -62,7 +62,7 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	if m.saveErr != nil {
 		return model.StoredFile{}, m.saveErr
 	}
-	return model.StoredFile{ExternalID: "hash", Size: len(content)}, nil
+	return model.StoredFile{ExternalID: "hash", Size: len(content), Created: true}, nil
 }
 func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
 func (m *mockStorage) Delete(_ string) error         { return nil }
@@ -97,10 +97,16 @@ func TestPublicHandler_Authorized(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "application/pdf" {
 		t.Errorf("Content-Type = %q, want application/pdf", ct)
 	}
-	if cc := rr.Header().Get("Cache-Control"); cc == "" {
-		t.Error("missing Cache-Control header")
+	if cc := rr.Header().Get("Cache-Control"); cc != "public, max-age=86400" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "public, max-age=86400")
 	}
-	wantETag := `"` + docID.String() + `"`
+	if pragma := rr.Header().Get("Pragma"); pragma != "public" {
+		t.Errorf("Pragma = %q, want %q", pragma, "public")
+	}
+	if expires := rr.Header().Get("Expires"); expires == "" {
+		t.Error("missing Expires header")
+	}
+	wantETag := `"abc123"` // ETag is based on externalID (content hash)
 	if etag := rr.Header().Get("ETag"); etag != wantETag {
 		t.Errorf("ETag = %q, want %q", etag, wantETag)
 	}
@@ -202,7 +208,7 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
-	req.Header.Set("If-None-Match", `"`+docID.String()+`"`)
+	req.Header.Set("If-None-Match", `"abc123"`) // match externalID
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 

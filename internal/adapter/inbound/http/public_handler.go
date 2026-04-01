@@ -61,8 +61,8 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ETag conditional request — checked after authorization
-	etag := `"` + doc.ID.String() + `"`
+	// ETag based on content hash — invalidates when file content changes via store-and-link
+	etag := `"` + doc.ExternalID + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return

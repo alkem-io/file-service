@@ -73,11 +73,12 @@ func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc 
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
 	return &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:           fmt.Sprintf(":%d", port),
+		Handler:        handler,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 }
 

@@ -24,7 +24,7 @@ Serve a file to an authenticated and authorized user.
 | `Cache-Control` | `public, max-age={DOCUMENT_MAX_AGE}` |
 | `Pragma` | `public` |
 | `Expires` | UTC timestamp (now + DOCUMENT_MAX_AGE) |
-| `ETag` | Document ID (UUID string) |
+| `ETag` | Content hash (externalID, quoted) — changes when file content is replaced |
 
 **Body**: Raw file content (binary stream)
 

@@ -72,12 +72,13 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 	return nil
 }
 
-func (a *Adapter) UpdateLocation(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool) error {
+func (a *Adapter) UpdateLocation(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) error {
 	rows, err := a.queries.UpdateDocumentLocation(ctx, queries.UpdateDocumentLocationParams{
 		ID:                uuidToPgx(id),
 		StorageBucketId:   uuidToPgx(storageBucketID),
 		TemporaryLocation: temporaryLocation,
 		UpdatedDate:       timeToPgxNow(),
+		Version:           safeInt32(version),
 	})
 	if err != nil {
 		return err
@@ -97,6 +98,7 @@ func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocume
 		return model.DeletedDocument{}, err
 	}
 	return model.DeletedDocument{
+		ExternalID:      row.ExternalID,
 		AuthorizationID: pgxToUUID(row.AuthorizationId),
 		TagsetID:        pgxToUUIDNullable(row.TagsetId),
 	}, nil

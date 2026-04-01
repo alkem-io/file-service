@@ -19,7 +19,13 @@ spec:
         runAsNonRoot: true
       containers:
         - name: alkemio-file-service
-          image: alkemio/file-service-go:latest
+          image: alkemio/file-service-go:v0.1.0  # Pin to release tag; CI updates via kubectl set image
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 4003
           env:

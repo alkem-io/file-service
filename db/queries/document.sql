@@ -19,13 +19,13 @@ WHERE id = $1;
 
 -- name: UpdateDocumentLocation :execrows
 UPDATE document
-SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4
-WHERE id = $1;
+SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4, version = version + 1
+WHERE id = $1 AND version = $5;
 
 -- name: DeleteDocument :one
 DELETE FROM document
 WHERE id = $1
-RETURNING "authorizationId", "tagsetId";
+RETURNING "externalID", "authorizationId", "tagsetId";
 
 -- name: CountDocumentsByExternalID :one
 SELECT COUNT(*) FROM document WHERE "externalID" = $1;

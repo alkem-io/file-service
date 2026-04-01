@@ -274,10 +274,11 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		tempLoc = *body.TemporaryLocation
 	}
 
-	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc)
+	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc, doc.Version)
 	if err != nil {
 		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
+			// With optimistic locking, 0 rows = either not found or version mismatch
+			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
 			return
 		}
 		h.Logger.Error("failed to update document", zap.Error(err))

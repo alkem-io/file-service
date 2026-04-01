@@ -190,8 +190,8 @@ func TestMock_Delete_Success(t *testing.T) {
 
 	mock.ExpectQuery("DELETE FROM document WHERE id").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(mock.NewRows([]string{"authorizationId", "tagsetId"}).
-			AddRow(pgtype.UUID{Bytes: authID, Valid: true}, pgtype.UUID{Bytes: tagsetID, Valid: true}))
+		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}).
+			AddRow("abc123", pgtype.UUID{Bytes: authID, Valid: true}, pgtype.UUID{Bytes: tagsetID, Valid: true}))
 
 	a := New(mock)
 	deleted, err := a.Delete(context.Background(), uuid.New())
@@ -215,7 +215,7 @@ func TestMock_Delete_NotFound(t *testing.T) {
 
 	mock.ExpectQuery("DELETE FROM document WHERE id").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(mock.NewRows([]string{"authorizationId", "tagsetId"}))
+		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}))
 
 	a := New(mock)
 	_, err = a.Delete(context.Background(), uuid.New())
@@ -253,11 +253,11 @@ func TestMock_UpdateLocation_Success(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE document SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
+	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,11 +271,11 @@ func TestMock_UpdateLocation_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE document SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
+	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -328,11 +328,11 @@ func TestMock_UpdateLocation_DBError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE document SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false)
+	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}

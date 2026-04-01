@@ -40,6 +40,13 @@ type AuthClient struct {
 }
 
 func (c *AuthClient) CheckPrivilege(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
+	if c.Conn == nil {
+		return model.AuthResult{}, fmt.Errorf("NATS connection is nil")
+	}
+	if c.Subject == "" {
+		return model.AuthResult{}, fmt.Errorf("NATS subject is empty")
+	}
+
 	req := evaluateRequest{
 		Pattern: "evaluate",
 		Data: evaluateData{
