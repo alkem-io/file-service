@@ -31,14 +31,16 @@ Two classes of endpoints:
   (drop-in replacement for existing TS file-service)
 
 **Private** (cluster-internal, no auth):
-- `GET /internal/storage/:externalID` — read file by externalID
-- `POST /internal/storage` — write file, returns externalID
-- `DELETE /internal/storage/:externalID` — delete file
-- `HEAD /internal/storage/:externalID` — exists check
+- `POST /internal/document` — create document (multipart upload)
+- `GET /internal/document/:id/meta` — document metadata
+- `GET /internal/document/:id/content` — read file content
+- `PUT /internal/document/:id/content` — replace file content
+- `PATCH /internal/document/:id` — update document location
+- `DELETE /internal/document/:id` — delete document
 
 Storage is abstracted behind a port interface. File content is
-addressed by SHA3-256 content hash (externalID), consistent with
-existing Alkemio convention.
+addressed by SHA3-256 content hash, consistent with existing
+Alkemio convention.
 
 ## Anti-Patterns — Strictly Prohibited
 

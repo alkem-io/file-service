@@ -62,12 +62,12 @@ func TestRouter_HealthEndpoint(t *testing.T) {
 func TestRouter_DebugVars(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodGet, "/debug/vars", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/debug/vars", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("GET /debug/vars = %d, want 200", rr.Code)
+		t.Errorf("GET /internal/debug/vars = %d, want 200", rr.Code)
 	}
 }
 

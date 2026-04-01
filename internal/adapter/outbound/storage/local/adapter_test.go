@@ -85,9 +85,20 @@ func TestRead_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	a := New(dir)
 
-	_, err := a.Read("nonexistent")
+	// Valid hex format but file does not exist on disk
+	_, err := a.Read("0000000000000000000000000000000000000000000000000000000000000000")
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestRead_InvalidExternalID(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+
+	_, err := a.Read("../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for invalid external ID")
 	}
 }
 
@@ -111,10 +122,20 @@ func TestDelete_NonExistent(t *testing.T) {
 	dir := t.TempDir()
 	a := New(dir)
 
-	// Should not error — delete of non-existent is safe
-	err := a.Delete("nonexistent")
+	// Valid hex format but file does not exist — should not error
+	err := a.Delete("0000000000000000000000000000000000000000000000000000000000000000")
 	if err != nil {
 		t.Fatalf("Delete non-existent should not error: %v", err)
+	}
+}
+
+func TestDelete_InvalidExternalID(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+
+	err := a.Delete("../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for invalid external ID")
 	}
 }
 
@@ -187,11 +208,22 @@ func TestExists(t *testing.T) {
 		t.Error("expected file to exist")
 	}
 
-	exists, err = a.Exists("nonexistent")
+	// Valid hex format but file does not exist
+	exists, err = a.Exists("0000000000000000000000000000000000000000000000000000000000000000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if exists {
 		t.Error("expected file to not exist")
+	}
+}
+
+func TestExists_InvalidExternalID(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+
+	_, err := a.Exists("../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for invalid external ID")
 	}
 }

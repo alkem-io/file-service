@@ -2,9 +2,9 @@ package http
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -164,7 +164,7 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 			AuthorizationID: uuid.New(),
 		}},
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
-		Storage: &mockStorage{err: errors.New("file not found")},
+		Storage: &mockStorage{err: os.ErrNotExist},
 		MaxAge:  86400,
 		Logger:  zap.NewNop(),
 	}

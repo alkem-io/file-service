@@ -205,15 +205,15 @@ paths:
         "200":
           description: OK
           content:
-            application/json: {}
-        "304":
-          description: Not Modified
-          content:
             application/json:
               schema:
                 type: array
                 items:
                   type: integer
+        "304":
+          description: Not Modified
+          content:
+            application/json: {}
         default:
           description: Status code could not be determined
           content:

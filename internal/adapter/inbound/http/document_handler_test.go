@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -129,7 +130,7 @@ func TestDocumentHandler_GetContent_NotFound(t *testing.T) {
 func TestDocumentHandler_GetContent_FileMissing(t *testing.T) {
 	h, repo, storage := newDocHandler()
 	repo.doc = model.Document{ID: uuid.New(), ExternalID: "missing", MimeType: "text/plain"}
-	storage.err = errors.New("file not found")
+	storage.err = os.ErrNotExist
 
 	r := chi.NewRouter()
 	r.Get("/internal/document/{id}/content", h.GetContent)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,10 +61,16 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, ErrPayloadTooLarge
 	}
 
-	mimeType := s.Processor.DetectMIME(content)
+	mimeType := strings.ToLower(strings.SplitN(s.Processor.DetectMIME(content), ";", 2)[0])
 
-	if len(allowedMimeTypes) > 0 && !contains(allowedMimeTypes, mimeType) {
-		return nil, ErrUnsupportedMediaType
+	if len(allowedMimeTypes) > 0 {
+		normalized := make([]string, len(allowedMimeTypes))
+		for i, m := range allowedMimeTypes {
+			normalized[i] = strings.ToLower(strings.SplitN(m, ";", 2)[0])
+		}
+		if !contains(normalized, mimeType) {
+			return nil, ErrUnsupportedMediaType
+		}
 	}
 
 	processed, finalMIME, err := s.Processor.Process(content, mimeType)

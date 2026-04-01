@@ -6,6 +6,7 @@ on:
 
 jobs:
   build:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: m4
     permissions:
       contents: read

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -66,7 +67,12 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	content, err := h.Service.Storage.Read(doc.ExternalID)
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "file not found on storage")
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSONError(w, http.StatusNotFound, "file not found on storage")
+		} else {
+			h.Logger.Error("failed to read file from storage", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+		}
 		return
 	}
 
@@ -294,6 +300,7 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
 	content, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body")

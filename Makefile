@@ -1,10 +1,15 @@
-.PHONY: build test test-vips lint generate sqlc-generate openapi setup-hooks run clean
+.PHONY: build build-stub test test-vips lint generate sqlc-generate openapi setup-hooks run clean
 
 BINARY := file-service
 GO := go
 GOFLAGS := -race
 
 build:
+	mkdir -p bin/
+	$(GO) build -tags vips -o bin/$(BINARY) ./cmd/server/
+
+build-stub:
+	mkdir -p bin/
 	$(GO) build -o bin/$(BINARY) ./cmd/server/
 
 test:

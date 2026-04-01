@@ -64,6 +64,9 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 }
 
 func (a *Adapter) Read(externalID string) ([]byte, error) {
+	if !isValidExternalID(externalID) {
+		return nil, fmt.Errorf("invalid external ID: %s", externalID)
+	}
 	data, err := os.ReadFile(a.filePath(externalID))
 	if err != nil {
 		return nil, fmt.Errorf("read file %s: %w", externalID, err)
@@ -72,6 +75,9 @@ func (a *Adapter) Read(externalID string) ([]byte, error) {
 }
 
 func (a *Adapter) Delete(externalID string) error {
+	if !isValidExternalID(externalID) {
+		return fmt.Errorf("invalid external ID: %s", externalID)
+	}
 	err := os.Remove(a.filePath(externalID))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete file %s: %w", externalID, err)
@@ -80,6 +86,9 @@ func (a *Adapter) Delete(externalID string) error {
 }
 
 func (a *Adapter) Exists(externalID string) (bool, error) {
+	if !isValidExternalID(externalID) {
+		return false, fmt.Errorf("invalid external ID: %s", externalID)
+	}
 	_, err := os.Stat(a.filePath(externalID))
 	if err == nil {
 		return true, nil
@@ -92,4 +101,17 @@ func (a *Adapter) Exists(externalID string) (bool, error) {
 
 func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
+}
+
+// isValidExternalID checks that the ID is a valid SHA3-256 hex string (64 lowercase hex chars).
+func isValidExternalID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

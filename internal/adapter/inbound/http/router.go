@@ -27,9 +27,6 @@ func NewRouter(deps Deps) *chi.Mux {
 	// Health check (root level)
 	r.Method("GET", "/health", deps.HealthHandler)
 
-	// Debug/metrics (root level)
-	r.Handle("/debug/vars", expvar.Handler())
-
 	// Public endpoints (Oathkeeper strips /api/private, arrives as /rest/storage/...)
 	r.Route("/rest/storage", func(r chi.Router) {
 		r.Use(JWTExtractor)
@@ -44,6 +41,9 @@ func NewRouter(deps Deps) *chi.Mux {
 		r.Put("/document/{id}/content", deps.DocumentHandler.ReplaceContent)
 		r.Delete("/document/{id}", deps.DocumentHandler.Delete)
 		r.Patch("/document/{id}", deps.DocumentHandler.Update)
+
+		// Debug/metrics
+		r.Handle("/debug/vars", expvar.Handler())
 	})
 
 	return r
