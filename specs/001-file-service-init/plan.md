@@ -5,12 +5,12 @@
 
 ## Summary
 
-Universal file I/O gateway and document lifecycle manager for the Alkemio platform, replacing the existing TypeScript file-service. Serves files to authenticated users (public endpoint via Oathkeeper + NATS auth), provides internal document CRUD endpoints (create, read content/metadata, update, delete), handles image processing (HEIC→JPEG, compression), and MIME detection from magic bytes. The file-service owns the `document` table (full CRUD); the server becomes read-only. ExternalID is never exposed in any API. Built with hexagonal architecture using Go 1.25, chi v5, pgx/sqlc, NATS, and govips.
+Universal file I/O gateway and document lifecycle manager for the Alkemio platform, replacing the existing TypeScript file-service. Serves files to authenticated users (public endpoint via Oathkeeper + auth check via h2c HTTP/2 or NATS), provides internal document CRUD endpoints (create, read content/metadata, update, delete), handles image processing (HEIC→JPEG, compression), and MIME detection from magic bytes. The file-service owns the `document` table (full CRUD); the server becomes read-only. ExternalID is never exposed in any API. Built with hexagonal architecture using Go 1.26, chi v5, pgx/sqlc, sony/gobreaker v2, and govips.
 
 ## Technical Context
 
-**Language/Version**: Go 1.25 (constitution-mandated)
-**Primary Dependencies**: chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), google/uuid (UUIDv7)
+**Language/Version**: Go 1.26 (constitution-mandated)
+**Primary Dependencies**: chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging, optional), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), google/uuid (UUIDv7), sony/gobreaker v2.4.0 (circuit breaker), x/net (h2c HTTP/2)
 **Storage**: PostgreSQL (Alkemio DB, full CRUD on document table, read-only on all others), local filesystem (file bytes)
 **Testing**: `go test` with race detector, 95% unit coverage target, integration tests against real DB/storage
 **Target Platform**: Linux container (K8s), macOS for local dev
@@ -27,7 +27,7 @@ Universal file I/O gateway and document lifecycle manager for the Alkemio platfo
 |-----------|--------|----------|
 | I. Hexagonal Architecture | PASS | Domain ports (StoragePort, AuthPort, DocumentRepo, ImageProcessor), adapters (HTTP, DB, NATS, local storage) |
 | II. Storage Abstraction | PASS | StoragePort interface with local adapter; S3 pluggable via config |
-| III. Alkemio Integration First | PASS | NATS auth.evaluate, Oathkeeper JWT, document table (full CRUD), HTTP internal endpoints |
+| III. Alkemio Integration First | PASS | h2c/NATS auth.evaluate, Oathkeeper JWT, document table (full CRUD), HTTP internal endpoints |
 | IV. Type-Safe Database Access | PASS | sqlc for query generation, pgx v5 driver |
 | V. Security by Design | PASS | JWT validation, NATS auth on every public request, MIME detection from content, no auth bypass |
 | VI. Test-First Development | PASS | TDD workflow, in-memory adapters for unit tests, integration tests for adapters |
@@ -67,6 +67,7 @@ specs/001-file-service-init/
 cmd/
   server/
     main.go                 # Entry point: config → wiring → HTTP server
+    app.go                  # Dependency construction: DB, NATS, auth client, router
 
 internal/
   adapter/
@@ -77,13 +78,18 @@ internal/
         public_handler.go   # GET /rest/storage/document/:id (authenticated)
         document_handler.go # GET/POST/DELETE/PATCH /internal/document/... + PUT .../content
         health_handler.go   # GET /health
-        metrics.go          # expvar setup for /debug/vars
+        metrics.go          # expvar setup for /internal/debug/vars
+        dto.go              # Request/response DTOs with Render() methods
+        response.go         # JSON error helper
     outbound/
       alkemiodb/
         adapter.go          # DocumentRepo implementation via pgx/sqlc
+        convert.go          # pgx ↔ domain type conversions
         queries/             # sqlc generated code
+      authhttp/
+        client.go           # AuthPort implementation: h2c HTTP/2 with gobreaker circuit breaker
       nats/
-        auth_client.go      # AuthPort implementation: auth.evaluate request-reply
+        auth_client.go      # AuthPort implementation: auth.evaluate request-reply (fallback)
       storage/
         local/
           adapter.go        # StoragePort implementation: local filesystem
@@ -95,6 +101,7 @@ internal/
   domain/
     model/
       document.go           # Document, CreateDocumentInput, StoredFile, AuthResult, DeletedDocument
+      errors.go             # ErrDocumentNotFound
     port/
       storage.go            # StoragePort interface (save, read, delete, exists)
       auth.go               # AuthPort interface (CheckPrivilege)
@@ -108,8 +115,7 @@ internal/
     processor.go            # govips wrapper: detect MIME, convert HEIC, compress, resize
 
   resilience/
-    breaker.go              # Circuit breaker (NATS, DB)
-    nats_conn.go            # NATS connection with reconnect handlers
+    nats_conn.go            # NATS connection with exponential backoff reconnect
 
 db/
   queries/
@@ -125,7 +131,7 @@ go.sum
 .golangci.yml               # Linter configuration
 ```
 
-**Structure Decision**: Follows WOPI service hexagonal layout. Consolidated all internal endpoints into `document_handler.go` (was split across private_handler, storelink_handler, document_handler — now one file since all internal endpoints are document-centric). `imaging/` is domain-adjacent, not a port/adapter. `resilience/` mirrors auth-eval-service pattern.
+**Structure Decision**: Follows WOPI service hexagonal layout. Consolidated all internal endpoints into `document_handler.go` (was split across private_handler, storelink_handler, document_handler — now one file since all internal endpoints are document-centric). `imaging/` is domain-adjacent, not a port/adapter. `resilience/` contains only NATS connection management (circuit breaker is handled by sony/gobreaker v2 in the authhttp adapter). `authhttp/` adapter provides h2c HTTP/2 transport as the preferred alternative to NATS for auth calls.
 
 ## Complexity Tracking
 

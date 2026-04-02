@@ -8,8 +8,9 @@ backends.
 ## Tech Stack
 
 - **Language**: Go 1.26
-- **Database**: PostgreSQL (Alkemio DB read-only + own DB if needed), pgx v5, sqlc
-- **Authorization**: NATS via authorization-evaluation-service (`auth.evaluate`)
+- **Database**: PostgreSQL (Alkemio DB, full CRUD on document table), pgx v5, sqlc
+- **Authorization**: h2c HTTP/2 (preferred, via `AUTH_SERVICE_URL`) or NATS (fallback, via `NATS_URL`) to authorization-evaluation-service
+- **Circuit Breaker**: sony/gobreaker v2 (shared `AUTH_BREAKER_*` config)
 - **Identity**: Oathkeeper JWT (`alkemio_actor_id` claim) on public endpoints
 - **Logging**: Zap (structured)
 - **HTTP Router**: chi v5
@@ -71,28 +72,32 @@ Alkemio convention.
 
 ## Configuration (env vars)
 
-Database (matching oidc-service pattern):
-- `FILE_SERVICE_DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME/TIMEOUT`
-
-Alkemio DB (read-only):
+Alkemio DB (full CRUD on document table):
 - `ALKEMIO_DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME`
 
-NATS:
-- `NATS_URL` — NATS server URL
+Auth transport (set at least one; h2c preferred if both set):
+- `AUTH_SERVICE_URL` — h2c HTTP/2 URL for auth-evaluation-service (e.g. `http://auth-service:6060`)
+- `NATS_URL` — NATS server URL (fallback when AUTH_SERVICE_URL is not set)
+
+Circuit breaker (shared by both auth transports):
+- `AUTH_BREAKER_FAILURE_THRESHOLD` (default 3)
+- `AUTH_BREAKER_TIMEOUT_SECONDS` (default 15)
+- `AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS` (default 2)
 
 Storage:
 - `STORAGE_TYPE` — `local` or `s3` (future)
 - `LOCAL_STORAGE_PATH` — filesystem path for local storage
 
 Service:
-- `FILE_SERVICE_PORT` — HTTP listen port
+- `PORT` — HTTP listen port (default 4003)
+- `DOCUMENT_MAX_AGE` — Cache-Control max-age in seconds (default 86400)
 
 ## Integration Context
 
-- Auth checks on public endpoints via NATS `auth.evaluate`
-  (agentId + privilege + authorizationPolicyId)
-- Document metadata (externalID, authorizationPolicyId) from
-  Alkemio's PostgreSQL (read-only user)
+- Auth checks on public endpoints via h2c HTTP/2 (preferred)
+  or NATS `auth.evaluate` (fallback) — both carry
+  agentId + privilege + authorizationPolicyId
+- Document table (full CRUD) in Alkemio's PostgreSQL
 - Actor identity from Oathkeeper JWT (`alkemio_actor_id` claim)
 - Oathkeeper config at
   `/Users/antst/work/alkemio/server/.build/ory/oathkeeper/`
@@ -104,5 +109,5 @@ See `.specify/memory/constitution.md` for the complete set of
 principles and governance rules.
 
 ## Active Technologies
-- Go 1.26 (constitution-mandated) + chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), google/uuid (UUIDv7)
+- Go 1.26 (constitution-mandated) + chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging, optional), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), x/net v0.52.0 (h2c), google/uuid (UUIDv7), sony/gobreaker v2.4.0 (circuit breaker)
 - PostgreSQL (Alkemio DB, full CRUD on document table, read-only on all others), local filesystem (file bytes)

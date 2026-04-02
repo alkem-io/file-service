@@ -14,9 +14,10 @@ The request passes through Oathkeeper (which injects a JWT with the
 actor's identity) and reaches the file service's public endpoint. The
 service looks up the document in Alkemio's database to find its
 externalID and authorizationPolicyId, calls the authorization-evaluation-service
-via NATS to verify the actor has READ privilege, then reads the file
-from the storage backend and streams it to the client with appropriate
-Content-Type and caching headers.
+(via h2c HTTP/2 or NATS, depending on configuration) to verify the
+actor has READ privilege, then reads the file from the storage backend
+and streams it to the client with appropriate Content-Type and caching
+headers.
 
 **Why this priority**: This is the core use case — the existing TS
 file-service does exactly this. Without it, nothing else works.
@@ -31,7 +32,7 @@ verifying the file content is returned with correct headers.
 2. **Given** a valid JWT but the actor lacks READ permission, **When** a GET request is sent, **Then** the service returns 403 Forbidden.
 3. **Given** a valid JWT but the document does not exist, **When** a GET request is sent, **Then** the service returns 404 Not Found.
 4. **Given** no JWT or an invalid JWT, **When** a GET request is sent, **Then** the service returns 401 Unauthorized.
-5. **Given** the file exists on disk and has been served before, **When** the client sends an ETag-based conditional request, **Then** the service returns 304 Not Modified.
+5. **Given** the file exists on disk and has been served before, **When** the client sends an ETag-based conditional request (If-None-Match with the content hash), **Then** the service returns 304 Not Modified.
 6. **Given** a file previously stored by the existing TypeScript file-service at `{LOCAL_STORAGE_PATH}/{externalID}`, **When** the Go service receives a request for that document, **Then** it serves the file correctly — zero-migration drop-in replacement.
 
 ---
@@ -189,7 +190,7 @@ are removed.
 
 1. **Given** file content, metadata (displayName, storageBucketId, createdBy, temporaryLocation), and pre-created authorizationId + tagsetId, **When** POST is sent to `/internal/document`, **Then** the file is processed and stored, and a Document record is created with all provided fields plus the computed externalID, mimeType, and size. The response returns the document ID, externalID, mimeType, and size.
 2. **Given** a valid document ID, **When** DELETE is sent to `/internal/document/:id`, **Then** the Document record is deleted from the database, the underlying file is deleted from storage (if no other documents reference the same externalID), and the response returns the deleted document's authorizationId and tagsetId so the caller can clean up those rows.
-3. **Given** a valid document ID and new storageBucketId + temporaryLocation=false, **When** PATCH is sent to `/internal/document/:id`, **Then** the Document record's storageBucketId and temporaryLocation are updated (used for moving temporary documents to their final bucket).
+3. **Given** a valid document ID and new storageBucketId + temporaryLocation=false, **When** PATCH is sent to `/internal/document/:id`, **Then** the Document record's storageBucketId and temporaryLocation are updated using optimistic locking (version column). Returns 409 Conflict if the document was modified concurrently.
 4. **Given** an authorizationId that doesn't exist in the authorization_policy table, **When** POST is sent to create a document with that ID, **Then** the service returns 400 (FK constraint) and no file is stored.
 5. **Given** a document ID that does not exist, **When** DELETE or PATCH is sent, **Then** the service returns 404.
 
@@ -201,9 +202,9 @@ are removed.
 - How does the service handle a concurrent read of a file being written? → Safe due to content-addressable storage: write to temp file then atomic rename to `{externalID}`. Readers see either the complete file or 404 — never a partial write.
 - What happens when DELETE is called for a document whose file doesn't exist on storage? → Log a warning but proceed with deleting the document row. The DB record is the primary artifact; missing files are an inconsistency to log, not a blocker.
 - How does the service behave when the Alkemio database is unreachable during a public endpoint request? → Returns 503 Service Unavailable; circuit breaker fails fast.
-- What happens when NATS (auth-evaluation-service) is unavailable? → Returns 503 Service Unavailable; circuit breaker fails fast. Files are never served without auth checks.
+- What happens when the auth service (NATS or h2c) is unavailable? → Returns 503 Service Unavailable; circuit breaker (sony/gobreaker v2) fails fast. Files are never served without auth checks.
 - What happens when the store-and-link endpoint is called concurrently for the same document ID? → Last-writer-wins via DB row-level locking. Both callers succeed but the final state reflects the last write. No application-level locking needed.
-- What happens to the old file on storage when a document's externalID is updated via store-and-link? (Orphan cleanup is out of scope for this service — other documents may reference the same externalID.)
+- What happens to the old file on storage when a document's externalID is updated via store-and-link? → The old file is deleted from storage if no other documents reference the same externalID (same dedup-safe logic as document delete).
 - What happens when image compression produces a larger file than the original? (Return the original uncompressed.)
 - What happens when HEIC conversion fails? (Return an error — do not silently store the unconverted HEIC.)
 - What if the detected MIME type is not in the MimeFileType enum but is in the caller's allowlist? (Accept it — the enum is a server concern, not a file-service concern.)
@@ -216,7 +217,7 @@ are removed.
 
 - **FR-01**: System MUST expose a public endpoint `GET /rest/storage/document/:id` that serves file content to authenticated and authorized users (drop-in replacement for existing TS file-service).
 - **FR-02**: System MUST validate actor identity from Oathkeeper-injected JWT (`alkemio_actor_id` claim) on all public endpoints.
-- **FR-03**: System MUST authorize file access by calling the authorization-evaluation-service via NATS (`auth.evaluate` subject) with the actor's agentId, `read` privilege, and the document's authorizationPolicyId.
+- **FR-03**: System MUST authorize file access by calling the authorization-evaluation-service with the actor's agentId, `read` privilege, and the document's authorizationPolicyId. Two auth transports are supported: h2c HTTP/2 (preferred, via `AUTH_SERVICE_URL`) and NATS (`auth.evaluate` subject, via `NATS_URL`). At least one must be configured; h2c takes precedence when both are set.
 - **FR-04**: System MUST look up document metadata (externalID, authorizationPolicyId, mimeType) from Alkemio's PostgreSQL database. The file-service has full CRUD access to the document table (FR-27).
 - **FR-05**: System MUST expose internal cluster endpoints under the `/internal/` prefix (no auth). Endpoints: `GET /internal/document/:id/meta` (FR-28), `GET /internal/document/:id/content` (FR-27), `PUT /internal/document/:id/content` (FR-14), `POST /internal/document` (FR-22), `DELETE /internal/document/:id` (FR-23), `PATCH /internal/document/:id` (FR-24). ExternalID is never exposed in any API — all access is by document ID. In Docker dev, Traefik routes `/api/storage/internal/...` and strips `/api/storage` so the service receives `/internal/...`. In K8s production, internal services call directly via K8s service DNS at `/internal/...`.
 - **FR-06**: System MUST NOT require authorization on internal endpoints (`/internal/*`) — callers are trusted services within the K8s cluster.
@@ -224,7 +225,7 @@ are removed.
 - **FR-08**: System MUST abstract the storage backend behind a port interface supporting save, read, delete, and exists operations.
 - **FR-09**: System MUST implement a local filesystem storage adapter as the default backend.
 - **FR-10**: System MUST return appropriate Content-Type headers based on document mimeType from the database (public endpoint) or from the document record (internal endpoint).
-- **FR-11**: System MUST support ETag-based conditional requests (If-None-Match) on the public endpoint, returning 304 Not Modified when content hasn't changed.
+- **FR-11**: System MUST support ETag-based conditional requests (If-None-Match) on the public endpoint, returning 304 Not Modified when content hasn't changed. The ETag MUST be the content hash (externalID), not the document ID, so it correctly invalidates when file content is replaced via store-and-link.
 - **FR-12**: System MUST set Cache-Control headers on public endpoint responses (configurable max-age, default 24 hours).
 - **FR-13**: System MUST expose a health check endpoint at `GET /health`.
 - **FR-14**: System MUST expose an internal endpoint `PUT /internal/document/:id/content` that atomically stores a file and updates the corresponding Document record. The endpoint accepts binary file content, applies image processing (HEIC→JPEG conversion, JPEG/WebP compression per FR-17/FR-18), computes the SHA3-256 hash of the processed content as the new externalID, stores the file via the storage backend, and updates the Document record's externalID, mimeType, size, and updated timestamp. Returns the new externalID, mimeType, and size. Returns 404 if the document ID does not exist. The operation MUST be atomic: if the DB update fails the stored file is cleaned up; if the file write fails the DB change is rolled back.
@@ -237,9 +238,9 @@ are removed.
 - **FR-21**: System MUST use structured JSON logging via Zap. Log entries MUST include request ID, endpoint, duration, and error context where applicable.
 - **FR-22**: System MUST expose an internal endpoint `POST /internal/document` that atomically stores a file and creates a Document record. The endpoint accepts multipart form data: file content (binary part) plus form fields (displayName, storageBucketId, createdBy, temporaryLocation, authorizationId, tagsetId, and optional allowedMimeTypes/maxFileSize). The service processes the file (MIME detection, image processing per FR-16/FR-17/FR-18), stores it, and creates the Document record with the computed externalID, detected mimeType, and size. Returns the document ID, externalID, mimeType, and size. Returns 400 if required fields are missing or FK constraints fail.
 - **FR-23**: System MUST expose an internal endpoint `DELETE /internal/document/:id` that deletes the Document record and the underlying file from storage. If other Document records reference the same externalID, the file MUST NOT be deleted from storage (shared content-addressable reference). The response MUST include the deleted document's authorizationId and tagsetId so the caller (server) can clean up those rows.
-- **FR-24**: System MUST expose an internal endpoint `PATCH /internal/document/:id` that updates mutable Document fields. Initially supports updating `storageBucketId` and `temporaryLocation` (used by the server to move temporary documents to their final bucket). Returns 404 if the document does not exist.
-- **FR-25**: System MUST expose expvar metrics at `GET /debug/vars` (cluster-internal), including: NATS connection state, NATS reconnect count, NATS disconnect count, storage operations count, and circuit breaker state. This matches the authorization-evaluation-service observability pattern.
-- **FR-26**: When a required dependency (NATS, Alkemio DB) is unavailable, the system MUST return 503 Service Unavailable with a structured JSON error body. Circuit breakers MUST be used to fail fast and prevent cascading failures. The system MUST NOT serve files without completing authorization checks — no graceful degradation that bypasses security.
+- **FR-24**: System MUST expose an internal endpoint `PATCH /internal/document/:id` that updates mutable Document fields. Initially supports updating `storageBucketId` and `temporaryLocation` (used by the server to move temporary documents to their final bucket). Uses the `version` column for optimistic locking — returns 409 Conflict if the document was modified concurrently (version mismatch). Returns 404 if the document does not exist.
+- **FR-25**: System MUST expose expvar metrics at `GET /internal/debug/vars` (under the internal route group, cluster-internal only), including: NATS connection state, NATS reconnect count, NATS disconnect count, storage operations count, and circuit breaker state. This matches the authorization-evaluation-service observability pattern.
+- **FR-26**: When a required dependency (auth service, Alkemio DB) is unavailable, the system MUST return 503 Service Unavailable with a structured JSON error body. Circuit breakers (sony/gobreaker v2) MUST be used to fail fast and prevent cascading failures. Breaker settings are shared across auth transports via `AUTH_BREAKER_*` env vars. The system MUST NOT serve files without completing authorization checks — no graceful degradation that bypasses security.
 - **FR-27**: System MUST expose an internal endpoint `GET /internal/document/:id/content` that serves file content by document ID without authorization. The endpoint looks up the document record, reads the file from storage by externalID, and streams it with appropriate Content-Type header. Returns 404 if the document or file does not exist. This is the internal equivalent of the public `GET /rest/storage/document/:id` — same behavior but no JWT/NATS auth check.
 - **FR-28**: System MUST expose an internal endpoint `GET /internal/document/:id/meta` that returns document metadata (JSON) without authorization. Returns the document record fields: id, externalID, mimeType, size, displayName, createdBy, temporaryLocation, storageBucketId, authorizationId, tagsetId, createdDate, updatedDate. Returns 404 if the document does not exist.
 - **FR-29**: The file-service MUST have full CRUD access to the `document` table in Alkemio's PostgreSQL database. The Alkemio Server MUST have read-only access to the `document` table. Authorization policy and tagset tables remain owned by the server.
@@ -255,16 +256,17 @@ configuration changes.
 - **FR-31**: System MUST accept the `LOCAL_STORAGE_PATH` environment variable for configuring the storage root, matching the existing TS file-service convention (default: `../server/.storage` for local dev, `/storage` in K8s).
 - **FR-32**: System MUST accept the `PORT` environment variable for the HTTP listen port, defaulting to `4003` to match the existing TS file-service.
 - **FR-33**: System MUST accept the `DOCUMENT_MAX_AGE` environment variable (integer, seconds) for the Cache-Control max-age value, defaulting to `86400` (24 hours), matching the existing TS file-service.
-- **FR-34**: System MUST return response headers on the public endpoint that match the existing TS file-service behavior: `Cache-Control: public, max-age={DOCUMENT_MAX_AGE}`, `Pragma: public`, `Expires` header (current time + max-age as UTC timestamp), and `ETag` set to the document ID.
+- **FR-34**: System MUST return response headers on the public endpoint that match the existing TS file-service behavior: `Cache-Control: public, max-age={DOCUMENT_MAX_AGE}`, `Pragma: public`, `Expires` header (current time + max-age as UTC timestamp), and `ETag` set to the content hash (externalID). Using the content hash instead of the document ID ensures the ETag correctly invalidates when file content is replaced via store-and-link.
 - **FR-35**: System MUST return the same HTTP status codes as the existing TS file-service for equivalent error conditions: 401 for missing/invalid identity, 403 for insufficient permissions, 404 for document or file not found, 500 for internal errors.
 - **FR-36**: System MUST be deployable into the existing K8s environment using the same PVC mount (`file-storage-pvc2` at `/storage`, read-write) and the same service port (4003), requiring only a container image swap and mount mode change in the deployment manifest.
-- **FR-37**: System MUST use the same NATS environment variable names as the authorization-evaluation-service so that both services can share the `alkemio-config` ConfigMap. Required: `NATS_URL` (server URL, required). Optional with matching defaults: `NATS_RECONNECT_WAIT_MS` (default 1000), `NATS_RECONNECT_MAX_WAIT_MS` (default 30000), `NATS_FAILURE_THRESHOLD` (default 3), `NATS_BREAKER_TIMEOUT_SECONDS` (default 15), `NATS_HALF_OPEN_MAX_REQUESTS` (default 2).
+- **FR-37**: NATS is optional — only required when `AUTH_SERVICE_URL` is not set. When NATS is used, the service MUST use the same NATS connection variable names as the authorization-evaluation-service: `NATS_URL` (server URL), `NATS_RECONNECT_WAIT_MS` (default 1000), `NATS_RECONNECT_MAX_WAIT_MS` (default 30000). Circuit breaker settings are shared across both auth transports via `AUTH_BREAKER_FAILURE_THRESHOLD` (default 3), `AUTH_BREAKER_TIMEOUT_SECONDS` (default 15), `AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS` (default 2). The preferred auth transport is h2c HTTP/2 via `AUTH_SERVICE_URL`.
 - **FR-38**: System MUST use `auth.evaluate` as the default NATS subject for authorization requests, matching the authorization-evaluation-service's `NATS_SUBJECT` default. This subject SHOULD be configurable via `NATS_SUBJECT` env var.
 
 ### Key Entities
 
-- **Document** (Alkemio DB, full CRUD by file-service): Represents a file in Alkemio. Key attributes: id (UUID), externalID (SHA3-256 hash), mimeType, size, displayName, createdBy (UUID, nullable), temporaryLocation (boolean), storageBucketId (UUID FK), authorizationId (UUID FK to authorization_policy, managed by server), tagsetId (UUID FK to tagset, managed by server), createdDate, updatedDate. The file-service creates, reads, updates, and deletes document records. The server has read-only access.
-- **StoredFile**: A file on the storage backend. Addressed by externalID (content hash). No database record in this service — the storage backend is the source of truth for file content.
+- **Document** (Alkemio DB, full CRUD by file-service): Represents a file in Alkemio. Key attributes: id (UUID), externalID (SHA3-256 hash), mimeType, size, displayName, createdBy (UUID, nullable), temporaryLocation (boolean), storageBucketId (UUID FK), authorizationId (UUID FK to authorization_policy, managed by server), tagsetId (UUID FK to tagset, managed by server), createdDate, updatedDate, version (int, for optimistic locking on PATCH). The file-service creates, reads, updates, and deletes document records. The server has read-only access.
+- **StoredFile**: A file on the storage backend. Addressed by externalID (content hash). No database record in this service — the storage backend is the source of truth for file content. The `Created` bool field indicates whether a new file was written (true) or a dedup match was found (false), enabling safe rollback on failure.
+- **DeletedDocument**: Returned by document delete operations. Contains the deleted document's ExternalID (for file cleanup), AuthorizationID, and TagsetID (for server-side cleanup).
 
 ## Success Criteria *(mandatory)*
 
@@ -273,7 +275,7 @@ configuration changes.
 - **SC-001**: The existing TS file-service public endpoint (`GET /rest/storage/document/:id`) can be replaced by this service with no change to frontend behavior — same URL, same response format, same caching.
 - **SC-002**: Internal services (WOPI, Alkemio Server) can read and write files via private endpoints without authorization overhead.
 - **SC-003**: Unauthorized requests to public endpoints are rejected and never return file content.
-- **SC-004**: The service starts, connects to databases and NATS, and responds to health checks without manual intervention.
+- **SC-004**: The service starts, connects to the database and auth service (h2c or NATS), and responds to health checks without manual intervention.
 - **SC-005**: Writing the same file content twice returns the same externalID (content-addressable, idempotent writes).
 - **SC-006**: Files previously stored by the existing TypeScript file-service are served correctly without any data migration — the Go service is a drop-in replacement for existing data.
 - **SC-007**: The Go service can be deployed into the existing K8s environment by swapping only the container image — same PVC, same port, same env vars — with no changes to surrounding infrastructure or client code.
@@ -288,14 +290,14 @@ configuration changes.
 ### Session 2026-03-30
 
 - Q: How does the service authenticate users on public endpoints? → A: Oathkeeper injects a JWT with `alkemio_actor_id` claim. Service validates JWT via JWKS and extracts actor ID.
-- Q: How does the service authorize file access? → A: NATS call to authorization-evaluation-service (`auth.evaluate`) with agentId, privilege, and authorizationPolicyId.
+- Q: How does the service authorize file access? → A: Call to authorization-evaluation-service via h2c HTTP/2 (`AUTH_SERVICE_URL`, preferred) or NATS (`auth.evaluate` subject, fallback) with agentId, privilege, and authorizationPolicyId.
 - Q: Where does the service get document metadata? → A: From the `document` table in Alkemio's PostgreSQL database. The file-service has full CRUD access to this table (FR-29).
 - Q: What storage backends are supported initially? → A: Local filesystem only. S3 is a future addition; the port interface must be in place.
 - Q: Do private endpoints require auth? → A: No. They are cluster-internal, protected by K8s network policy.
 - Q: The old TS file-service uses RabbitMQ for auth — why is the Go service using NATS? → A: The authorization-evaluation-service now exposes NATS (`auth.evaluate`), which is the preferred pattern for new Alkemio services (see matrix-adapter-go). RabbitMQ auth delegation is legacy. This is an intentional architecture change, not a compatibility requirement.
 - Q: The old service delegates auth entirely via RabbitMQ (passes cookies/tokens). How does the Go service differ? → A: The Go service reads actor identity from Oathkeeper JWT directly and calls auth-evaluation-service via NATS with agentId + privilege + policyId. This is the same pattern as other new Go services. Oathkeeper was already in place; the TS service just didn't use it for identity extraction.
 - Q: Why does the file-service need write access to Alkemio's DB? → A: The file-service owns the `document` table (full CRUD per FR-29). It creates document records (FR-22), updates them (FR-14, FR-24), and deletes them with file cleanup (FR-23). This centralizes all document + file operations in one service.
-- Q: What happens to the old file when a document's externalID changes? → A: Orphan file cleanup is out of scope. Multiple documents may reference the same externalID (content-addressable), so the old file cannot be safely deleted at write time.
+- Q: What happens to the old file when a document's externalID changes? → A: The store-and-link operation cleans up the old file if no other documents reference the same externalID (count-after-update, same dedup-safe logic as document delete).
 - Q: Who determines the MIME type — client or file-service? → A: The file-service detects the actual MIME type from file content (magic bytes). Client-provided MIME is ignored for validation purposes. This fixes the current server behavior where client MIME is trusted without verification.
 - Q: Who owns image processing (HEIC conversion, compression)? → A: The file-service. Alkemio Server's `ImageConversionService` and `ImageCompressionService` will be removed. The server sends raw bytes; the file-service returns processed bytes + metadata.
 - Q: Who owns MIME allowlist configuration? → A: The server. Each StorageBucket has its own allowedMimeTypes list. The server passes this list to the file-service on each upload request. The file-service validates but does not store the allowlist.
@@ -316,18 +318,18 @@ configuration changes.
 ## Assumptions
 
 - Oathkeeper is configured to route public file-service requests and inject JWTs, same pattern as other Alkemio services.
-- The authorization-evaluation-service is deployed and reachable via NATS at `auth.evaluate`.
+- The authorization-evaluation-service is deployed and reachable via h2c HTTP/2 (`AUTH_SERVICE_URL`, preferred) or NATS at `auth.evaluate`. At least one auth transport must be configured.
 - Alkemio's PostgreSQL database is accessible with a database user that has full CRUD access to the `document` table. All other tables remain read-only from the file-service's perspective. The server retains read-only access to the document table and full access to `authorization_policy` and `tagset` tables.
 - The shared storage volume (or equivalent) is mounted at `LOCAL_STORAGE_PATH` and accessible to this service.
 - The existing TS file-service's public API contract (`GET /rest/storage/document/:id`) is the compatibility target.
 - File content uses SHA3-256 hashing for externalID, consistent with `calculateBufferHash()` in Alkemio Server.
 - This service owns the `document` table (full CRUD). Document creation and deletion are performed by the file-service. The server creates `authorization_policy` and `tagset` rows first, passes their IDs to the file-service, and cleans them up on deletion. Authorization policy cascade logic remains in the server — it updates `authorization_policy` rows directly without file-service involvement.
 - Server-to-file-service communication uses HTTP (not NATS). NATS is reserved for lightweight auth.evaluate calls. File transfer over NATS is impractical due to message size limits.
-- NATS is already deployed in the cluster (used by authorization-evaluation-service).
+- NATS is optional — only needed when `AUTH_SERVICE_URL` is not set. When used, NATS must be deployed in the cluster (used by authorization-evaluation-service).
 - The existing TS file-service uses RabbitMQ for auth delegation; the Go service intentionally switches to NATS + JWT, matching newer Alkemio services. This is a deliberate architecture improvement, not a compatibility gap.
 - The existing K8s deployment mounts `file-storage-pvc2` at `/storage`. The Go service must work with this same volume and mount point. The mount must be read-write (not read-only) since the file-service now handles writes that previously went through the server's LocalStorageAdapter.
 - The Go service must accept the same core env vars (`LOCAL_STORAGE_PATH`, `PORT`, `DOCUMENT_MAX_AGE`) so that existing ConfigMaps and Secrets require minimal changes.
-- NATS env var names (`NATS_URL`, `NATS_RECONNECT_WAIT_MS`, etc.) are shared with the authorization-evaluation-service via the `alkemio-config` ConfigMap. The file-service must not introduce differently-named NATS vars.
+- NATS env var names (`NATS_URL`, `NATS_RECONNECT_WAIT_MS`, etc.) are shared with the authorization-evaluation-service via the `alkemio-config` ConfigMap. Circuit breaker env vars use the `AUTH_BREAKER_*` prefix (shared by both auth transports).
 - Alkemio Server's `LocalStorageAdapter`, `ImageConversionService`, and `ImageCompressionService` will be removed once the server is migrated to use the file-service's private endpoints. The server will implement a thin HTTP client adapter in place of its current `StorageService` interface.
 - The file-service owns file bytes, content hashing, MIME detection, image processing, and the document table (full CRUD). The server owns authorization policies, tagsets, StorageBucket/Aggregator hierarchy, and MIME allowlist configuration. The server has read-only access to the document table.
 - Image compression settings (MozJPEG quality 82, max dimension 4096px, EXIF strip) match the current server implementation to ensure visual consistency during migration.

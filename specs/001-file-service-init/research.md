@@ -2,19 +2,22 @@
 
 **Branch**: `001-file-service-init` | **Date**: 2026-03-30
 
-## Dependency Versions (verified online 2026-03-30)
+## Dependency Versions (verified online 2026-03-30, updated 2026-03-31)
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| Go | 1.25.8 | Latest patch for Go 1.25 (1.26.1 also available; constitution specifies 1.25) |
+| Go | 1.26.1 | Constitution updated to Go 1.26 |
 | `github.com/jackc/pgx/v5` | v5.9.1 | PostgreSQL driver |
 | `github.com/sqlc-dev/sqlc` | v1.30.0 | SQL code generator (CLI tool) |
 | `github.com/go-chi/chi/v5` | v5.2.5 | HTTP router (v5.2.4 had security vuln GO-2026-4316) |
 | `go.uber.org/zap` | v1.27.1 | Structured logging |
-| `github.com/nats-io/nats.go` | v1.50.0 | NATS client |
+| `github.com/nats-io/nats.go` | v1.50.0 | NATS client (optional — only when AUTH_SERVICE_URL is not set) |
 | `golang.org/x/crypto` | v0.49.0 | SHA3-256 via `golang.org/x/crypto/sha3` |
+| `golang.org/x/net` | v0.52.0 | h2c HTTP/2 cleartext transport for auth service |
 | `github.com/davidbyttow/govips/v2` | v2.17.0 | libvips bindings — HEIC→JPEG, compression, resize |
 | `github.com/gabriel-vasile/mimetype` | v1.4.13 | MIME detection from magic bytes |
+| `github.com/sony/gobreaker/v2` | v2.4.0 | Circuit breaker for auth service calls (h2c transport) |
+| `github.com/google/uuid` | v1.6.0 | UUIDv7 generation (RFC 9562) |
 
 ## Decision: SHA3-256 Hashing
 
@@ -65,7 +68,21 @@
   }
   ```
 - **Client method**: `nats.Conn.RequestWithContext(ctx, "auth.evaluate", payload)` — synchronous request-reply with context timeout.
-- **Circuit breaker**: File-service should implement its own NATS circuit breaker (matching auth-eval-service config: `NATS_FAILURE_THRESHOLD`, `NATS_BREAKER_TIMEOUT_SECONDS`, `NATS_HALF_OPEN_MAX_REQUESTS`).
+- **Circuit breaker**: The h2c auth client uses sony/gobreaker v2 (see decision below). NATS auth client does not have its own breaker — NATS connection management handles reconnection. Breaker settings are shared via `AUTH_BREAKER_*` env vars.
+
+## Decision: Circuit Breaker — sony/gobreaker v2
+
+- **Decision**: Use `github.com/sony/gobreaker/v2` for circuit breaker protection on auth service calls
+- **Rationale**: gobreaker is a well-tested, generics-based circuit breaker library. v2 supports typed `CircuitBreaker[T]` which avoids interface{} casts. Used in the h2c auth client to protect against auth service unavailability.
+- **Alternatives considered**: Custom circuit breaker (initially implemented as `resilience/breaker.go`, then replaced) — rejected in favor of battle-tested library. `sony/gobreaker` v1 — rejected because v2 offers type-safe generics API.
+- **Configuration**: Shared `AUTH_BREAKER_*` env vars (failure threshold, timeout seconds, half-open max requests) apply to both h2c and NATS transports, though currently only the h2c client uses gobreaker. NATS relies on its own connection-level reconnection.
+
+## Decision: h2c HTTP/2 Auth Transport
+
+- **Decision**: Support h2c (HTTP/2 cleartext) as the preferred auth transport, with NATS as fallback
+- **Rationale**: h2c provides persistent multiplexed connections without TLS overhead for cluster-internal communication. The authorization-evaluation-service exposes an `/internal/auth/evaluate` HTTP endpoint. Using h2c eliminates the NATS dependency for auth checks, simplifying the deployment topology. NATS remains supported for backward compatibility.
+- **Transport selection**: Auto-detected from env vars — `AUTH_SERVICE_URL` set → h2c; only `NATS_URL` set → NATS. h2c takes precedence when both are set.
+- **Implementation**: Uses `golang.org/x/net/http2.Transport` with `AllowHTTP: true` and plain TCP dialer (no TLS). Single persistent connection with HTTP/2 stream multiplexing.
 
 ## Decision: UUIDv7 for Generated IDs
 

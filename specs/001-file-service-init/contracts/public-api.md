@@ -24,7 +24,7 @@ Serve a file to an authenticated and authorized user.
 | `Cache-Control` | `public, max-age={DOCUMENT_MAX_AGE}` |
 | `Pragma` | `public` |
 | `Expires` | UTC timestamp (now + DOCUMENT_MAX_AGE) |
-| `ETag` | Content hash (externalID, quoted) — changes when file content is replaced |
+| `ETag` | Content hash (externalID, quoted) — based on SHA3-256 of file content, correctly invalidates when file content is replaced via store-and-link |
 
 **Body**: Raw file content (binary stream)
 
@@ -40,7 +40,7 @@ Returned when `If-None-Match` matches the document's ETag. No body.
 | 403 Forbidden | Actor lacks READ privilege (NATS auth.evaluate returned `allowed: false`) |
 | 404 Not Found | Document ID not in Alkemio DB, or file not on storage backend |
 | 500 Internal Server Error | Unexpected error |
-| 503 Service Unavailable | NATS or Alkemio DB unavailable (circuit breaker open) |
+| 503 Service Unavailable | Auth service (h2c or NATS) or Alkemio DB unavailable (circuit breaker open) |
 
 **Error body** (JSON):
 ```json
@@ -50,4 +50,4 @@ Returned when `If-None-Match` matches the document's ETag. No body.
 }
 ```
 
-**Note**: Health check (`GET /health`) and metrics (`GET /debug/vars`) are documented in [private-api.md](private-api.md) — they are root-level endpoints, not behind any prefix.
+**Note**: Health check (`GET /health`) is a root-level endpoint. Metrics (`GET /internal/debug/vars`) are under the internal route group. Both are documented in [private-api.md](private-api.md).

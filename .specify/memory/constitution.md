@@ -75,7 +75,9 @@ file I/O gateway. It replaces the existing TypeScript file-service
 and serves all Alkemio services that need file read/write access.
 
 - Public endpoints MUST validate authorization via the
-  authorization-evaluation-service (NATS `auth.evaluate`).
+  authorization-evaluation-service (h2c HTTP/2 preferred, NATS
+  `auth.evaluate` as fallback). At least one auth transport
+  must be configured.
 - Private (cluster-internal) endpoints MUST NOT require
   authorization — callers are trusted services within the K8s
   cluster.
@@ -104,7 +106,7 @@ The file service handles document access, making security a
 non-negotiable concern at every layer.
 
 - Public endpoints MUST validate authorization on every request via
-  NATS auth-evaluation-service.
+  the auth-evaluation-service (h2c or NATS).
 - Private endpoints MUST be accessible only within the K8s cluster
   (enforced by network policy, not application code).
 - Secrets, tokens, and credentials MUST NOT be logged or included in
@@ -274,7 +276,8 @@ without a constitution amendment:
 | Database         | PostgreSQL               |
 | Architecture     | Hexagonal (ports/adapters)|
 | Logging          | Zap (structured)         |
-| Authorization    | NATS via auth-evaluation-service |
+| Authorization    | h2c HTTP/2 (preferred) or NATS via auth-evaluation-service |
+| Circuit breaker  | sony/gobreaker v2              |
 | HTTP router      | chi v5                   |
 | Storage backends | Local filesystem (primary), S3 (future) |
 
@@ -295,10 +298,12 @@ The file service integrates with the following systems:
 - Frontend — uses public endpoint for file downloads (with
   Oathkeeper auth).
 
-**Authorization Evaluation Service** (Go, NATS):
-- Subject: `auth.evaluate`
+**Authorization Evaluation Service** (Go, h2c HTTP/2 or NATS):
+- h2c transport (preferred): POST to `{AUTH_SERVICE_URL}/internal/auth/evaluate`
+- NATS transport (fallback): Subject `auth.evaluate`
 - Input: `{agentId, privilege, authorizationPolicyId}`
 - Output: `{allowed, reason}`
+- Circuit breaker: sony/gobreaker v2 (shared `AUTH_BREAKER_*` config)
 - Used on public endpoints to check READ privilege before serving
   files.
 

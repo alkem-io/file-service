@@ -8,6 +8,8 @@ No authorization required. Protected by K8s network policy.
 
 All access is by document ID. ExternalID is never exposed.
 
+**Auth transport**: The service supports two transports for calling the authorization-evaluation-service on public endpoints: h2c HTTP/2 (preferred, via `AUTH_SERVICE_URL`) and NATS (fallback, via `NATS_URL`). Both use a shared circuit breaker (sony/gobreaker v2) configured via `AUTH_BREAKER_*` env vars. Internal endpoints are not affected by auth transport choice.
+
 ---
 
 ## GET /internal/document/:id/meta
@@ -197,12 +199,15 @@ All fields are optional — only provided fields are updated.
 }
 ```
 
+Uses the `version` column for optimistic locking. The service reads the current document version before updating, then passes it in the WHERE clause. If the version has changed (concurrent modification), the update affects 0 rows and the service returns 409 Conflict.
+
 ### Error Responses
 
 | Status | Condition |
 |--------|-----------|
+| 400 Bad Request | Invalid field values, no fields to update |
 | 404 Not Found | Document ID not found |
-| 400 Bad Request | Invalid field values |
+| 409 Conflict | Document was modified concurrently (version mismatch) — retry with fresh version |
 | 500 Internal Server Error | DB failure |
 | 503 Service Unavailable | Alkemio DB unavailable |
 
@@ -269,9 +274,9 @@ Health check endpoint.
 
 ---
 
-## GET /debug/vars
+## GET /internal/debug/vars
 
-Expvar metrics endpoint (cluster-internal).
+Expvar metrics endpoint (under the internal route group, cluster-internal only).
 
 ### Response — 200 OK
 

@@ -22,13 +22,14 @@ Source: Alkemio PostgreSQL `document` table. The file-service owns this table (f
 | `tagsetId` | UUID (unique, nullable) | create, read | FK to tagset (created by server, passed to file-service) |
 | `createdDate` | timestamp | create, read | Auto-set on creation |
 | `updatedDate` | timestamp | create, read, update | Auto-set on create/update |
+| `version` | integer | create (default 1), read, update | Optimistic locking for PATCH — incremented on each update, checked in WHERE clause |
 
 **Queries needed (sqlc)**:
 1. `GetDocumentByID(id UUID)` → returns all fields
 2. `CreateDocument(...)` → inserts full row, returns id
 3. `UpdateDocumentFile(id UUID, externalID, mimeType string, size int, updatedDate timestamp)` → store-and-link update, returns row count
-4. `UpdateDocumentLocation(id UUID, storageBucketId UUID, temporaryLocation bool, updatedDate timestamp)` → move temp doc, returns row count
-5. `DeleteDocument(id UUID)` → deletes row, returns authorizationId + tagsetId (for server cleanup)
+4. `UpdateDocumentLocation(id UUID, storageBucketId UUID, temporaryLocation bool, updatedDate timestamp, version int)` → move temp doc with optimistic locking (`WHERE id = $1 AND version = $5`), increments version, returns row count (0 = version mismatch)
+5. `DeleteDocument(id UUID)` → deletes row, returns externalID + authorizationId + tagsetId (for file cleanup and server-side cleanup)
 6. `CountDocumentsByExternalID(externalID string)` → count of documents referencing this hash (for safe file deletion)
 
 ### StoredFile (storage backend — no DB record)
@@ -69,6 +70,7 @@ type Document struct {
     TagsetID            *uuid.UUID // nullable
     CreatedDate         time.Time
     UpdatedDate         time.Time
+    Version             int        // optimistic locking for PATCH
 }
 
 // CreateDocumentInput contains fields needed to create a new document.
@@ -86,6 +88,7 @@ type StoredFile struct {
     ExternalID string  // SHA3-256 hex hash
     MimeType   string  // Detected/post-processing MIME type
     Size       int     // File size in bytes (post-processing)
+    Created    bool    // true if a new file was written; false if dedup matched an existing file
 }
 
 // AuthResult represents the outcome of an authorization check.
@@ -94,8 +97,9 @@ type AuthResult struct {
     Reason  string
 }
 
-// DeletedDocument contains IDs the caller needs for cleanup.
+// DeletedDocument contains IDs the caller needs for cleanup after deletion.
 type DeletedDocument struct {
+    ExternalID      string     // needed for post-delete file cleanup (count-then-delete)
     AuthorizationID uuid.UUID
     TagsetID        *uuid.UUID
 }
@@ -114,26 +118,26 @@ Received → Validate Fields → MIME Detect → Validate (allowlist + size) →
 ### Document Delete (DELETE /internal/document/:id)
 
 ```
-Received → Lookup Document → Count by ExternalID → Delete DB Row → Delete File (if count was 1) → Response {authorizationId, tagsetId}
-              ↓ (not found)                                                ↓ (fail)
-            404 error                                                Log warning, continue
+Received → Delete DB Row (returns externalID + IDs) → Count by ExternalID → Delete File (if count == 0) → Response {authorizationId, tagsetId}
+              ↓ (not found)                                                       ↓ (fail)
+            404 error                                                       Log warning, continue
 ```
 
-### File Upload (POST /internal/storage)
+Count is done AFTER delete (not before) to eliminate the TOCTOU race where two concurrent deletes both see count > 1 and skip file cleanup.
+
+### Store and Link (PUT /internal/document/:id/content)
 
 ```
-Received → MIME Detected → Validated (allowlist + size) → Image Processed → Hashed → Stored → Response
-                              ↓ (fail)                      ↓ (fail)                  ↓ (fail)
-                           415/413 error               Error returned            500 error
-```
-
-### Store and Link (PUT /internal/storage/document/:documentId)
-
-```
-Received → Document Lookup → Image Processed → Hashed → Stored → DB Updated → Response
+Received → Document Lookup → Image Processed → Hashed → Stored → DB Updated → Cleanup Old File (if changed, count==0) → Response
               ↓ (not found)                               ↓ (fail)    ↓ (fail)
-            404 error                                  500 error    Rollback file + 500
+            404 error                                  500 error    Rollback file (if Created) + 500
 ```
+
+## Helper Functions
+
+### normalizeMIME
+
+Strips parameters (e.g. `; charset=utf-8`) and lowercases a MIME type string. Used consistently across document create and store-and-link flows to ensure MIME comparisons are case-insensitive and parameter-free.
 
 ## Relationships
 
