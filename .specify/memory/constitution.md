@@ -268,7 +268,7 @@ without a constitution amendment:
 
 | Component        | Technology               |
 |------------------|--------------------------|
-| Language         | Go 1.25                  |
+| Language         | Go 1.26                  |
 | Database driver  | pgx v5                   |
 | Query generation | sqlc                     |
 | Database         | PostgreSQL               |

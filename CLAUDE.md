@@ -7,7 +7,7 @@ backends.
 
 ## Tech Stack
 
-- **Language**: Go 1.25
+- **Language**: Go 1.26
 - **Database**: PostgreSQL (Alkemio DB read-only + own DB if needed), pgx v5, sqlc
 - **Authorization**: NATS via authorization-evaluation-service (`auth.evaluate`)
 - **Identity**: Oathkeeper JWT (`alkemio_actor_id` claim) on public endpoints
@@ -104,5 +104,5 @@ See `.specify/memory/constitution.md` for the complete set of
 principles and governance rules.
 
 ## Active Technologies
-- Go 1.25 (constitution-mandated) + chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), google/uuid (UUIDv7)
+- Go 1.26 (constitution-mandated) + chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), google/uuid (UUIDv7)
 - PostgreSQL (Alkemio DB, full CRUD on document table, read-only on all others), local filesystem (file bytes)

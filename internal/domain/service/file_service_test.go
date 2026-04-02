@@ -363,18 +363,6 @@ func TestDeleteDocument_NotFound(t *testing.T) {
 	}
 }
 
-func TestContains(t *testing.T) {
-	if !contains([]string{"a", "b", "c"}, "b") {
-		t.Error("expected true")
-	}
-	if contains([]string{"a", "b"}, "z") {
-		t.Error("expected false")
-	}
-	if contains(nil, "a") {
-		t.Error("expected false for nil slice")
-	}
-}
-
 func TestCreateDocument_StorageFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},

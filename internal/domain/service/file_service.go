@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,7 +71,7 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		for i, m := range allowedMimeTypes {
 			normalized[i] = normalizeMIME(m)
 		}
-		if !contains(normalized, mimeType) {
+		if !slices.Contains(normalized, mimeType) {
 			return nil, ErrUnsupportedMediaType
 		}
 	}
@@ -233,13 +234,4 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
