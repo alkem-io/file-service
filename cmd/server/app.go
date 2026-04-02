@@ -12,9 +12,11 @@ import (
 
 	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb"
+	"github.com/alkem-io/file-service-go/internal/adapter/outbound/authhttp"
 	natsAdapter "github.com/alkem-io/file-service-go/internal/adapter/outbound/nats"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/storage/local"
 	"github.com/alkem-io/file-service-go/internal/config"
+	"github.com/alkem-io/file-service-go/internal/domain/port"
 	"github.com/alkem-io/file-service-go/internal/domain/service"
 	"github.com/alkem-io/file-service-go/internal/imaging"
 	"github.com/alkem-io/file-service-go/internal/resilience"
@@ -36,17 +38,26 @@ func connectNATS(cfg config.NATSConfig, logger *zap.Logger) (*nats.Conn, error) 
 	return resilience.ConnectNATS(cfg, logger)
 }
 
-func buildFileService(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, logger *zap.Logger) *service.FileService {
+func buildAuthClient(cfg *config.Config, nc *nats.Conn) port.AuthPort {
+	switch cfg.AuthTransport {
+	case "h2c":
+		return authhttp.New(cfg.AuthServiceURL)
+	default:
+		return &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject}
+	}
+}
+
+func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) *service.FileService {
 	return &service.FileService{
 		Repo:      alkemiodb.New(pool),
-		Auth:      &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject},
+		Auth:      auth,
 		Storage:   local.New(cfg.StoragePath),
 		Processor: imaging.New(),
 		Logger:    logger,
 	}
 }
 
-func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc *service.FileService, logger *zap.Logger) http.Handler {
+func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc *service.FileService, logger *zap.Logger) http.Handler { //nolint:unparam // nc can be nil when using h2c
 	httpAdapter.InitMetrics()
 
 	maxAge := int(cfg.DocumentMaxAge.Seconds())

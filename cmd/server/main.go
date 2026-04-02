@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/config"
@@ -33,13 +34,20 @@ func run() int {
 	defer pool.Close()
 	logger.Info("database connected", zap.String("host", cfg.AlkemioDB.Host))
 
-	nc, err := connectNATS(cfg.NATS, logger)
-	if err != nil {
-		logger.Fatal("failed to connect to NATS", zap.Error(err))
+	// NATS is optional — only connect if transport is "nats"
+	var nc *nats.Conn
+	if cfg.AuthTransport == "nats" {
+		nc, err = connectNATS(cfg.NATS, logger)
+		if err != nil {
+			logger.Fatal("failed to connect to NATS", zap.Error(err))
+		}
+		defer nc.Close()
 	}
-	defer nc.Close()
 
-	fileSvc := buildFileService(pool, nc, cfg, logger)
+	auth := buildAuthClient(cfg, nc)
+	logger.Info("auth transport configured", zap.String("transport", cfg.AuthTransport))
+
+	fileSvc := buildFileService(pool, auth, cfg, logger)
 	router := buildRouter(pool, nc, cfg, fileSvc, logger)
 	srv := newHTTPServer(cfg.Port, router)
 

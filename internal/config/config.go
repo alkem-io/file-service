@@ -14,6 +14,8 @@ type Config struct {
 	DocumentMaxAge time.Duration
 	AlkemioDB      DatabaseConfig
 	NATS           NATSConfig
+	AuthServiceURL string // h2c URL for auth-evaluation-service (e.g., "http://auth-service:6060")
+	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
 }
 
 type DatabaseConfig struct {
@@ -41,8 +43,17 @@ type NATSConfig struct {
 
 func Load() (*Config, error) {
 	natsURL := getenv("NATS_URL", "")
-	if natsURL == "" {
-		return nil, fmt.Errorf("NATS_URL is required")
+	authServiceURL := getenv("AUTH_SERVICE_URL", "")
+
+	// Determine auth transport: h2c preferred if AUTH_SERVICE_URL is set
+	authTransport := ""
+	switch {
+	case authServiceURL != "":
+		authTransport = "h2c"
+	case natsURL != "":
+		authTransport = "nats"
+	default:
+		return nil, fmt.Errorf("either AUTH_SERVICE_URL or NATS_URL must be set")
 	}
 
 	dbHost := getenv("ALKEMIO_DATABASE_HOST", "")
@@ -80,56 +91,46 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("DOCUMENT_MAX_AGE: %w", err)
 	}
 
-	reconnectWait, err := getenvInt("NATS_RECONNECT_WAIT_MS", 1000)
-	if err != nil {
-		return nil, fmt.Errorf("NATS_RECONNECT_WAIT_MS: %w", err)
-	}
+	var natsCfg NATSConfig
+	if authTransport == "nats" {
+		reconnectWait, err := getenvInt("NATS_RECONNECT_WAIT_MS", 1000)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_RECONNECT_WAIT_MS: %w", err)
+		}
 
-	reconnectMax, err := getenvInt("NATS_RECONNECT_MAX_WAIT_MS", 30000)
-	if err != nil {
-		return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS: %w", err)
-	}
-	if reconnectMax < reconnectWait {
-		return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS (%d) must be >= NATS_RECONNECT_WAIT_MS (%d)", reconnectMax, reconnectWait)
-	}
+		reconnectMax, err := getenvInt("NATS_RECONNECT_MAX_WAIT_MS", 30000)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS: %w", err)
+		}
+		if reconnectMax < reconnectWait {
+			return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS (%d) must be >= NATS_RECONNECT_WAIT_MS (%d)", reconnectMax, reconnectWait)
+		}
 
-	failureThreshold, err := getenvInt("NATS_FAILURE_THRESHOLD", 3)
-	if err != nil {
-		return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD: %w", err)
-	}
-	if failureThreshold < 1 {
-		return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD must be positive")
-	}
+		failureThreshold, err := getenvInt("NATS_FAILURE_THRESHOLD", 3)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD: %w", err)
+		}
+		if failureThreshold < 1 {
+			return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD must be positive")
+		}
 
-	breakerTimeout, err := getenvInt("NATS_BREAKER_TIMEOUT_SECONDS", 15)
-	if err != nil {
-		return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS: %w", err)
-	}
-	if breakerTimeout < 5 {
-		return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS must be >= 5")
-	}
+		breakerTimeout, err := getenvInt("NATS_BREAKER_TIMEOUT_SECONDS", 15)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS: %w", err)
+		}
+		if breakerTimeout < 5 {
+			return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS must be >= 5")
+		}
 
-	halfOpen, err := getenvInt("NATS_HALF_OPEN_MAX_REQUESTS", 2)
-	if err != nil {
-		return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS: %w", err)
-	}
-	if halfOpen < 1 {
-		return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS must be positive")
-	}
+		halfOpen, err := getenvInt("NATS_HALF_OPEN_MAX_REQUESTS", 2)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS: %w", err)
+		}
+		if halfOpen < 1 {
+			return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS must be positive")
+		}
 
-	return &Config{
-		Port:           port,
-		StoragePath:    getenv("LOCAL_STORAGE_PATH", "../server/.storage"),
-		StorageType:    getenv("STORAGE_TYPE", "local"),
-		DocumentMaxAge: time.Duration(maxAgeSecs) * time.Second,
-		AlkemioDB: DatabaseConfig{
-			Host:     dbHost,
-			Port:     dbPort,
-			Username: dbUser,
-			Password: dbPass,
-			Name:     dbName,
-		},
-		NATS: NATSConfig{
+		natsCfg = NATSConfig{
 			URL:                 natsURL,
 			Subject:             getenv("NATS_SUBJECT", "auth.evaluate"),
 			ReconnectWaitMS:     reconnectWait,
@@ -137,7 +138,24 @@ func Load() (*Config, error) {
 			FailureThreshold:    failureThreshold,
 			BreakerTimeoutSecs:  breakerTimeout,
 			HalfOpenMaxRequests: halfOpen,
+		}
+	}
+
+	return &Config{
+		Port:           port,
+		StoragePath:    getenv("LOCAL_STORAGE_PATH", "../server/.storage"),
+		StorageType:    getenv("STORAGE_TYPE", "local"),
+		DocumentMaxAge: time.Duration(maxAgeSecs) * time.Second,
+		AuthTransport:  authTransport,
+		AuthServiceURL: authServiceURL,
+		AlkemioDB: DatabaseConfig{
+			Host:     dbHost,
+			Port:     dbPort,
+			Username: dbUser,
+			Password: dbPass,
+			Name:     dbName,
 		},
+		NATS: natsCfg,
 	}, nil
 }
 
