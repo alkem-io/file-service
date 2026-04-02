@@ -314,7 +314,7 @@ The file service integrates with the following systems:
 - Private endpoints are NOT routed through Oathkeeper.
 
 **Existing File Service** (TypeScript, being replaced):
-- Located at `/Users/antst/work/alkemio/file-service`
+- Located in the `file-service` repository (TypeScript/NestJS)
 - This Go service is a drop-in replacement with additional
   write/delete capabilities.
 - Must maintain the same public API contract:

@@ -99,9 +99,9 @@ func TestBuildFileService(t *testing.T) {
 	// Use a real pool just to construct (won't be called)
 	pool, _ := pgxpool.New(context.Background(), "postgres://invalid:5432/x")
 	if pool == nil {
-		// pgxpool.New may return nil pool with error for invalid config
 		t.Skip("cannot create pool stub")
 	}
+	defer pool.Close()
 
 	logger, _ := zap.NewDevelopment()
 	svc := buildFileService(pool, nil, cfg, logger)

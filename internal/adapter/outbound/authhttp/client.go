@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
 	"go.uber.org/zap"
@@ -46,6 +47,9 @@ type Client struct {
 
 // New creates an h2c auth client with circuit breaker.
 func New(baseURL string, breaker *gobreaker.CircuitBreaker[model.AuthResult], logger *zap.Logger) *Client {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Client{
 		httpClient: newH2CClient(),
 		baseURL:    baseURL,
@@ -95,7 +99,8 @@ func (c *Client) doRequest(ctx context.Context, agentID, privilege, authorizatio
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	const maxResponseBody = 64 * 1024 // 64KB — auth responses are small JSON
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return model.AuthResult{}, fmt.Errorf("read auth response: %w", err)
 	}
@@ -128,6 +133,7 @@ func (c *Client) doRequest(ctx context.Context, agentID, privilege, authorizatio
 // http2.Transport automatically re-establishes the TCP connection if it drops.
 func newH2CClient() *http.Client {
 	return &http.Client{
+		Timeout: 30 * time.Second, // fallback for requests without context deadline
 		Transport: &http2.Transport{
 			AllowHTTP: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
