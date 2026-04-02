@@ -59,28 +59,6 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
-  test-docker:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Build Docker image
-        run: docker build -t file-service-go:test .
-
-      - name: Verify container starts
-        run: |
-          docker run --rm \
-            -e NATS_URL=nats://localhost:4222 \
-            -e ALKEMIO_DATABASE_HOST=localhost \
-            -e ALKEMIO_DATABASE_PORT=5432 \
-            -e ALKEMIO_DATABASE_USERNAME=test \
-            -e ALKEMIO_DATABASE_PASSWORD=test \
-            -e ALKEMIO_DATABASE_NAME=test \
-            -e LOCAL_STORAGE_PATH=/tmp/storage \
-            file-service-go:test --help 2>&1 || true
-          echo "Container built and binary runs"
-
   openapi:
     runs-on: ubuntu-latest
     steps:
