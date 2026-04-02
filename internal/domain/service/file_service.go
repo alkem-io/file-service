@@ -188,7 +188,10 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	// Clean up old file if content changed and no other documents reference it
 	if oldExternalID != stored.ExternalID {
 		count, countErr := s.Repo.CountByExternalID(ctx, oldExternalID)
-		if countErr == nil && count == 0 {
+		if countErr != nil {
+			s.Logger.Warn("cleanup: failed to count references for old file",
+				zap.String("externalID", oldExternalID), zap.Error(countErr))
+		} else if count == 0 {
 			if delErr := s.Storage.Delete(oldExternalID); delErr != nil {
 				s.Logger.Warn("cleanup: failed to delete old file", zap.String("externalID", oldExternalID), zap.Error(delErr))
 			}

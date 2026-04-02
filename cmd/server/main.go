@@ -13,11 +13,11 @@ import (
 	"github.com/alkem-io/file-service-go/internal/config"
 )
 
-func main() {
+func run() int {
 	logger, err := config.NewLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer func() { _ = logger.Sync() }()
 
@@ -54,13 +54,20 @@ func main() {
 		}
 	}()
 
+	exitCode := 0
 	select {
 	case sig := <-sigCh:
 		logger.Info("received signal, shutting down", zap.String("signal", sig.String()))
 	case err := <-errCh:
 		logger.Error("server failed", zap.Error(err))
+		exitCode = 1
 	}
 
 	shutdownServer(srv, logger)
 	logger.Info("server stopped")
+	return exitCode
+}
+
+func main() {
+	os.Exit(run())
 }
