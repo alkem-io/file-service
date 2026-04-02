@@ -32,7 +32,7 @@
 | `LOCAL_STORAGE_PATH` | `../server/.storage` | File storage root |
 | `STORAGE_TYPE` | `local` | Storage backend (`local` or `s3` future) |
 | `DOCUMENT_MAX_AGE` | `86400` | Cache-Control max-age (seconds) |
-| `AUTH_BREAKER_FAILURE_THRESHOLD` | `3` | Circuit breaker failure threshold (shared by h2c and NATS) |
+| `AUTH_BREAKER_FAILURE_THRESHOLD` | `3` | Circuit breaker failure threshold (h2c transport) |
 | `AUTH_BREAKER_TIMEOUT_SECONDS` | `15` | Circuit breaker open duration |
 | `AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS` | `2` | Half-open test requests |
 
@@ -94,7 +94,7 @@ db/
 ### Public file serve (GET /rest/storage/document/:id)
 1. Extract actor ID from JWT
 2. Query document by ID → get externalID, authorizationPolicyId, mimeType
-3. Auth check via h2c or NATS (agentId, "read", authorizationPolicyId) — circuit breaker protected
+3. Auth check via h2c or NATS (agentId, "read", authorizationPolicyId) — circuit breaker on h2c path; NATS relies on connection-level reconnection
 4. ETag check: If-None-Match against content hash (externalID) → 304 if match
 5. If allowed → read file from storage → stream with headers (ETag = externalID)
 6. If denied → 403

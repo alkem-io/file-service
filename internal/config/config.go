@@ -57,104 +57,39 @@ func Load() (*Config, error) {
 	natsURL := getenv("NATS_URL", "")
 	authServiceURL := getenv("AUTH_SERVICE_URL", "")
 
-	// Determine auth transport: h2c preferred if AUTH_SERVICE_URL is set
-	authTransport := ""
-	switch {
-	case authServiceURL != "":
-		authTransport = "h2c"
-	case natsURL != "":
-		authTransport = "nats"
-	default:
-		return nil, fmt.Errorf("either AUTH_SERVICE_URL or NATS_URL must be set")
-	}
-
-	dbHost := getenv("ALKEMIO_DATABASE_HOST", "")
-	if dbHost == "" {
-		return nil, fmt.Errorf("ALKEMIO_DATABASE_HOST is required")
-	}
-
-	dbPort, err := getenvInt("ALKEMIO_DATABASE_PORT", 5432)
+	authTransport, err := resolveAuthTransport(authServiceURL, natsURL)
 	if err != nil {
-		return nil, fmt.Errorf("ALKEMIO_DATABASE_PORT: %w", err)
+		return nil, err
 	}
 
-	dbUser := getenv("ALKEMIO_DATABASE_USERNAME", "")
-	if dbUser == "" {
-		return nil, fmt.Errorf("ALKEMIO_DATABASE_USERNAME is required")
-	}
-
-	dbPass := getenv("ALKEMIO_DATABASE_PASSWORD", "")
-	if dbPass == "" {
-		return nil, fmt.Errorf("ALKEMIO_DATABASE_PASSWORD is required")
-	}
-
-	dbName := getenv("ALKEMIO_DATABASE_NAME", "")
-	if dbName == "" {
-		return nil, fmt.Errorf("ALKEMIO_DATABASE_NAME is required")
-	}
-
-	port, err := getenvInt("PORT", 4003)
+	dbCfg, err := loadDatabaseConfig()
 	if err != nil {
-		return nil, fmt.Errorf("PORT: %w", err)
+		return nil, err
+	}
+
+	port, err := getenvPort("PORT", 4003)
+	if err != nil {
+		return nil, err
 	}
 
 	maxAgeSecs, err := getenvInt("DOCUMENT_MAX_AGE", 86400)
 	if err != nil {
 		return nil, fmt.Errorf("DOCUMENT_MAX_AGE: %w", err)
 	}
+	if maxAgeSecs < 0 {
+		return nil, fmt.Errorf("DOCUMENT_MAX_AGE must be >= 0")
+	}
 
-	// Circuit breaker settings — shared by both auth transports
-	failureThreshold, err := getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3)
+	breakerCfg, err := loadBreakerConfig()
 	if err != nil {
-		return nil, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD: %w", err)
-	}
-	if failureThreshold < 1 {
-		return nil, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD must be positive")
+		return nil, err
 	}
 
-	breakerTimeout, err := getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15)
-	if err != nil {
-		return nil, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS: %w", err)
-	}
-	if breakerTimeout < 5 {
-		return nil, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS must be >= 5")
-	}
-
-	halfOpen, err := getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2)
-	if err != nil {
-		return nil, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS: %w", err)
-	}
-	if halfOpen < 1 {
-		return nil, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS must be positive")
-	}
-
-	breakerCfg := BreakerConfig{
-		FailureThreshold:    failureThreshold,
-		TimeoutSecs:         breakerTimeout,
-		HalfOpenMaxRequests: halfOpen,
-	}
-
-	// NATS-specific settings — only when transport is "nats"
 	var natsCfg NATSConfig
 	if authTransport == "nats" {
-		reconnectWait, err := getenvInt("NATS_RECONNECT_WAIT_MS", 1000)
+		natsCfg, err = loadNATSConfig(natsURL)
 		if err != nil {
-			return nil, fmt.Errorf("NATS_RECONNECT_WAIT_MS: %w", err)
-		}
-
-		reconnectMax, err := getenvInt("NATS_RECONNECT_MAX_WAIT_MS", 30000)
-		if err != nil {
-			return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS: %w", err)
-		}
-		if reconnectMax < reconnectWait {
-			return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS (%d) must be >= NATS_RECONNECT_WAIT_MS (%d)", reconnectMax, reconnectWait)
-		}
-
-		natsCfg = NATSConfig{
-			URL:                natsURL,
-			Subject:            getenv("NATS_SUBJECT", "auth.evaluate"),
-			ReconnectWaitMS:    reconnectWait,
-			ReconnectMaxWaitMS: reconnectMax,
+			return nil, err
 		}
 	}
 
@@ -166,14 +101,114 @@ func Load() (*Config, error) {
 		AuthTransport:  authTransport,
 		AuthServiceURL: authServiceURL,
 		Breaker:        breakerCfg,
-		AlkemioDB: DatabaseConfig{
-			Host:     dbHost,
-			Port:     dbPort,
-			Username: dbUser,
-			Password: dbPass,
-			Name:     dbName,
-		},
-		NATS: natsCfg,
+		AlkemioDB:      dbCfg,
+		NATS:           natsCfg,
+	}, nil
+}
+
+func resolveAuthTransport(authServiceURL, natsURL string) (string, error) {
+	switch {
+	case authServiceURL != "":
+		return "h2c", nil
+	case natsURL != "":
+		return "nats", nil
+	default:
+		return "", fmt.Errorf("either AUTH_SERVICE_URL or NATS_URL must be set")
+	}
+}
+
+func loadDatabaseConfig() (DatabaseConfig, error) {
+	dbHost := getenv("ALKEMIO_DATABASE_HOST", "")
+	if dbHost == "" {
+		return DatabaseConfig{}, fmt.Errorf("ALKEMIO_DATABASE_HOST is required")
+	}
+
+	dbPort, err := getenvPort("ALKEMIO_DATABASE_PORT", 5432)
+	if err != nil {
+		return DatabaseConfig{}, err
+	}
+
+	dbUser := getenv("ALKEMIO_DATABASE_USERNAME", "")
+	if dbUser == "" {
+		return DatabaseConfig{}, fmt.Errorf("ALKEMIO_DATABASE_USERNAME is required")
+	}
+
+	dbPass := getenv("ALKEMIO_DATABASE_PASSWORD", "")
+	if dbPass == "" {
+		return DatabaseConfig{}, fmt.Errorf("ALKEMIO_DATABASE_PASSWORD is required")
+	}
+
+	dbName := getenv("ALKEMIO_DATABASE_NAME", "")
+	if dbName == "" {
+		return DatabaseConfig{}, fmt.Errorf("ALKEMIO_DATABASE_NAME is required")
+	}
+
+	return DatabaseConfig{
+		Host:     dbHost,
+		Port:     dbPort,
+		Username: dbUser,
+		Password: dbPass,
+		Name:     dbName,
+	}, nil
+}
+
+func loadBreakerConfig() (BreakerConfig, error) {
+	failureThreshold, err := getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3)
+	if err != nil {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD: %w", err)
+	}
+	if failureThreshold < 1 {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD must be positive")
+	}
+
+	breakerTimeout, err := getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15)
+	if err != nil {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS: %w", err)
+	}
+	if breakerTimeout < 5 {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS must be >= 5")
+	}
+
+	halfOpen, err := getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2)
+	if err != nil {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS: %w", err)
+	}
+	if halfOpen < 1 {
+		return BreakerConfig{}, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS must be positive")
+	}
+
+	return BreakerConfig{
+		FailureThreshold:    failureThreshold,
+		TimeoutSecs:         breakerTimeout,
+		HalfOpenMaxRequests: halfOpen,
+	}, nil
+}
+
+func loadNATSConfig(natsURL string) (NATSConfig, error) {
+	reconnectWait, err := getenvInt("NATS_RECONNECT_WAIT_MS", 1000)
+	if err != nil {
+		return NATSConfig{}, fmt.Errorf("NATS_RECONNECT_WAIT_MS: %w", err)
+	}
+	if reconnectWait < 1 {
+		return NATSConfig{}, fmt.Errorf("NATS_RECONNECT_WAIT_MS must be positive")
+	}
+
+	reconnectMax, err := getenvInt("NATS_RECONNECT_MAX_WAIT_MS", 30000)
+	if err != nil {
+		return NATSConfig{}, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS: %w", err)
+	}
+	if reconnectMax < 1 {
+		return NATSConfig{}, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS must be positive")
+	}
+	if reconnectMax < reconnectWait {
+		return NATSConfig{}, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS (%d) must be >= NATS_RECONNECT_WAIT_MS (%d)", reconnectMax, reconnectWait)
+	}
+
+	return NATSConfig{
+		URL:                natsURL,
+		Subject:            getenv("NATS_SUBJECT", "auth.evaluate"),
+		ReconnectWaitMS:    reconnectWait,
+		ReconnectMaxWaitMS: reconnectMax,
 	}, nil
 }
 
@@ -182,6 +217,17 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvPort(key string, fallback int) (int, error) {
+	v, err := getenvInt(key, fallback)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if v < 1 || v > 65535 {
+		return 0, fmt.Errorf("%s must be between 1 and 65535", key)
+	}
+	return v, nil
 }
 
 func getenvInt(key string, fallback int) (int, error) {

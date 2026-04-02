@@ -114,6 +114,51 @@ func TestLoad_ValidationErrors(t *testing.T) {
 		t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
 	}
 
+	t.Run("DBPortOutOfRange", func(t *testing.T) {
+		base(t)
+		t.Setenv("ALKEMIO_DATABASE_PORT", "99999")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("AppPortOutOfRange", func(t *testing.T) {
+		base(t)
+		t.Setenv("PORT", "0")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("NegativeMaxAge", func(t *testing.T) {
+		base(t)
+		t.Setenv("DOCUMENT_MAX_AGE", "-1")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("ReconnectWaitZero", func(t *testing.T) {
+		base(t)
+		t.Setenv("NATS_RECONNECT_WAIT_MS", "0")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("ReconnectMaxZero", func(t *testing.T) {
+		base(t)
+		t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "0")
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
 	t.Run("ReconnectMaxLessThanWait", func(t *testing.T) {
 		base(t)
 		t.Setenv("NATS_RECONNECT_WAIT_MS", "5000")
