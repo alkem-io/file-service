@@ -14,8 +14,16 @@ type Config struct {
 	DocumentMaxAge time.Duration
 	AlkemioDB      DatabaseConfig
 	NATS           NATSConfig
+	Breaker        BreakerConfig
 	AuthServiceURL string // h2c URL for auth-evaluation-service (e.g., "http://auth-service:6060")
 	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
+}
+
+// BreakerConfig is shared circuit breaker settings for any auth transport.
+type BreakerConfig struct {
+	FailureThreshold    int
+	TimeoutSecs         int
+	HalfOpenMaxRequests int
 }
 
 type DatabaseConfig struct {
@@ -32,13 +40,10 @@ func (d DatabaseConfig) ConnString() string {
 }
 
 type NATSConfig struct {
-	URL                 string
-	Subject             string
-	ReconnectWaitMS     int
-	ReconnectMaxWaitMS  int
-	FailureThreshold    int
-	BreakerTimeoutSecs  int
-	HalfOpenMaxRequests int
+	URL                string
+	Subject            string
+	ReconnectWaitMS    int
+	ReconnectMaxWaitMS int
 }
 
 func Load() (*Config, error) {
@@ -91,6 +96,38 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("DOCUMENT_MAX_AGE: %w", err)
 	}
 
+	// Circuit breaker settings — shared by both auth transports
+	failureThreshold, err := getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3)
+	if err != nil {
+		return nil, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD: %w", err)
+	}
+	if failureThreshold < 1 {
+		return nil, fmt.Errorf("AUTH_BREAKER_FAILURE_THRESHOLD must be positive")
+	}
+
+	breakerTimeout, err := getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15)
+	if err != nil {
+		return nil, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS: %w", err)
+	}
+	if breakerTimeout < 5 {
+		return nil, fmt.Errorf("AUTH_BREAKER_TIMEOUT_SECONDS must be >= 5")
+	}
+
+	halfOpen, err := getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2)
+	if err != nil {
+		return nil, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS: %w", err)
+	}
+	if halfOpen < 1 {
+		return nil, fmt.Errorf("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS must be positive")
+	}
+
+	breakerCfg := BreakerConfig{
+		FailureThreshold:    failureThreshold,
+		TimeoutSecs:         breakerTimeout,
+		HalfOpenMaxRequests: halfOpen,
+	}
+
+	// NATS-specific settings — only when transport is "nats"
 	var natsCfg NATSConfig
 	if authTransport == "nats" {
 		reconnectWait, err := getenvInt("NATS_RECONNECT_WAIT_MS", 1000)
@@ -106,38 +143,11 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("NATS_RECONNECT_MAX_WAIT_MS (%d) must be >= NATS_RECONNECT_WAIT_MS (%d)", reconnectMax, reconnectWait)
 		}
 
-		failureThreshold, err := getenvInt("NATS_FAILURE_THRESHOLD", 3)
-		if err != nil {
-			return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD: %w", err)
-		}
-		if failureThreshold < 1 {
-			return nil, fmt.Errorf("NATS_FAILURE_THRESHOLD must be positive")
-		}
-
-		breakerTimeout, err := getenvInt("NATS_BREAKER_TIMEOUT_SECONDS", 15)
-		if err != nil {
-			return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS: %w", err)
-		}
-		if breakerTimeout < 5 {
-			return nil, fmt.Errorf("NATS_BREAKER_TIMEOUT_SECONDS must be >= 5")
-		}
-
-		halfOpen, err := getenvInt("NATS_HALF_OPEN_MAX_REQUESTS", 2)
-		if err != nil {
-			return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS: %w", err)
-		}
-		if halfOpen < 1 {
-			return nil, fmt.Errorf("NATS_HALF_OPEN_MAX_REQUESTS must be positive")
-		}
-
 		natsCfg = NATSConfig{
-			URL:                 natsURL,
-			Subject:             getenv("NATS_SUBJECT", "auth.evaluate"),
-			ReconnectWaitMS:     reconnectWait,
-			ReconnectMaxWaitMS:  reconnectMax,
-			FailureThreshold:    failureThreshold,
-			BreakerTimeoutSecs:  breakerTimeout,
-			HalfOpenMaxRequests: halfOpen,
+			URL:                natsURL,
+			Subject:            getenv("NATS_SUBJECT", "auth.evaluate"),
+			ReconnectWaitMS:    reconnectWait,
+			ReconnectMaxWaitMS: reconnectMax,
 		}
 	}
 
@@ -148,6 +158,7 @@ func Load() (*Config, error) {
 		DocumentMaxAge: time.Duration(maxAgeSecs) * time.Second,
 		AuthTransport:  authTransport,
 		AuthServiceURL: authServiceURL,
+		Breaker:        breakerCfg,
 		AlkemioDB: DatabaseConfig{
 			Host:     dbHost,
 			Port:     dbPort,

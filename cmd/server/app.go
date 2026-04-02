@@ -41,16 +41,11 @@ func connectNATS(cfg config.NATSConfig, logger *zap.Logger) (*nats.Conn, error) 
 func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port.AuthPort {
 	switch cfg.AuthTransport {
 	case "h2c":
-		// Use same env vars as NATS breaker, with sensible defaults for h2c
-		failureThreshold := 3
-		breakerTimeout := 15 * time.Second
-		halfOpenMax := 2
-		if cfg.NATS.FailureThreshold > 0 {
-			failureThreshold = cfg.NATS.FailureThreshold
-			breakerTimeout = time.Duration(cfg.NATS.BreakerTimeoutSecs) * time.Second
-			halfOpenMax = cfg.NATS.HalfOpenMaxRequests
-		}
-		breaker := resilience.NewBreaker(failureThreshold, breakerTimeout, halfOpenMax)
+		breaker := resilience.NewBreaker(
+			cfg.Breaker.FailureThreshold,
+			time.Duration(cfg.Breaker.TimeoutSecs)*time.Second,
+			cfg.Breaker.HalfOpenMaxRequests,
+		)
 		return authhttp.New(cfg.AuthServiceURL, breaker, logger.Named("auth-h2c"))
 	default:
 		return &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject}

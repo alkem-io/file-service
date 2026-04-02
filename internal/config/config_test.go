@@ -46,8 +46,8 @@ func TestLoad_MinimalValid(t *testing.T) {
 	if cfg.NATS.ReconnectWaitMS != 1000 {
 		t.Errorf("NATS.ReconnectWaitMS = %d", cfg.NATS.ReconnectWaitMS)
 	}
-	if cfg.NATS.FailureThreshold != 3 {
-		t.Errorf("NATS.FailureThreshold = %d", cfg.NATS.FailureThreshold)
+	if cfg.Breaker.FailureThreshold != 3 {
+		t.Errorf("NATS.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
 }
 
@@ -62,8 +62,8 @@ func TestLoad_CustomValues(t *testing.T) {
 	t.Setenv("LOCAL_STORAGE_PATH", "/data/files")
 	t.Setenv("DOCUMENT_MAX_AGE", "3600")
 	t.Setenv("NATS_SUBJECT", "custom.subject")
-	t.Setenv("NATS_FAILURE_THRESHOLD", "5")
-	t.Setenv("NATS_BREAKER_TIMEOUT_SECONDS", "30")
+	t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "5")
+	t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "30")
 
 	cfg, err := Load()
 	if err != nil {
@@ -85,8 +85,8 @@ func TestLoad_CustomValues(t *testing.T) {
 	if cfg.NATS.Subject != "custom.subject" {
 		t.Errorf("NATS.Subject = %q", cfg.NATS.Subject)
 	}
-	if cfg.NATS.FailureThreshold != 5 {
-		t.Errorf("NATS.FailureThreshold = %d", cfg.NATS.FailureThreshold)
+	if cfg.Breaker.FailureThreshold != 5 {
+		t.Errorf("NATS.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestLoad_ValidationErrors(t *testing.T) {
 
 	t.Run("FailureThresholdZero", func(t *testing.T) {
 		base(t)
-		t.Setenv("NATS_FAILURE_THRESHOLD", "0")
+		t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "0")
 		_, err := Load()
 		if err == nil {
 			t.Fatal("expected error")
@@ -135,7 +135,7 @@ func TestLoad_ValidationErrors(t *testing.T) {
 
 	t.Run("BreakerTimeoutTooLow", func(t *testing.T) {
 		base(t)
-		t.Setenv("NATS_BREAKER_TIMEOUT_SECONDS", "2")
+		t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "2")
 		_, err := Load()
 		if err == nil {
 			t.Fatal("expected error")
@@ -144,7 +144,7 @@ func TestLoad_ValidationErrors(t *testing.T) {
 
 	t.Run("HalfOpenZero", func(t *testing.T) {
 		base(t)
-		t.Setenv("NATS_HALF_OPEN_MAX_REQUESTS", "0")
+		t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "0")
 		_, err := Load()
 		if err == nil {
 			t.Fatal("expected error")
@@ -252,7 +252,7 @@ func TestLoad_InvalidHalfOpen(t *testing.T) {
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
 	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
 	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	t.Setenv("NATS_HALF_OPEN_MAX_REQUESTS", "xyz")
+	t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "xyz")
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error")

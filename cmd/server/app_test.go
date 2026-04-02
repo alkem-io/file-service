@@ -58,12 +58,9 @@ func TestConnectNATS_Success(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 	cfg := config.NATSConfig{
-		URL:                 srv.ClientURL(),
-		ReconnectWaitMS:     100,
-		ReconnectMaxWaitMS:  1000,
-		FailureThreshold:    3,
-		BreakerTimeoutSecs:  5,
-		HalfOpenMaxRequests: 2,
+		URL:                srv.ClientURL(),
+		ReconnectWaitMS:    100,
+		ReconnectMaxWaitMS: 1000,
 	}
 
 	nc, err := connectNATS(cfg, logger)
@@ -80,12 +77,9 @@ func TestConnectNATS_Success(t *testing.T) {
 func TestConnectNATS_BadURL(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	cfg := config.NATSConfig{
-		URL:                 "nats://127.0.0.1:1",
-		ReconnectWaitMS:     100,
-		ReconnectMaxWaitMS:  200,
-		FailureThreshold:    1,
-		BreakerTimeoutSecs:  5,
-		HalfOpenMaxRequests: 1,
+		URL:                "nats://127.0.0.1:1",
+		ReconnectWaitMS:    100,
+		ReconnectMaxWaitMS: 200,
 	}
 
 	_, err := connectNATS(cfg, logger)
