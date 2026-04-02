@@ -128,7 +128,14 @@ func parseCreateForm(r *http.Request) (content []byte, input model.CreateDocumen
 		createdBy = &parsed
 	}
 
-	temporaryLocation := r.FormValue("temporaryLocation") == "true"
+	temporaryLocation := false
+	if v := r.FormValue("temporaryLocation"); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
+		}
+		temporaryLocation = parsed
+	}
 
 	if v := r.FormValue("allowedMimeTypes"); v != "" {
 		parts := strings.Split(v, ",")
@@ -141,8 +148,8 @@ func parseCreateForm(r *http.Request) (content []byte, input model.CreateDocumen
 
 	if v := r.FormValue("maxFileSize"); v != "" {
 		parsed, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, input, nil, 0, fmt.Errorf("invalid maxFileSize")
+		if err != nil || parsed < 0 {
+			return nil, input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
 		}
 		maxFileSize = parsed
 	}
@@ -283,8 +290,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc, doc.Version)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			// With optimistic locking, 0 rows = either not found or version mismatch
+		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
 			return
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/port"
@@ -19,6 +20,7 @@ type FileService struct {
 	Auth      port.AuthPort
 	Storage   port.StoragePort
 	Processor port.ImageProcessor
+	Logger    *zap.Logger
 }
 
 // ServeResult contains file content and metadata for serving.
@@ -87,7 +89,9 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	docID, err := uuid.NewV7()
 	if err != nil {
 		if stored.Created {
-			_ = s.Storage.Delete(stored.ExternalID)
+			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
+				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
+			}
 		}
 		return nil, fmt.Errorf("generate UUIDv7: %w", err)
 	}
@@ -111,7 +115,9 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	if err != nil {
 		// Only delete file if this request actually created it (not a dedup match)
 		if stored.Created {
-			_ = s.Storage.Delete(stored.ExternalID)
+			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
+				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
+			}
 		}
 		return nil, fmt.Errorf("create document record: %w", err)
 	}
@@ -133,13 +139,16 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 	// both see count > 1 and skip file cleanup
 	count, err := s.Repo.CountByExternalID(ctx, deleted.ExternalID)
 	if err != nil {
-		// Row is already deleted; return success but log the count failure
+		s.Logger.Warn("cleanup: failed to count remaining references after delete",
+			zap.String("externalID", deleted.ExternalID), zap.Error(err))
 		return &deleted, nil
 	}
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		_ = s.Storage.Delete(deleted.ExternalID)
+		if delErr := s.Storage.Delete(deleted.ExternalID); delErr != nil {
+			s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", deleted.ExternalID), zap.Error(delErr))
+		}
 	}
 
 	return &deleted, nil
@@ -169,7 +178,9 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	if err != nil {
 		// Only delete if this request actually created the file (not a dedup match)
 		if stored.Created {
-			_ = s.Storage.Delete(stored.ExternalID)
+			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
+				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
+			}
 		}
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
@@ -178,7 +189,9 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	if oldExternalID != stored.ExternalID {
 		count, countErr := s.Repo.CountByExternalID(ctx, oldExternalID)
 		if countErr == nil && count == 0 {
-			_ = s.Storage.Delete(oldExternalID)
+			if delErr := s.Storage.Delete(oldExternalID); delErr != nil {
+				s.Logger.Warn("cleanup: failed to delete old file", zap.String("externalID", oldExternalID), zap.Error(delErr))
+			}
 		}
 	}
 
@@ -194,6 +207,10 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 func (s *FileService) UpdateDocumentLocation(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) (*model.Document, error) {
 	err := s.Repo.UpdateLocation(ctx, documentID, storageBucketID, temporaryLocation, version)
 	if err != nil {
+		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			return nil, ErrConflict
+		}
 		return nil, err
 	}
 	doc, err := s.Repo.GetByID(ctx, documentID)

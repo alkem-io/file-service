@@ -6,10 +6,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/port"
 )
+
+var nopLogger = zap.NewNop()
 
 // --- Mocks ---
 
@@ -91,7 +94,7 @@ func (m *mockProcessor) Process(content []byte, mimeType string) ([]byte, string
 // --- Tests ---
 
 func TestServeFile_Allowed(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:    &mockRepo{doc: model.Document{ExternalID: "abc", MimeType: "text/plain", AuthorizationID: uuid.New()}},
 		Auth:    &mockAuth{allowed: true},
 		Storage: &mockStorage{data: []byte("content")},
@@ -107,7 +110,7 @@ func TestServeFile_Allowed(t *testing.T) {
 }
 
 func TestServeFile_Denied(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:    &mockRepo{doc: model.Document{AuthorizationID: uuid.New()}},
 		Auth:    &mockAuth{allowed: false},
 		Storage: &mockStorage{},
@@ -120,7 +123,7 @@ func TestServeFile_Denied(t *testing.T) {
 }
 
 func TestCreateDocument_Happy(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{},
@@ -145,7 +148,7 @@ func TestCreateDocument_Happy(t *testing.T) {
 }
 
 func TestCreateDocument_TooLarge(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{},
@@ -159,7 +162,7 @@ func TestCreateDocument_TooLarge(t *testing.T) {
 }
 
 func TestCreateDocument_UnsupportedMIME(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{},
@@ -174,7 +177,7 @@ func TestCreateDocument_UnsupportedMIME(t *testing.T) {
 
 func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{createErr: errors.New("db error")},
 		Storage:   storage,
 		Processor: &mockProcessor{},
@@ -193,7 +196,7 @@ func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
 func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
 	authID := uuid.New()
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:          model.Document{ExternalID: "abc"},
 			count:        0, // 0 remaining AFTER delete = last reference
@@ -216,7 +219,7 @@ func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
 
 func TestDeleteDocument_SharedFile_KeepsFile(t *testing.T) {
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:          model.Document{ExternalID: "shared"},
 			count:        1, // 1 remaining AFTER delete = other doc still references it
@@ -235,7 +238,7 @@ func TestDeleteDocument_SharedFile_KeepsFile(t *testing.T) {
 }
 
 func TestStoreAndLink_Happy(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{},
@@ -252,7 +255,7 @@ func TestStoreAndLink_Happy(t *testing.T) {
 
 func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}, updateErr: errors.New("db error")},
 		Storage:   storage,
 		Processor: &mockProcessor{},
@@ -270,7 +273,7 @@ func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
 func TestUpdateDocumentLocation_Happy(t *testing.T) {
 	docID := uuid.New()
 	newBucket := uuid.New()
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{doc: model.Document{
 			ID:                docID,
 			StorageBucketID:   uuid.New(),
@@ -288,7 +291,7 @@ func TestUpdateDocumentLocation_Happy(t *testing.T) {
 }
 
 func TestUpdateDocumentLocation_NotFound(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
@@ -299,7 +302,7 @@ func TestUpdateDocumentLocation_NotFound(t *testing.T) {
 }
 
 func TestUpdateDocumentLocation_UpdateFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:       model.Document{ID: uuid.New()},
 			updateErr: errors.New("db error"),
@@ -313,7 +316,7 @@ func TestUpdateDocumentLocation_UpdateFails(t *testing.T) {
 }
 
 func TestServeFile_AuthError(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:    &mockRepo{doc: model.Document{AuthorizationID: uuid.New()}},
 		Auth:    &mockAuth{err: errors.New("nats timeout")},
 		Storage: &mockStorage{},
@@ -326,7 +329,7 @@ func TestServeFile_AuthError(t *testing.T) {
 }
 
 func TestServeFile_DocNotFound(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{getErr: errors.New("not found")},
 	}
 
@@ -337,7 +340,7 @@ func TestServeFile_DocNotFound(t *testing.T) {
 }
 
 func TestServeFile_StorageReadFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:    &mockRepo{doc: model.Document{ExternalID: "abc", AuthorizationID: uuid.New()}},
 		Auth:    &mockAuth{allowed: true},
 		Storage: &mockStorage{readErr: errors.New("disk error")},
@@ -350,7 +353,7 @@ func TestServeFile_StorageReadFails(t *testing.T) {
 }
 
 func TestDeleteDocument_NotFound(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{deleteErr: errors.New("not found")},
 	}
 
@@ -373,7 +376,7 @@ func TestContains(t *testing.T) {
 }
 
 func TestCreateDocument_StorageFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{saveErr: errors.New("disk full")},
 		Processor: &mockProcessor{},
@@ -387,7 +390,7 @@ func TestCreateDocument_StorageFails(t *testing.T) {
 }
 
 func TestStoreAndLink_DocNotFound(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{getErr: errors.New("not found")},
 	}
 
@@ -398,7 +401,7 @@ func TestStoreAndLink_DocNotFound(t *testing.T) {
 }
 
 func TestStoreAndLink_StorageFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
 		Storage:   &mockStorage{saveErr: errors.New("disk full")},
 		Processor: &mockProcessor{},
@@ -411,7 +414,7 @@ func TestStoreAndLink_StorageFails(t *testing.T) {
 }
 
 func TestCreateDocument_ProcessorFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
@@ -425,7 +428,7 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 }
 
 func TestStoreAndLink_ProcessorFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
 		Storage:   &mockStorage{},
 		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
@@ -440,7 +443,7 @@ func TestStoreAndLink_ProcessorFails(t *testing.T) {
 func TestDeleteDocument_CountFails_StillSucceeds(t *testing.T) {
 	// Post-delete count failure is non-fatal — row is already deleted
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			deleteResult: model.DeletedDocument{ExternalID: "abc", AuthorizationID: uuid.New()},
 			countErr:     errors.New("db error"),
@@ -459,7 +462,7 @@ func TestDeleteDocument_CountFails_StillSucceeds(t *testing.T) {
 }
 
 func TestDeleteDocument_DeleteRepoFails(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:       model.Document{ExternalID: "abc"},
 			count:     1,
@@ -476,7 +479,7 @@ func TestDeleteDocument_DeleteRepoFails(t *testing.T) {
 
 func TestStoreAndLink_CleansUpOldBlob(t *testing.T) {
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:   model.Document{ID: uuid.New(), ExternalID: "old-hash"},
 			count: 0, // old hash has no remaining references
@@ -500,7 +503,7 @@ func TestStoreAndLink_CleansUpOldBlob(t *testing.T) {
 
 func TestStoreAndLink_KeepsOldBlobWhenShared(t *testing.T) {
 	storage := &mockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:   model.Document{ID: uuid.New(), ExternalID: "shared-hash"},
 			count: 2, // other docs still reference old hash
@@ -519,7 +522,7 @@ func TestStoreAndLink_KeepsOldBlobWhenShared(t *testing.T) {
 }
 
 func TestUpdateDocumentLocation_VersionConflict(t *testing.T) {
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:       model.Document{ID: uuid.New(), Version: 5},
 			updateErr: model.ErrDocumentNotFound, // 0 rows = version mismatch
@@ -536,7 +539,7 @@ func TestCreateDocument_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 	storage := &mockStorage{}
 	// Override Save to return Created=false (dedup matched existing file)
 	dedupStorage := &dedupMockStorage{inner: storage}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{createErr: errors.New("db error")},
 		Storage:   dedupStorage,
 		Processor: &mockProcessor{},
@@ -568,7 +571,7 @@ func (m *dedupMockStorage) Exists(id string) (bool, error) { return m.inner.Exis
 
 func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 	dedupStorage := &dedupMockStorage{}
-	svc := &FileService{
+	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New(), ExternalID: "old"}, updateErr: errors.New("db error")},
 		Storage:   dedupStorage,
 		Processor: &mockProcessor{},

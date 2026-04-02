@@ -109,7 +109,8 @@ func TestBuildFileService(t *testing.T) {
 		t.Skip("cannot create pool stub")
 	}
 
-	svc := buildFileService(pool, nil, cfg)
+	logger, _ := zap.NewDevelopment()
+	svc := buildFileService(pool, nil, cfg, logger)
 	if svc == nil {
 		t.Fatal("nil service")
 	}

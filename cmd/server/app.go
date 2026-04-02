@@ -36,12 +36,13 @@ func connectNATS(cfg config.NATSConfig, logger *zap.Logger) (*nats.Conn, error) 
 	return resilience.ConnectNATS(cfg, logger)
 }
 
-func buildFileService(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config) *service.FileService {
+func buildFileService(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, logger *zap.Logger) *service.FileService {
 	return &service.FileService{
 		Repo:      alkemiodb.New(pool),
 		Auth:      &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject},
 		Storage:   local.New(cfg.StoragePath),
 		Processor: imaging.New(),
+		Logger:    logger,
 	}
 }
 

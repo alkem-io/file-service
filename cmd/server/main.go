@@ -39,7 +39,7 @@ func main() {
 	}
 	defer nc.Close()
 
-	fileSvc := buildFileService(pool, nc, cfg)
+	fileSvc := buildFileService(pool, nc, cfg, logger)
 	router := buildRouter(pool, nc, cfg, fileSvc, logger)
 	srv := newHTTPServer(cfg.Port, router)
 
