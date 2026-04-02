@@ -44,7 +44,7 @@ func run() int {
 		defer nc.Close()
 	}
 
-	auth := buildAuthClient(cfg, nc)
+	auth := buildAuthClient(cfg, nc, logger)
 	logger.Info("auth transport configured", zap.String("transport", cfg.AuthTransport))
 
 	fileSvc := buildFileService(pool, auth, cfg, logger)

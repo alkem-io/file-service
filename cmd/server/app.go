@@ -38,10 +38,20 @@ func connectNATS(cfg config.NATSConfig, logger *zap.Logger) (*nats.Conn, error) 
 	return resilience.ConnectNATS(cfg, logger)
 }
 
-func buildAuthClient(cfg *config.Config, nc *nats.Conn) port.AuthPort {
+func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port.AuthPort {
 	switch cfg.AuthTransport {
 	case "h2c":
-		return authhttp.New(cfg.AuthServiceURL)
+		// Use same env vars as NATS breaker, with sensible defaults for h2c
+		failureThreshold := 3
+		breakerTimeout := 15 * time.Second
+		halfOpenMax := 2
+		if cfg.NATS.FailureThreshold > 0 {
+			failureThreshold = cfg.NATS.FailureThreshold
+			breakerTimeout = time.Duration(cfg.NATS.BreakerTimeoutSecs) * time.Second
+			halfOpenMax = cfg.NATS.HalfOpenMaxRequests
+		}
+		breaker := resilience.NewBreaker(failureThreshold, breakerTimeout, halfOpenMax)
+		return authhttp.New(cfg.AuthServiceURL, breaker, logger.Named("auth-h2c"))
 	default:
 		return &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject}
 	}

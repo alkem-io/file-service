@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -42,7 +43,7 @@ func TestH2CClient_Allowed(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(evaluateResponse{Allowed: true, Reason: "granted"})
 	}))
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil, zap.NewNop())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -64,7 +65,7 @@ func TestH2CClient_Denied(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(evaluateResponse{Allowed: false, Reason: "no access"})
 	}))
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil, zap.NewNop())
 	result, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +86,7 @@ func TestH2CClient_ServiceDegraded(t *testing.T) {
 		})
 	}))
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil, zap.NewNop())
 	_, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for degraded service")
@@ -98,7 +99,7 @@ func TestH2CClient_BadRequest(t *testing.T) {
 		_, _ = w.Write([]byte("invalid request"))
 	}))
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil, zap.NewNop())
 	_, err := client.CheckPrivilege(context.Background(), "", "", "")
 	if err == nil {
 		t.Fatal("expected error for bad request")
@@ -111,7 +112,7 @@ func TestH2CClient_InvalidJSON(t *testing.T) {
 		_, _ = w.Write([]byte("not json"))
 	}))
 
-	client := New(srv.URL)
+	client := New(srv.URL, nil, zap.NewNop())
 	_, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -119,7 +120,7 @@ func TestH2CClient_InvalidJSON(t *testing.T) {
 }
 
 func TestH2CClient_ConnectionRefused(t *testing.T) {
-	client := New("http://127.0.0.1:1") // nothing listening
+	client := New("http://127.0.0.1:1", nil, zap.NewNop()) // nothing listening
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -130,7 +131,7 @@ func TestH2CClient_ConnectionRefused(t *testing.T) {
 }
 
 func TestH2CClient_NilClient(t *testing.T) {
-	client := &Client{httpClient: nil, baseURL: "http://localhost"}
+	client := &Client{httpClient: nil, baseURL: "http://localhost", logger: zap.NewNop()}
 	_, err := client.CheckPrivilege(context.Background(), "a", "b", "c")
 	if err == nil {
 		t.Fatal("expected error for nil client")
