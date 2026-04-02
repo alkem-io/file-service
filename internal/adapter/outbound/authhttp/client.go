@@ -10,11 +10,11 @@ import (
 	"net"
 	"net/http"
 
+	gobreaker "github.com/sony/gobreaker/v2"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
-	"github.com/alkem-io/file-service-go/internal/resilience"
 )
 
 type evaluateRequest struct {
@@ -40,12 +40,12 @@ type errorDetails struct {
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
-	breaker    *resilience.Breaker
+	breaker    *gobreaker.CircuitBreaker[model.AuthResult]
 	logger     *zap.Logger
 }
 
 // New creates an h2c auth client with circuit breaker.
-func New(baseURL string, breaker *resilience.Breaker, logger *zap.Logger) *Client {
+func New(baseURL string, breaker *gobreaker.CircuitBreaker[model.AuthResult], logger *zap.Logger) *Client {
 	return &Client{
 		httpClient: newH2CClient(),
 		baseURL:    baseURL,
@@ -59,13 +59,16 @@ func (c *Client) CheckPrivilege(ctx context.Context, agentID, privilege, authori
 		return model.AuthResult{}, fmt.Errorf("h2c client is nil")
 	}
 
-	// Circuit breaker: fail fast if auth service is known to be down
-	if c.breaker != nil {
-		if err := c.breaker.Allow(); err != nil {
-			return model.AuthResult{}, fmt.Errorf("auth service circuit open: %w", err)
-		}
+	if c.breaker == nil {
+		return c.doRequest(ctx, agentID, privilege, authorizationPolicyID)
 	}
 
+	return c.breaker.Execute(func() (model.AuthResult, error) {
+		return c.doRequest(ctx, agentID, privilege, authorizationPolicyID)
+	})
+}
+
+func (c *Client) doRequest(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	reqBody := evaluateRequest{
 		AgentID:               agentID,
 		Privilege:             privilege,
@@ -87,10 +90,6 @@ func (c *Client) CheckPrivilege(ctx context.Context, agentID, privilege, authori
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Connection failure — record for circuit breaker
-		if c.breaker != nil {
-			c.breaker.RecordFailure()
-		}
 		c.logger.Warn("h2c auth request failed", zap.Error(err))
 		return model.AuthResult{}, fmt.Errorf("h2c auth request: %w", err)
 	}
@@ -102,20 +101,12 @@ func (c *Client) CheckPrivilege(ctx context.Context, agentID, privilege, authori
 	}
 
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		if c.breaker != nil {
-			c.breaker.RecordFailure()
-		}
 		var evalResp evaluateResponse
 		if jsonErr := json.Unmarshal(body, &evalResp); jsonErr == nil && evalResp.Error != nil {
 			return model.AuthResult{Allowed: false, Reason: evalResp.Reason},
 				fmt.Errorf("auth service degraded: %s (retry after %dms)", evalResp.Error.Code, evalResp.Error.RetryAfterMs)
 		}
 		return model.AuthResult{}, fmt.Errorf("auth service unavailable (HTTP %d)", resp.StatusCode)
-	}
-
-	// Successful response — record for circuit breaker recovery
-	if c.breaker != nil {
-		c.breaker.RecordSuccess()
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -134,7 +125,7 @@ func (c *Client) CheckPrivilege(ctx context.Context, agentID, privilege, authori
 }
 
 // newH2CClient creates an HTTP/2 cleartext client with persistent connection multiplexing.
-// The http2.Transport automatically re-establishes the TCP connection if it drops.
+// http2.Transport automatically re-establishes the TCP connection if it drops.
 func newH2CClient() *http.Client {
 	return &http.Client{
 		Transport: &http2.Transport{

@@ -10,12 +10,15 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
+	gobreaker "github.com/sony/gobreaker/v2"
+
 	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/authhttp"
 	natsAdapter "github.com/alkem-io/file-service-go/internal/adapter/outbound/nats"
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/storage/local"
 	"github.com/alkem-io/file-service-go/internal/config"
+	"github.com/alkem-io/file-service-go/internal/domain/model"
 	"github.com/alkem-io/file-service-go/internal/domain/port"
 	"github.com/alkem-io/file-service-go/internal/domain/service"
 	"github.com/alkem-io/file-service-go/internal/imaging"
@@ -41,12 +44,21 @@ func connectNATS(cfg config.NATSConfig, logger *zap.Logger) (*nats.Conn, error) 
 func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port.AuthPort {
 	switch cfg.AuthTransport {
 	case "h2c":
-		breaker := resilience.NewBreaker(
-			cfg.Breaker.FailureThreshold,
-			time.Duration(cfg.Breaker.TimeoutSecs)*time.Second,
-			cfg.Breaker.HalfOpenMaxRequests,
-		)
-		return authhttp.New(cfg.AuthServiceURL, breaker, logger.Named("auth-h2c"))
+		cb := gobreaker.NewCircuitBreaker[model.AuthResult](gobreaker.Settings{
+			Name:        "auth-h2c",
+			MaxRequests: uint32(cfg.Breaker.HalfOpenMaxRequests), //nolint:gosec // validated positive in config.Load
+			Timeout:     time.Duration(cfg.Breaker.TimeoutSecs) * time.Second,
+			ReadyToTrip: func(counts gobreaker.Counts) bool {
+				return int(counts.ConsecutiveFailures) >= cfg.Breaker.FailureThreshold
+			},
+			OnStateChange: func(name string, from, to gobreaker.State) {
+				logger.Info("circuit breaker state change",
+					zap.String("name", name),
+					zap.String("from", from.String()),
+					zap.String("to", to.String()))
+			},
+		})
+		return authhttp.New(cfg.AuthServiceURL, cb, logger.Named("auth-h2c"))
 	default:
 		return &natsAdapter.AuthClient{Conn: nc, Subject: cfg.NATS.Subject}
 	}

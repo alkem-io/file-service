@@ -11,8 +11,10 @@ require (
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.50.0
 	github.com/pashagolub/pgxmock/v4 v4.9.0
+	github.com/sony/gobreaker/v2 v2.4.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.49.0
+	golang.org/x/net v0.52.0
 )
 
 require (
@@ -28,7 +30,6 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/image v0.18.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
