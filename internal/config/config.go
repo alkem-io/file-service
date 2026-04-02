@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -35,8 +36,14 @@ type DatabaseConfig struct {
 }
 
 func (d DatabaseConfig) ConnString() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		d.Username, d.Password, d.Host, d.Port, d.Name)
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(d.Username, d.Password),
+		Host:     fmt.Sprintf("%s:%d", d.Host, d.Port),
+		Path:     d.Name,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
 }
 
 type NATSConfig struct {

@@ -109,7 +109,7 @@ type DeletedDocument struct {
 
 ### Document Create (POST /internal/document)
 
-```
+```text
 Received → Validate Fields → MIME Detect → Validate (allowlist + size) → Image Process → Hash → Store File → Insert DB Row → Response
                 ↓ (fail)                       ↓ (fail)                    ↓ (fail)        ↓ (fail)         ↓ (fail)
               400 error                     415/413 error              Error returned    500 + cleanup    500 + cleanup file
@@ -117,7 +117,7 @@ Received → Validate Fields → MIME Detect → Validate (allowlist + size) →
 
 ### Document Delete (DELETE /internal/document/:id)
 
-```
+```text
 Received → Delete DB Row (returns externalID + IDs) → Count by ExternalID → Delete File (if count == 0) → Response {authorizationId, tagsetId}
               ↓ (not found)                                                       ↓ (fail)
             404 error                                                       Log warning, continue
@@ -127,7 +127,7 @@ Count is done AFTER delete (not before) to eliminate the TOCTOU race where two c
 
 ### Store and Link (PUT /internal/document/:id/content)
 
-```
+```text
 Received → Document Lookup → Image Processed → Hashed → Stored → DB Updated → Cleanup Old File (if changed, count==0) → Response
               ↓ (not found)                               ↓ (fail)    ↓ (fail)
             404 error                                  500 error    Rollback file (if Created) + 500
@@ -141,7 +141,7 @@ Strips parameters (e.g. `; charset=utf-8`) and lowercases a MIME type string. Us
 
 ## Relationships
 
-```
+```text
 Server creates:                    File-service creates:
   authorization_policy row    →      Document row (stores authorizationId FK)
   tagset row                  →      StoredFile on disk (via externalID)

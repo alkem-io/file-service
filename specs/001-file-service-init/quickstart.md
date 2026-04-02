@@ -65,7 +65,7 @@ go run ./cmd/server/
 
 ## Project Structure
 
-```
+```text
 cmd/server/
   main.go                   — entry point, signal handling
   app.go                    — dependency construction: DB, NATS, auth client, router
@@ -135,7 +135,7 @@ db/
 
 ## Routing
 
-```
+```text
 Public (through Oathkeeper, Traefik strips /api/private):
   /api/private/rest/storage/document/:id → service sees /rest/storage/document/:id
 

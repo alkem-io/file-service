@@ -3,8 +3,10 @@ package authhttp
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +35,9 @@ func TestH2CClient_Allowed(t *testing.T) {
 
 		var req evaluateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatal(err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		if req.AgentID != "agent-1" {
 			t.Errorf("agentId = %q", req.AgentID)
@@ -91,6 +95,9 @@ func TestH2CClient_ServiceDegraded(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for degraded service")
 	}
+	if !strings.Contains(err.Error(), "degraded") {
+		t.Errorf("error should mention degraded, got: %v", err)
+	}
 }
 
 func TestH2CClient_BadRequest(t *testing.T) {
@@ -120,11 +127,22 @@ func TestH2CClient_InvalidJSON(t *testing.T) {
 }
 
 func TestH2CClient_ConnectionRefused(t *testing.T) {
-	client := New("http://127.0.0.1:1", nil, zap.NewNop()) // nothing listening
+	// Open a listener on an ephemeral port, capture address, then close it.
+	// This guarantees a recently-closed port that nothing is listening on.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on ephemeral port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close ephemeral listener: %v", err)
+	}
+
+	client := New("http://"+addr, nil, zap.NewNop())
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := client.CheckPrivilege(ctx, "agent-1", "read", "policy-1")
+	_, err = client.CheckPrivilege(ctx, "agent-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for connection refused")
 	}

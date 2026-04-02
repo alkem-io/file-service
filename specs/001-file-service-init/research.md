@@ -108,7 +108,7 @@
 - **Decision**: Follow WOPI service hexagonal layout (most recent Alkemio Go service)
 - **Rationale**: Consistent with existing Alkemio Go services. Clean separation of domain (ports, models, services) from adapters (HTTP, DB, NATS, storage).
 - **Layout**:
-  ```
+  ```text
   cmd/server/           — main.go entry point
   internal/
     adapter/
