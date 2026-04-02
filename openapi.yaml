@@ -178,15 +178,15 @@ paths:
       responses:
         "200":
           content:
+            application/json: {}
+          description: OK
+        "304":
+          content:
             application/json:
               schema:
                 items:
                   type: integer
                 type: array
-          description: OK
-        "304":
-          content:
-            application/json: {}
           description: Not Modified
         default:
           content:
