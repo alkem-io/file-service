@@ -1,28 +1,42 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
-func TestLoad_MissingRequired(t *testing.T) {
-	// Clear all env vars
-	for _, key := range []string{"AUTH_SERVICE_URL", "NATS_URL", "ALKEMIO_DATABASE_HOST", "ALKEMIO_DATABASE_USERNAME", "ALKEMIO_DATABASE_PASSWORD", "ALKEMIO_DATABASE_NAME"} {
-		t.Setenv(key, "")
-	}
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing NATS_URL")
-	}
-}
-
-func TestLoad_MinimalValid(t *testing.T) {
+// setBaseEnv sets the minimal valid env for NATS-transport config tests.
+func setBaseEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
 	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
 	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
+}
+
+// requireLoadErr asserts Load() returns an error containing want.
+func requireLoadErr(t *testing.T, want string) {
+	t.Helper()
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want substring %q", err.Error(), want)
+	}
+}
+
+func TestLoad_MissingRequired(t *testing.T) {
+	for _, key := range []string{"AUTH_SERVICE_URL", "NATS_URL", "ALKEMIO_DATABASE_HOST", "ALKEMIO_DATABASE_USERNAME", "ALKEMIO_DATABASE_PASSWORD", "ALKEMIO_DATABASE_NAME"} {
+		t.Setenv(key, "")
+	}
+	requireLoadErr(t, "AUTH_SERVICE_URL")
+}
+
+func TestLoad_MinimalValid(t *testing.T) {
+	setBaseEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -48,12 +62,12 @@ func TestLoad_MinimalValid(t *testing.T) {
 		t.Errorf("NATS.ReconnectWaitMS = %d", cfg.NATS.ReconnectWaitMS)
 	}
 	if cfg.Breaker.FailureThreshold != 3 {
-		t.Errorf("NATS.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
+		t.Errorf("Breaker.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
 }
 
 func TestLoad_CustomValues(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
+	setBaseEnv(t)
 	t.Setenv("NATS_URL", "nats://custom:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "dbhost")
 	t.Setenv("ALKEMIO_DATABASE_PORT", "5433")
@@ -88,233 +102,125 @@ func TestLoad_CustomValues(t *testing.T) {
 		t.Errorf("NATS.Subject = %q", cfg.NATS.Subject)
 	}
 	if cfg.Breaker.FailureThreshold != 5 {
-		t.Errorf("NATS.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
-	}
-}
-
-func TestLoad_InvalidPort(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
-	t.Setenv("PORT", "not-a-number")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid PORT")
+		t.Errorf("Breaker.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
 }
 
 func TestLoad_ValidationErrors(t *testing.T) {
-	base := func(t *testing.T) {
-		t.Helper()
-		t.Setenv("AUTH_SERVICE_URL", "")
-		t.Setenv("NATS_URL", "nats://localhost:4222")
-		t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-		t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-		t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-		t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
-	}
+	t.Run("InvalidPort", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("PORT", "not-a-number")
+		requireLoadErr(t, "PORT")
+	})
 
 	t.Run("DBPortOutOfRange", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("ALKEMIO_DATABASE_PORT", "99999")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "ALKEMIO_DATABASE_PORT")
 	})
 
 	t.Run("AppPortOutOfRange", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("PORT", "0")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "PORT")
 	})
 
 	t.Run("NegativeMaxAge", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("DOCUMENT_MAX_AGE", "-1")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "DOCUMENT_MAX_AGE")
 	})
 
 	t.Run("ReconnectWaitZero", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("NATS_RECONNECT_WAIT_MS", "0")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "NATS_RECONNECT_WAIT_MS")
 	})
 
 	t.Run("ReconnectMaxZero", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "0")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "NATS_RECONNECT_MAX_WAIT_MS")
 	})
 
 	t.Run("ReconnectMaxLessThanWait", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("NATS_RECONNECT_WAIT_MS", "5000")
 		t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "1000")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "NATS_RECONNECT_MAX_WAIT_MS")
 	})
 
 	t.Run("FailureThresholdZero", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "0")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "AUTH_BREAKER_FAILURE_THRESHOLD")
 	})
 
 	t.Run("BreakerTimeoutTooLow", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "2")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "AUTH_BREAKER_TIMEOUT_SECONDS")
 	})
 
 	t.Run("HalfOpenZero", func(t *testing.T) {
-		base(t)
+		setBaseEnv(t)
 		t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "0")
-		_, err := Load()
-		if err == nil {
-			t.Fatal("expected error")
-		}
+		requireLoadErr(t, "AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS")
 	})
-}
 
-func TestLoad_MissingDBHost(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing DB host")
-	}
-}
+	t.Run("MissingDBHost", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("ALKEMIO_DATABASE_HOST", "")
+		requireLoadErr(t, "ALKEMIO_DATABASE_HOST")
+	})
 
-func TestLoad_MissingDBUsername(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing DB username")
-	}
-}
+	t.Run("MissingDBUsername", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("ALKEMIO_DATABASE_USERNAME", "")
+		requireLoadErr(t, "ALKEMIO_DATABASE_USERNAME")
+	})
 
-func TestLoad_MissingDBPassword(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing DB password")
-	}
-}
+	t.Run("MissingDBPassword", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("ALKEMIO_DATABASE_PASSWORD", "")
+		requireLoadErr(t, "ALKEMIO_DATABASE_PASSWORD")
+	})
 
-func TestLoad_MissingDBName(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing DB name")
-	}
-}
+	t.Run("MissingDBName", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("ALKEMIO_DATABASE_NAME", "")
+		requireLoadErr(t, "ALKEMIO_DATABASE_NAME")
+	})
 
-func TestLoad_InvalidDBPort(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_PORT", "abc")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid DB port")
-	}
-}
+	t.Run("InvalidDBPort", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("ALKEMIO_DATABASE_PORT", "abc")
+		requireLoadErr(t, "ALKEMIO_DATABASE_PORT")
+	})
 
-func TestLoad_InvalidDocumentMaxAge(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	t.Setenv("DOCUMENT_MAX_AGE", "not-int")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for invalid max age")
-	}
-}
+	t.Run("InvalidDocumentMaxAge", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("DOCUMENT_MAX_AGE", "not-int")
+		requireLoadErr(t, "DOCUMENT_MAX_AGE")
+	})
 
-func TestLoad_InvalidReconnectWait(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	t.Setenv("NATS_RECONNECT_WAIT_MS", "xyz")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
+	t.Run("InvalidReconnectWait", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NATS_RECONNECT_WAIT_MS", "xyz")
+		requireLoadErr(t, "NATS_RECONNECT_WAIT_MS")
+	})
 
-func TestLoad_InvalidReconnectMax(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "xyz")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
+	t.Run("InvalidReconnectMax", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "xyz")
+		requireLoadErr(t, "NATS_RECONNECT_MAX_WAIT_MS")
+	})
 
-func TestLoad_InvalidHalfOpen(t *testing.T) {
-	t.Setenv("AUTH_SERVICE_URL", "")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "db")
-	t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "xyz")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error")
-	}
+	t.Run("InvalidHalfOpen", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "xyz")
+		requireLoadErr(t, "AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS")
+	})
 }
 
 func TestNewLogger(t *testing.T) {
@@ -385,5 +291,8 @@ func TestGetenvInt_Invalid(t *testing.T) {
 	_, err := getenvInt("TEST_INT_KEY", 42)
 	if err == nil {
 		t.Fatal("expected error for invalid int")
+	}
+	if !strings.Contains(err.Error(), "invalid integer") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "invalid integer")
 	}
 }
