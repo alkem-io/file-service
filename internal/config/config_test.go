@@ -6,7 +6,7 @@ import (
 
 func TestLoad_MissingRequired(t *testing.T) {
 	// Clear all env vars
-	for _, key := range []string{"NATS_URL", "ALKEMIO_DATABASE_HOST", "ALKEMIO_DATABASE_USERNAME", "ALKEMIO_DATABASE_PASSWORD", "ALKEMIO_DATABASE_NAME"} {
+	for _, key := range []string{"AUTH_SERVICE_URL", "NATS_URL", "ALKEMIO_DATABASE_HOST", "ALKEMIO_DATABASE_USERNAME", "ALKEMIO_DATABASE_PASSWORD", "ALKEMIO_DATABASE_NAME"} {
 		t.Setenv(key, "")
 	}
 
@@ -17,6 +17,7 @@ func TestLoad_MissingRequired(t *testing.T) {
 }
 
 func TestLoad_MinimalValid(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -52,6 +53,7 @@ func TestLoad_MinimalValid(t *testing.T) {
 }
 
 func TestLoad_CustomValues(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://custom:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "dbhost")
 	t.Setenv("ALKEMIO_DATABASE_PORT", "5433")
@@ -91,6 +93,7 @@ func TestLoad_CustomValues(t *testing.T) {
 }
 
 func TestLoad_InvalidPort(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -107,6 +110,7 @@ func TestLoad_InvalidPort(t *testing.T) {
 func TestLoad_ValidationErrors(t *testing.T) {
 	base := func(t *testing.T) {
 		t.Helper()
+		t.Setenv("AUTH_SERVICE_URL", "")
 		t.Setenv("NATS_URL", "nats://localhost:4222")
 		t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 		t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -198,6 +202,7 @@ func TestLoad_ValidationErrors(t *testing.T) {
 }
 
 func TestLoad_MissingDBHost(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "")
 	_, err := Load()
@@ -207,6 +212,7 @@ func TestLoad_MissingDBHost(t *testing.T) {
 }
 
 func TestLoad_MissingDBUsername(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "")
@@ -217,6 +223,7 @@ func TestLoad_MissingDBUsername(t *testing.T) {
 }
 
 func TestLoad_MissingDBPassword(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -228,6 +235,7 @@ func TestLoad_MissingDBPassword(t *testing.T) {
 }
 
 func TestLoad_MissingDBName(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -240,6 +248,7 @@ func TestLoad_MissingDBName(t *testing.T) {
 }
 
 func TestLoad_InvalidDBPort(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_PORT", "abc")
@@ -253,6 +262,7 @@ func TestLoad_InvalidDBPort(t *testing.T) {
 }
 
 func TestLoad_InvalidDocumentMaxAge(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -266,6 +276,7 @@ func TestLoad_InvalidDocumentMaxAge(t *testing.T) {
 }
 
 func TestLoad_InvalidReconnectWait(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -279,6 +290,7 @@ func TestLoad_InvalidReconnectWait(t *testing.T) {
 }
 
 func TestLoad_InvalidReconnectMax(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
@@ -292,6 +304,7 @@ func TestLoad_InvalidReconnectMax(t *testing.T) {
 }
 
 func TestLoad_InvalidHalfOpen(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
