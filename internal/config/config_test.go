@@ -104,6 +104,32 @@ func TestLoad_CustomValues(t *testing.T) {
 	if cfg.Breaker.FailureThreshold != 5 {
 		t.Errorf("Breaker.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
+	if cfg.Breaker.TimeoutSecs != 30 {
+		t.Errorf("Breaker.TimeoutSecs = %d", cfg.Breaker.TimeoutSecs)
+	}
+}
+
+func TestLoad_H2CTransport(t *testing.T) {
+	t.Setenv("AUTH_SERVICE_URL", "http://auth-service:4000")
+	t.Setenv("NATS_URL", "")
+	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
+	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
+	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
+	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthTransport != "h2c" {
+		t.Errorf("AuthTransport = %q, want %q", cfg.AuthTransport, "h2c")
+	}
+	if cfg.AuthServiceURL != "http://auth-service:4000" {
+		t.Errorf("AuthServiceURL = %q", cfg.AuthServiceURL)
+	}
+	if cfg.NATS.URL != "" {
+		t.Errorf("NATS.URL = %q, want empty for h2c transport", cfg.NATS.URL)
+	}
 }
 
 func TestLoad_ValidationErrors(t *testing.T) {
