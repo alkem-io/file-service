@@ -92,12 +92,17 @@ func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc 
 			MaxAge:  maxAge,
 			Logger:  logger,
 		},
-		HealthHandler: &httpAdapter.HealthHandler{
-			DB:   pool,
-			NATS: nc,
-		},
-		Logger: logger,
+		HealthHandler: newHealthHandler(pool, nc),
+		Logger:        logger,
 	})
+}
+
+func newHealthHandler(pool *pgxpool.Pool, nc *nats.Conn) *httpAdapter.HealthHandler {
+	h := &httpAdapter.HealthHandler{DB: pool}
+	if nc != nil {
+		h.NATS = nc // only set interface when concrete value is non-nil (avoids Go nil interface trap)
+	}
+	return h
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
