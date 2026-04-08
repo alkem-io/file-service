@@ -289,7 +289,7 @@ configuration changes.
 
 ### Session 2026-03-30
 
-- Q: How does the service authenticate users on public endpoints? → A: Oathkeeper injects a JWT with `alkemio_actor_id` claim. Service validates JWT via JWKS and extracts actor ID.
+- Q: How does the service authenticate users on public endpoints? → A: Oathkeeper verifies the JWT (via JWKS) and forwards the request. The file-service extracts `alkemio_actor_id` from the forwarded JWT payload and relies on Oathkeeper for token verification.
 - Q: How does the service authorize file access? → A: Call to authorization-evaluation-service via h2c HTTP/2 (`AUTH_SERVICE_URL`, preferred) or NATS (`auth.evaluate` subject, fallback) with actorId, privilege, and authorizationPolicyId.
 - Q: Where does the service get document metadata? → A: From the `document` table in Alkemio's PostgreSQL database. The file-service has full CRUD access to this table (FR-29).
 - Q: What storage backends are supported initially? → A: Local filesystem only. S3 is a future addition; the port interface must be in place.
@@ -312,7 +312,7 @@ configuration changes.
 - Q: How do server-to-file-service calls work? → A: HTTP (not NATS). NATS has message size limits (~1MB default) that make binary file transfer awkward. HTTP handles multipart/streaming natively. NATS stays for lightweight auth.evaluate calls only.
 - Q: What is temporaryLocation? → A: A boolean flag for two-phase uploads. Documents upload to a temporary bucket first (temporaryLocation=true), then the server moves them to the final bucket when the parent entity is saved (sets storageBucketId + temporaryLocation=false via PATCH endpoint).
 - Q: Are file-only upload/delete/exists endpoints needed? → A: No. With US6 (document lifecycle), all file mutations go through document-level endpoints. ExternalID is never exposed in any API — all access is by document ID.
-- Q: What URL prefix do internal endpoints use? → A: The file-service sees `/internal/...` paths. In Docker dev, Traefik routes `/api/storage/internal/...` and strips `/api/storage`. In K8s production, services call `/internal/...` directly via K8s service DNS. The public authenticated endpoint stays at `/api/private/rest/storage/document/:id` (through Oathkeeper, backward compat). Convention: `private` = through Oathkeeper (authenticated), `internal` = cluster-internal (no auth).
+- Q: What URL prefix do internal endpoints use? → A: The file-service sees `/internal/...` paths. In Docker dev, Traefik routes `/api/storage/internal/...` and strips `/api/storage`. In K8s production, services call `/internal/...` directly via K8s service DNS. For public reads, clients call the gateway path `/api/private/rest/storage/document/:id` through Oathkeeper, while the file-service route itself is `/rest/storage/document/:id`. Convention: `private` = gateway/Oathkeeper path, `internal` = cluster-internal (no auth).
 - Q: How are document sub-resources structured? → A: `/document/:id/content` for file bytes, `/document/:id/meta` for metadata JSON. The legacy public path `/rest/storage/document/:id` serves content directly (backward compat, cannot change).
 
 ## Assumptions

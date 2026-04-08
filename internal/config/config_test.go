@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// setBaseEnv sets the minimal valid env for NATS-transport config tests.
 func setBaseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("AUTH_SERVICE_URL", "")
@@ -16,7 +15,6 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
 }
 
-// requireLoadErr asserts Load() returns an error containing want.
 func requireLoadErr(t *testing.T, want string) {
 	t.Helper()
 	_, err := Load()
@@ -29,10 +27,25 @@ func requireLoadErr(t *testing.T, want string) {
 }
 
 func TestLoad_MissingRequired(t *testing.T) {
-	for _, key := range []string{"AUTH_SERVICE_URL", "NATS_URL", "ALKEMIO_DATABASE_HOST", "ALKEMIO_DATABASE_USERNAME", "ALKEMIO_DATABASE_PASSWORD", "ALKEMIO_DATABASE_NAME"} {
-		t.Setenv(key, "")
+	t.Run("NoAuthTransport", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("AUTH_SERVICE_URL", "")
+		t.Setenv("NATS_URL", "")
+		requireLoadErr(t, "AUTH_SERVICE_URL")
+	})
+
+	for _, key := range []string{
+		"ALKEMIO_DATABASE_HOST",
+		"ALKEMIO_DATABASE_USERNAME",
+		"ALKEMIO_DATABASE_PASSWORD",
+		"ALKEMIO_DATABASE_NAME",
+	} {
+		t.Run("Missing_"+key, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv(key, "")
+			requireLoadErr(t, key)
+		})
 	}
-	requireLoadErr(t, "AUTH_SERVICE_URL")
 }
 
 func TestLoad_MinimalValid(t *testing.T) {
