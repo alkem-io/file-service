@@ -1,0 +1,40 @@
+#!/bin/sh
+# Pre-commit hook: regenerate sqlc + openapi and check for drift
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+echo "Pre-commit: checking generated files..."
+
+# Only run if relevant source files changed
+STAGED=$(git diff --cached --name-only)
+
+NEED_SQLC=false
+NEED_OPENAPI=false
+
+echo "$STAGED" | grep -q "db/queries/\|db/schema/" && NEED_SQLC=true || true
+echo "$STAGED" | grep -q "internal/adapter/inbound/http/" && NEED_OPENAPI=true || true
+
+if [ "$NEED_SQLC" = true ]; then
+  echo "  Regenerating sqlc..."
+  sqlc -f db/sqlc.yaml generate
+  git diff --exit-code internal/adapter/outbound/alkemiodb/queries/ || {
+    echo "ERROR: sqlc generated code is stale. Run 'make sqlc-generate' and stage the changes."
+    exit 1
+  }
+fi
+
+if [ "$NEED_OPENAPI" = true ]; then
+  echo "  Regenerating openapi.yaml..."
+  if command -v apispec >/dev/null 2>&1; then
+    make openapi
+    git diff --exit-code openapi.yaml || {
+      echo "ERROR: openapi.yaml is stale. Run 'make openapi' and stage the changes."
+      exit 1
+    }
+  else
+    echo "  WARN: apispec not installed, skipping openapi check"
+  fi
+fi
+
+echo "Pre-commit: OK"
