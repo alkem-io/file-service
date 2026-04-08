@@ -8,5 +8,5 @@ import (
 
 // AuthPort abstracts the authorization check against the auth-evaluation-service.
 type AuthPort interface {
-	CheckPrivilege(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error)
+	CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error)
 }

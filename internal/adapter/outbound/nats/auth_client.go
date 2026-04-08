@@ -16,7 +16,7 @@ type evaluateRequest struct {
 }
 
 type evaluateData struct {
-	AgentID               string `json:"agentId"`
+	ActorID               string `json:"actorId"`
 	Privilege             string `json:"privilege"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId"`
 }
@@ -39,7 +39,7 @@ type AuthClient struct {
 	Subject string
 }
 
-func (c *AuthClient) CheckPrivilege(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
+func (c *AuthClient) CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	if c.Conn == nil {
 		return model.AuthResult{}, fmt.Errorf("NATS connection is nil")
 	}
@@ -50,7 +50,7 @@ func (c *AuthClient) CheckPrivilege(ctx context.Context, agentID, privilege, aut
 	req := evaluateRequest{
 		Pattern: "evaluate",
 		Data: evaluateData{
-			AgentID:               agentID,
+			ActorID:               actorID,
 			Privilege:             privilege,
 			AuthorizationPolicyID: authorizationPolicyID,
 		},

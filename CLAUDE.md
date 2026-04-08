@@ -96,7 +96,7 @@ Service:
 
 - Auth checks on public endpoints via h2c HTTP/2 (preferred)
   or NATS `auth.evaluate` (fallback) — both carry
-  agentId + privilege + authorizationPolicyId
+  actorId + privilege + authorizationPolicyId
 - Document table (full CRUD) in Alkemio's PostgreSQL
 - Actor identity from Oathkeeper JWT (`alkemio_actor_id` claim)
 - Oathkeeper config at

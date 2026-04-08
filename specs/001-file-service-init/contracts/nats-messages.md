@@ -12,7 +12,7 @@ File-service-go is a **client** of the authorization-evaluation-service via NATS
 {
   "pattern": "evaluate",
   "data": {
-    "agentId": "<uuid>",
+    "actorId": "<uuid>",
     "privilege": "read",
     "authorizationPolicyId": "<uuid>"
   }
@@ -22,7 +22,7 @@ File-service-go is a **client** of the authorization-evaluation-service via NATS
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `pattern` | string | yes | Always `"evaluate"` |
-| `data.agentId` | UUID string | yes | Actor's agent ID (from JWT `alkemio_actor_id` claim) |
+| `data.actorId` | UUID string | yes | Actor's ID (from JWT `alkemio_actor_id` claim) |
 | `data.privilege` | string | yes | Always `"read"` for file serving |
 | `data.authorizationPolicyId` | UUID string | yes | From Document record in Alkemio DB |
 
@@ -31,7 +31,7 @@ File-service-go is a **client** of the authorization-evaluation-service via NATS
 ```json
 {
   "allowed": true,
-  "reason": "Agent has Reader credential for resource",
+  "reason": "Actor has Reader credential for resource",
   "error": null,
   "metrics": {}
 }
@@ -39,7 +39,7 @@ File-service-go is a **client** of the authorization-evaluation-service via NATS
 
 | Field | Type | Present | Description |
 |-------|------|---------|-------------|
-| `allowed` | boolean | always | Whether the agent has the requested privilege |
+| `allowed` | boolean | always | Whether the actor has the requested privilege |
 | `reason` | string | always | Human-readable explanation |
 | `error` | object or null | optional | Structured error for transient failures |
 | `error.code` | string | when error | e.g., `"circuit_breaker_open"`, `"dependencies_unavailable"` |

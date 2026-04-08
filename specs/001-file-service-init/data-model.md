@@ -50,7 +50,7 @@ Not directly queried by file-service. The `authorizationId` from Document resolv
 | Field | Type | Notes |
 |-------|------|-------|
 | `authorizationPolicyId` | UUID | From Document record (authorizationId FK) |
-| `agentId` | UUID | From JWT `alkemio_actor_id` claim |
+| `actorId` | UUID | From JWT `alkemio_actor_id` claim |
 | `privilege` | string | Always `"read"` for public file serving |
 
 ## Domain Types (Go)

@@ -19,7 +19,7 @@ import (
 )
 
 type evaluateRequest struct {
-	AgentID               string `json:"agentId"`
+	ActorID               string `json:"actorId"`
 	Privilege             string `json:"privilege"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId"`
 }
@@ -58,23 +58,23 @@ func New(baseURL string, breaker *gobreaker.CircuitBreaker[model.AuthResult], lo
 	}
 }
 
-func (c *Client) CheckPrivilege(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
+func (c *Client) CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	if c.httpClient == nil {
 		return model.AuthResult{}, fmt.Errorf("h2c client is nil")
 	}
 
 	if c.breaker == nil {
-		return c.doRequest(ctx, agentID, privilege, authorizationPolicyID)
+		return c.doRequest(ctx, actorID, privilege, authorizationPolicyID)
 	}
 
 	return c.breaker.Execute(func() (model.AuthResult, error) {
-		return c.doRequest(ctx, agentID, privilege, authorizationPolicyID)
+		return c.doRequest(ctx, actorID, privilege, authorizationPolicyID)
 	})
 }
 
-func (c *Client) doRequest(ctx context.Context, agentID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
+func (c *Client) doRequest(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	reqBody := evaluateRequest{
-		AgentID:               agentID,
+		ActorID:               actorID,
 		Privilege:             privilege,
 		AuthorizationPolicyID: authorizationPolicyID,
 	}

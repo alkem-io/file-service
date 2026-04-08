@@ -53,7 +53,7 @@
   {
     "pattern": "evaluate",
     "data": {
-      "agentId": "<uuid>",
+      "actorId": "<uuid>",
       "privilege": "read",
       "authorizationPolicyId": "<uuid>"
     }

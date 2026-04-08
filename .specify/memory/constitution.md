@@ -301,7 +301,7 @@ The file service integrates with the following systems:
 **Authorization Evaluation Service** (Go, h2c HTTP/2 or NATS):
 - h2c transport (preferred): POST to `{AUTH_SERVICE_URL}/internal/auth/evaluate`
 - NATS transport (fallback): Subject `auth.evaluate`
-- Input: `{agentId, privilege, authorizationPolicyId}`
+- Input: `{actorId, privilege, authorizationPolicyId}`
 - Output: `{allowed, reason}`
 - Circuit breaker: sony/gobreaker v2 (shared `AUTH_BREAKER_*` config)
 - Used on public endpoints to check READ privilege before serving

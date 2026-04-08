@@ -94,7 +94,7 @@ db/
 ### Public file serve (GET /rest/storage/document/:id)
 1. Extract actor ID from JWT
 2. Query document by ID → get externalID, authorizationPolicyId, mimeType
-3. Auth check via h2c or NATS (agentId, "read", authorizationPolicyId) — circuit breaker on h2c path; NATS relies on connection-level reconnection
+3. Auth check via h2c or NATS (actorId, "read", authorizationPolicyId) — circuit breaker on h2c path; NATS relies on connection-level reconnection
 4. ETag check: If-None-Match against content hash (externalID) → 304 if match
 5. If allowed → read file from storage → stream with headers (ETag = externalID)
 6. If denied → 403

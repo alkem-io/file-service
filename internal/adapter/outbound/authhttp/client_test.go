@@ -39,8 +39,8 @@ func TestH2CClient_Allowed(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if req.AgentID != "agent-1" {
-			t.Errorf("agentId = %q", req.AgentID)
+		if req.ActorID != "actor-1" {
+			t.Errorf("actorId = %q", req.ActorID)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -51,7 +51,7 @@ func TestH2CClient_Allowed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result, err := client.CheckPrivilege(ctx, "agent-1", "read", "policy-1")
+	result, err := client.CheckPrivilege(ctx, "actor-1", "read", "policy-1")
 	if err != nil {
 		t.Fatalf("CheckPrivilege: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestH2CClient_Denied(t *testing.T) {
 	}))
 
 	client := New(srv.URL, nil, zap.NewNop())
-	result, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
+	result, err := client.CheckPrivilege(context.Background(), "actor-1", "read", "policy-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestH2CClient_ServiceDegraded(t *testing.T) {
 	}))
 
 	client := New(srv.URL, nil, zap.NewNop())
-	_, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
+	_, err := client.CheckPrivilege(context.Background(), "actor-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for degraded service")
 	}
@@ -120,7 +120,7 @@ func TestH2CClient_InvalidJSON(t *testing.T) {
 	}))
 
 	client := New(srv.URL, nil, zap.NewNop())
-	_, err := client.CheckPrivilege(context.Background(), "agent-1", "read", "policy-1")
+	_, err := client.CheckPrivilege(context.Background(), "actor-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -142,7 +142,7 @@ func TestH2CClient_ConnectionRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err = client.CheckPrivilege(ctx, "agent-1", "read", "policy-1")
+	_, err = client.CheckPrivilege(ctx, "actor-1", "read", "policy-1")
 	if err == nil {
 		t.Fatal("expected error for connection refused")
 	}
