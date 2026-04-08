@@ -10,9 +10,20 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("AUTH_SERVICE_URL", "")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
+	t.Setenv("ALKEMIO_DATABASE_PORT", "")
 	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
 	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
 	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
+	t.Setenv("PORT", "")
+	t.Setenv("DOCUMENT_MAX_AGE", "")
+	t.Setenv("LOCAL_STORAGE_PATH", "")
+	t.Setenv("STORAGE_TYPE", "")
+	t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "")
+	t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "")
+	t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "")
+	t.Setenv("NATS_SUBJECT", "")
+	t.Setenv("NATS_RECONNECT_WAIT_MS", "")
+	t.Setenv("NATS_RECONNECT_MAX_WAIT_MS", "")
 }
 
 func requireLoadErr(t *testing.T, want string) {
@@ -126,12 +137,9 @@ func TestLoad_CustomValues(t *testing.T) {
 }
 
 func TestLoad_H2CTransport(t *testing.T) {
+	setBaseEnv(t)
 	t.Setenv("AUTH_SERVICE_URL", "http://auth-service:4000")
 	t.Setenv("NATS_URL", "")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "localhost")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "user")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "pass")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "testdb")
 
 	cfg, err := Load()
 	if err != nil {
