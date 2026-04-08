@@ -247,8 +247,8 @@ are removed.
 
 ### Backward Compatibility Requirements (Drop-in Replacement)
 
-This service replaces the existing TypeScript file-service at
-`/Users/antst/work/alkemio/file-service`. It MUST be deployable as a
+This service replaces the existing TypeScript file-service in
+the `file-service` repository. It MUST be deployable as a
 drop-in replacement with zero migration of stored files and minimal
 configuration changes.
 

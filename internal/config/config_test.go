@@ -64,6 +64,9 @@ func TestLoad_MinimalValid(t *testing.T) {
 	if cfg.Breaker.FailureThreshold != 3 {
 		t.Errorf("Breaker.FailureThreshold = %d", cfg.Breaker.FailureThreshold)
 	}
+	if cfg.AuthTransport != "nats" {
+		t.Errorf("AuthTransport = %q, want %q", cfg.AuthTransport, "nats")
+	}
 }
 
 func TestLoad_CustomValues(t *testing.T) {
