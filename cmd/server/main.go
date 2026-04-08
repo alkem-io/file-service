@@ -24,12 +24,14 @@ func run() int {
 
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Fatal("failed to load config", zap.Error(err))
+		logger.Error("failed to load config", zap.Error(err))
+		return 1
 	}
 
 	pool, err := connectDatabase(context.Background(), cfg.AlkemioDB)
 	if err != nil {
-		logger.Fatal("failed to connect to database", zap.Error(err))
+		logger.Error("failed to connect to database", zap.Error(err))
+		return 1
 	}
 	defer pool.Close()
 	logger.Info("database connected", zap.String("host", cfg.AlkemioDB.Host))
@@ -39,7 +41,8 @@ func run() int {
 	if cfg.AuthTransport == "nats" {
 		nc, err = connectNATS(cfg.NATS, logger)
 		if err != nil {
-			logger.Fatal("failed to connect to NATS", zap.Error(err))
+			logger.Error("failed to connect to NATS", zap.Error(err))
+			return 1
 		}
 		defer nc.Close()
 	}

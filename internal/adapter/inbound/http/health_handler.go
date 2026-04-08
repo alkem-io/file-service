@@ -36,12 +36,14 @@ func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		details["database"] = "ok"
 	}
 
-	// Check NATS
-	if h.NATS == nil || !h.NATS.IsConnected() {
-		details["nats"] = "disconnected"
-		healthy = false
-	} else {
-		details["nats"] = "ok"
+	// Check NATS (only when configured — nil means h2c transport, NATS not used)
+	if h.NATS != nil {
+		if !h.NATS.IsConnected() {
+			details["nats"] = "disconnected"
+			healthy = false
+		} else {
+			details["nats"] = "ok"
+		}
 	}
 
 	status := "healthy"
