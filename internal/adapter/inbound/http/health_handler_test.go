@@ -130,7 +130,17 @@ func TestHealth_NATSNil(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (NATS not configured = healthy)", rr.Code)
+	}
+
+	var body map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if body["status"] != "healthy" {
+		t.Errorf("status = %v", body["status"])
+	}
+	details := body["details"].(map[string]any)
+	if _, hasNATS := details["nats"]; hasNATS {
+		t.Error("nats should not appear in details when not configured")
 	}
 }
