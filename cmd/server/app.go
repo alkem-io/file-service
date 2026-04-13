@@ -108,7 +108,10 @@ func newHealthHandler(pool *pgxpool.Pool, nc *nats.Conn) *httpAdapter.HealthHand
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
-	h2s := &http2.Server{}
+	h2s := &http2.Server{
+		MaxConcurrentStreams: 100,
+		IdleTimeout:          120 * time.Second,
+	}
 	return &http.Server{
 		Addr:           fmt.Sprintf(":%d", port),
 		Handler:        h2c.NewHandler(handler, h2s),
