@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	gobreaker "github.com/sony/gobreaker/v2"
 
@@ -106,9 +108,13 @@ func newHealthHandler(pool *pgxpool.Pool, nc *nats.Conn) *httpAdapter.HealthHand
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
+	h2s := &http2.Server{
+		MaxConcurrentStreams: 100,
+		IdleTimeout:          120 * time.Second,
+	}
 	return &http.Server{
 		Addr:           fmt.Sprintf(":%d", port),
-		Handler:        handler,
+		Handler:        h2c.NewHandler(handler, h2s),
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   60 * time.Second,
 		IdleTimeout:    120 * time.Second,
