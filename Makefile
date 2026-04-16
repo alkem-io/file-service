@@ -1,4 +1,4 @@
-.PHONY: build build-stub test test-vips lint generate sqlc-generate openapi setup-hooks run clean
+.PHONY: build build-stub docker test test-vips lint generate sqlc-generate openapi setup-hooks run clean
 
 BINARY := file-service
 GO := go
@@ -11,6 +11,9 @@ build:
 build-stub:
 	mkdir -p bin/
 	$(GO) build -o bin/$(BINARY) ./cmd/server/
+
+docker:
+	docker build -t alkemio/file-service-go:latest .
 
 test:
 	$(GO) test $(GOFLAGS) -coverprofile=coverage.out ./...

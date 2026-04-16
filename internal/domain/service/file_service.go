@@ -59,20 +59,30 @@ func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actor
 }
 
 // CreateDocument processes a file, stores it, and creates a document record.
-func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
+func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
 	if maxFileSize > 0 && len(content) > maxFileSize {
 		return nil, ErrPayloadTooLarge
 	}
 
-	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
-
-	if len(allowedMimeTypes) > 0 {
-		normalized := make([]string, len(allowedMimeTypes))
-		for i, m := range allowedMimeTypes {
-			normalized[i] = normalizeMIME(m)
+	var mimeType string
+	if len(content) == 0 {
+		// Empty document (e.g., Collabora placeholder): no bytes to detect from.
+		// Trust the declared MIME from the multipart Content-Type header.
+		mimeType = normalizeMIME(declaredMIME)
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
 		}
-		if !slices.Contains(normalized, mimeType) {
-			return nil, ErrUnsupportedMediaType
+	} else {
+		mimeType = normalizeMIME(s.Processor.DetectMIME(content))
+
+		if len(allowedMimeTypes) > 0 {
+			normalized := make([]string, len(allowedMimeTypes))
+			for i, m := range allowedMimeTypes {
+				normalized[i] = normalizeMIME(m)
+			}
+			if !slices.Contains(normalized, mimeType) {
+				return nil, ErrUnsupportedMediaType
+			}
 		}
 	}
 
