@@ -135,7 +135,7 @@ func TestCreateDocument_Happy(t *testing.T) {
 		AuthorizationID: uuid.New(),
 	}
 
-	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestCreateDocument_TooLarge(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "big.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 3)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 3)
 	if !errors.Is(err, ErrPayloadTooLarge) {
 		t.Errorf("expected ErrPayloadTooLarge, got %v", err)
 	}
@@ -169,7 +169,38 @@ func TestCreateDocument_UnsupportedMIME(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "test.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), []string{"image/jpeg"}, 0)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", []string{"image/jpeg"}, 0)
+	if !errors.Is(err, ErrUnsupportedMediaType) {
+		t.Errorf("expected ErrUnsupportedMediaType, got %v", err)
+	}
+}
+
+func TestCreateDocument_EmptyContent_UsesDeclaredMIME(t *testing.T) {
+	svc := &FileService{Logger: nopLogger,
+		Repo:      &mockRepo{},
+		Storage:   &mockStorage{},
+		Processor: &mockProcessor{},
+	}
+
+	input := model.CreateDocumentInput{DisplayName: "new.docx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.MimeType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		t.Errorf("MimeType = %q, want docx MIME", doc.MimeType)
+	}
+}
+
+func TestCreateDocument_EmptyContent_RejectsDisallowedMIME(t *testing.T) {
+	svc := &FileService{Logger: nopLogger,
+		Repo:      &mockRepo{},
+		Storage:   &mockStorage{},
+		Processor: &mockProcessor{},
+	}
+
+	input := model.CreateDocumentInput{DisplayName: "bad.exe", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	_, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/x-executable", []string{"image/png", "image/jpeg"}, 0)
 	if !errors.Is(err, ErrUnsupportedMediaType) {
 		t.Errorf("expected ErrUnsupportedMediaType, got %v", err)
 	}
@@ -184,7 +215,7 @@ func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -371,7 +402,7 @@ func TestCreateDocument_StorageFails(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error for storage failure")
 	}
@@ -409,7 +440,7 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error for processor failure")
 	}
@@ -534,7 +565,7 @@ func TestCreateDocument_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
-	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), nil, 0)
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
