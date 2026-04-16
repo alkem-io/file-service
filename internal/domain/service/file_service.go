@@ -74,15 +74,15 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		}
 	} else {
 		mimeType = normalizeMIME(s.Processor.DetectMIME(content))
+	}
 
-		if len(allowedMimeTypes) > 0 {
-			normalized := make([]string, len(allowedMimeTypes))
-			for i, m := range allowedMimeTypes {
-				normalized[i] = normalizeMIME(m)
-			}
-			if !slices.Contains(normalized, mimeType) {
-				return nil, ErrUnsupportedMediaType
-			}
+	if len(allowedMimeTypes) > 0 {
+		normalized := make([]string, len(allowedMimeTypes))
+		for i, m := range allowedMimeTypes {
+			normalized[i] = normalizeMIME(m)
+		}
+		if !slices.Contains(normalized, mimeType) {
+			return nil, ErrUnsupportedMediaType
 		}
 	}
 
