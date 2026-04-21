@@ -87,75 +87,75 @@ func TestRouter_PublicDocumentRequiresJWT(t *testing.T) {
 func TestRouter_InternalGetMeta(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	// Should not be 404 (route exists) — may be 200 or 500 depending on mock
 	if rr.Code == http.StatusNotFound && !strings.Contains(rr.Body.String(), "document not found") {
-		t.Errorf("GET /internal/document/:id/meta returned route-level 404")
+		t.Errorf("GET /internal/file/:id/meta returned route-level 404")
 	}
 }
 
 func TestRouter_InternalGetContent(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	if rr.Code == http.StatusMethodNotAllowed {
-		t.Error("route not registered for GET /internal/document/:id/content")
+		t.Error("route not registered for GET /internal/file/:id/content")
 	}
 }
 
 func TestRouter_InternalCreateDocument(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", strings.NewReader(""))
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", strings.NewReader(""))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	// 400 (bad request) is fine — route is registered, handler rejects invalid input
 	if rr.Code == http.StatusNotFound || rr.Code == http.StatusMethodNotAllowed {
-		t.Errorf("POST /internal/document = %d, route not registered", rr.Code)
+		t.Errorf("POST /internal/file = %d, route not registered", rr.Code)
 	}
 }
 
 func TestRouter_InternalDeleteDocument(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+uuid.New().String(), nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	if rr.Code == http.StatusMethodNotAllowed {
-		t.Error("route not registered for DELETE /internal/document/:id")
+		t.Error("route not registered for DELETE /internal/file/:id")
 	}
 }
 
 func TestRouter_InternalPatchDocument(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	if rr.Code == http.StatusMethodNotAllowed {
-		t.Error("route not registered for PATCH /internal/document/:id")
+		t.Error("route not registered for PATCH /internal/file/:id")
 	}
 }
 
 func TestRouter_InternalPutContent(t *testing.T) {
 	r := testRouter()
 
-	req := httptest.NewRequest(http.MethodPut, "/internal/document/"+uuid.New().String()+"/content", strings.NewReader("data"))
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+uuid.New().String()+"/content", strings.NewReader("data"))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	if rr.Code == http.StatusMethodNotAllowed {
-		t.Error("route not registered for PUT /internal/document/:id/content")
+		t.Error("route not registered for PUT /internal/file/:id/content")
 	}
 }
 
@@ -163,7 +163,7 @@ func TestRouter_InternalNoAuth(t *testing.T) {
 	r := testRouter()
 
 	// Internal endpoints should work without Authorization header
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 

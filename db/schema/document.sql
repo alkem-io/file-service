@@ -1,4 +1,4 @@
-CREATE TABLE document (
+CREATE TABLE file (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     "createdDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     "updatedDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),

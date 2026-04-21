@@ -53,9 +53,9 @@ func TestDocumentHandler_GetMeta_Found(t *testing.T) {
 	}
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/meta", h.GetMeta)
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+docID.String()+"/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -76,9 +76,9 @@ func TestDocumentHandler_GetMeta_NotFound(t *testing.T) {
 	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/meta", h.GetMeta)
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -94,9 +94,9 @@ func TestDocumentHandler_GetContent_Found(t *testing.T) {
 	storage.data = []byte("file content")
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/content", h.GetContent)
+	r.Get("/internal/file/{id}/content", h.GetContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+docID.String()+"/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -116,9 +116,9 @@ func TestDocumentHandler_GetContent_NotFound(t *testing.T) {
 	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/content", h.GetContent)
+	r.Get("/internal/file/{id}/content", h.GetContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -133,9 +133,9 @@ func TestDocumentHandler_GetContent_FileMissing(t *testing.T) {
 	storage.err = os.ErrNotExist
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/content", h.GetContent)
+	r.Get("/internal/file/{id}/content", h.GetContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -157,9 +157,9 @@ func TestDocumentHandler_Create_Success(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -194,9 +194,9 @@ func TestDocumentHandler_Create_AllFields(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -219,9 +219,9 @@ func TestDocumentHandler_Create_InvalidAuthorizationId(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -245,9 +245,9 @@ func TestDocumentHandler_Create_InvalidTagsetId(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -271,9 +271,9 @@ func TestDocumentHandler_Create_InvalidCreatedBy(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -297,9 +297,9 @@ func TestDocumentHandler_Create_ServiceError(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -316,10 +316,10 @@ func TestDocumentHandler_Patch_WithBucketId(t *testing.T) {
 	repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), TemporaryLocation: true}
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"storageBucketId": "` + newBucket.String() + `", "temporaryLocation": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+docID.String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -340,9 +340,9 @@ func TestDocumentHandler_Delete_WithTagset(t *testing.T) {
 	repo.count = 1
 
 	r := chi.NewRouter()
-	r.Delete("/internal/document/{id}", h.Delete)
+	r.Delete("/internal/file/{id}", h.Delete)
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/"+docID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+docID.String(), nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -366,9 +366,9 @@ func TestDocumentHandler_Delete_Success(t *testing.T) {
 	repo.count = 1
 
 	r := chi.NewRouter()
-	r.Delete("/internal/document/{id}", h.Delete)
+	r.Delete("/internal/file/{id}", h.Delete)
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/"+docID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+docID.String(), nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -383,10 +383,10 @@ func TestDocumentHandler_Patch_Success(t *testing.T) {
 	repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), TemporaryLocation: true}
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"temporaryLocation": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+docID.String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -402,9 +402,9 @@ func TestDocumentHandler_ReplaceContent_Success(t *testing.T) {
 	repo.doc = model.Document{ID: docID, ExternalID: "old"}
 
 	r := chi.NewRouter()
-	r.Put("/internal/document/{id}/content", h.ReplaceContent)
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
 
-	req := httptest.NewRequest(http.MethodPut, "/internal/document/"+docID.String()+"/content", strings.NewReader("new content"))
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("new content"))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -419,10 +419,10 @@ func TestDocumentHandler_Create_MissingFile(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
 	// Empty body, no multipart
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", strings.NewReader(""))
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", strings.NewReader(""))
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -445,9 +445,9 @@ func TestDocumentHandler_Create_MissingDisplayName(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -470,9 +470,9 @@ func TestDocumentHandler_Create_InvalidStorageBucketId(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -496,9 +496,9 @@ func TestDocumentHandler_Create_TooLarge(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -522,9 +522,9 @@ func TestDocumentHandler_Create_UnsupportedMIME(t *testing.T) {
 	_ = writer.Close()
 
 	r := chi.NewRouter()
-	r.Post("/internal/document", h.Create)
+	r.Post("/internal/file", h.Create)
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/document", &body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -541,9 +541,9 @@ func TestDocumentHandler_Delete_NotFound(t *testing.T) {
 	repo.deleteErr = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
-	r.Delete("/internal/document/{id}", h.Delete)
+	r.Delete("/internal/file/{id}", h.Delete)
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+uuid.New().String(), nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -556,9 +556,9 @@ func TestDocumentHandler_Delete_InvalidID(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Delete("/internal/document/{id}", h.Delete)
+	r.Delete("/internal/file/{id}", h.Delete)
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/not-a-uuid", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/not-a-uuid", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -574,10 +574,10 @@ func TestDocumentHandler_Patch_NotFound(t *testing.T) {
 	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"temporaryLocation": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -591,9 +591,9 @@ func TestDocumentHandler_Patch_InvalidJSON(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader("{invalid"))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader("{invalid"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -607,9 +607,9 @@ func TestDocumentHandler_Patch_EmptyBody(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -624,10 +624,10 @@ func TestDocumentHandler_Patch_InvalidBucketId(t *testing.T) {
 	repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"storageBucketId": "not-a-uuid"}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -643,9 +643,9 @@ func TestDocumentHandler_GetMeta_InvalidID(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/meta", h.GetMeta)
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/not-a-uuid/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/not-a-uuid/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -658,9 +658,9 @@ func TestDocumentHandler_GetContent_InvalidID(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/content", h.GetContent)
+	r.Get("/internal/file/{id}/content", h.GetContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/not-a-uuid/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/not-a-uuid/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -673,9 +673,9 @@ func TestDocumentHandler_ReplaceContent_InvalidID(t *testing.T) {
 	h, _, _ := newDocHandler()
 
 	r := chi.NewRouter()
-	r.Put("/internal/document/{id}/content", h.ReplaceContent)
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
 
-	req := httptest.NewRequest(http.MethodPut, "/internal/document/not-a-uuid/content", strings.NewReader("content"))
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/not-a-uuid/content", strings.NewReader("content"))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -731,9 +731,9 @@ func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 	repo.err = model.ErrDocumentNotFound
 
 	r := chi.NewRouter()
-	r.Put("/internal/document/{id}/content", h.ReplaceContent)
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
 
-	req := httptest.NewRequest(http.MethodPut, "/internal/document/"+uuid.New().String()+"/content", strings.NewReader("content"))
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+uuid.New().String()+"/content", strings.NewReader("content"))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -748,9 +748,9 @@ func TestDocumentHandler_ReplaceContent_InternalError(t *testing.T) {
 	storage.saveErr = errors.New("disk full")
 
 	r := chi.NewRouter()
-	r.Put("/internal/document/{id}/content", h.ReplaceContent)
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
 
-	req := httptest.NewRequest(http.MethodPut, "/internal/document/"+uuid.New().String()+"/content", strings.NewReader("content"))
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+uuid.New().String()+"/content", strings.NewReader("content"))
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -765,9 +765,9 @@ func TestDocumentHandler_Delete_InternalError(t *testing.T) {
 	repo.deleteErr = errors.New("db error")
 
 	r := chi.NewRouter()
-	r.Delete("/internal/document/{id}", h.Delete)
+	r.Delete("/internal/file/{id}", h.Delete)
 
-	req := httptest.NewRequest(http.MethodDelete, "/internal/document/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+uuid.New().String(), nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -782,10 +782,10 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	repo.updateErr = errors.New("db error")
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"temporaryLocation": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -801,10 +801,10 @@ func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
 	repo.updateErr = model.ErrDocumentNotFound // 0 rows = version mismatch
 
 	r := chi.NewRouter()
-	r.Patch("/internal/document/{id}", h.Update)
+	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"temporaryLocation": false}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/document/"+uuid.New().String(), strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -819,9 +819,9 @@ func TestDocumentHandler_GetMeta_InternalError(t *testing.T) {
 	repo.err = errors.New("db connection lost")
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/meta", h.GetMeta)
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/meta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/meta", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
@@ -835,9 +835,9 @@ func TestDocumentHandler_GetContent_InternalError(t *testing.T) {
 	repo.err = errors.New("db connection lost")
 
 	r := chi.NewRouter()
-	r.Get("/internal/document/{id}/content", h.GetContent)
+	r.Get("/internal/file/{id}/content", h.GetContent)
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/document/"+uuid.New().String()+"/content", nil)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/content", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 

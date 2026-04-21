@@ -4,6 +4,7 @@ metadata:
   name: alkemio-file-service-deployment
   labels:
     app: alkemio-file-service
+    k8s-app: alkemio-file-service
 spec:
   replicas: 1
   selector:
@@ -14,57 +15,84 @@ spec:
       labels:
         app: alkemio-file-service
     spec:
-      securityContext:
-        fsGroup: 65532
-        runAsNonRoot: true
       containers:
         - name: alkemio-file-service
-          image: alkemio/file-service-go:v0.1.0  # Pin to release tag; CI updates via kubectl set image
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
+          image: alkemio/file-service-go:v0.0.4
+          imagePullPolicy: Always
           ports:
-            - containerPort: 4003
+            - name: http
+              containerPort: 4003
           env:
-            - name: PORT
-              value: "4003"
+            - name: ALKEMIO_DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_HOST
+            - name: ALKEMIO_DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_PORT
+            - name: ALKEMIO_DATABASE_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_USER
+            - name: ALKEMIO_DATABASE_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_PASSWORD
+            - name: ALKEMIO_DATABASE_NAME
+              value: "alkemio"
+            - name: AUTH_SERVICE_URL
+              value: "http://alkemio-authorization-evaluation-service:6060"
             - name: LOCAL_STORAGE_PATH
               value: "/storage"
             - name: STORAGE_TYPE
               value: "local"
-            - name: DOCUMENT_MAX_AGE
-              value: "86400"
-          envFrom:
-            - configMapRef:
-                name: alkemio-config
-            - secretRef:
-                name: alkemio-secrets
+            - name: LOG_LEVEL
+              value: "info"
           volumeMounts:
             - name: file-storage
               mountPath: /storage
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: 4003
             initialDelaySeconds: 5
             periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 4003
-            initialDelaySeconds: 3
-            periodSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              cpu: 200m
+              memory: 256Mi
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              cpu: 500m
+              memory: 512Mi
       volumes:
         - name: file-storage
           persistentVolumeClaim:
-            claimName: file-storage-pvc2
+            claimName: file-storage-pvc
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: alkemio-server
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: alkemio-authorization-evaluation-service
+                topologyKey: kubernetes.io/hostname
