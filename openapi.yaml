@@ -344,7 +344,7 @@ paths:
           description: Internal Server Error
       tags:
         - /internal
-  /rest/storage/document/{id}:
+  /rest/storage/file/{id}:
     get:
       operationId: PublicHandler.ServeDocument
       parameters:

@@ -91,8 +91,8 @@ func TestRouter_InternalGetMeta(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	// Should not be 404 (route exists) — may be 200 or 500 depending on mock
-	if rr.Code == http.StatusNotFound && !strings.Contains(rr.Body.String(), "document not found") {
+	// Should not be route-level 404 (route exists) — handler-level failures are acceptable
+	if rr.Code == http.StatusNotFound {
 		t.Errorf("GET /internal/file/:id/meta returned route-level 404")
 	}
 }

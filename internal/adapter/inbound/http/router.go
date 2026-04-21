@@ -30,8 +30,8 @@ func NewRouter(deps Deps) *chi.Mux {
 	// Public endpoints (Oathkeeper strips /api/private, arrives as /rest/storage/...)
 	r.Route("/rest/storage", func(r chi.Router) {
 		r.Use(JWTExtractor)
-		r.Get("/file/{id}", deps.PublicHandler.ServeDocument)
 		r.Get("/document/{id}", deps.PublicHandler.ServeDocument) // backward compat alias
+		r.Get("/file/{id}", deps.PublicHandler.ServeDocument)
 	})
 
 	// Internal endpoints (no auth)
