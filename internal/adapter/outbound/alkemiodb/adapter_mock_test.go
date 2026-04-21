@@ -31,7 +31,7 @@ func TestMock_GetByID_Found(t *testing.T) {
 	bucketID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM document WHERE id").
+	mock.ExpectQuery("SELECT .+ FROM file WHERE id").
 		WithArgs(pgtype.UUID{Bytes: docID, Valid: true}).
 		WillReturnRows(mock.NewRows(columns()).AddRow(
 			pgtype.UUID{Bytes: docID, Valid: true},
@@ -75,7 +75,7 @@ func TestMock_GetByID_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectQuery("SELECT .+ FROM document WHERE id").
+	mock.ExpectQuery("SELECT .+ FROM file WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(mock.NewRows(columns()))
 
@@ -98,7 +98,7 @@ func TestMock_Create_Success(t *testing.T) {
 
 	docID := uuid.New()
 
-	mock.ExpectQuery("INSERT INTO document").
+	mock.ExpectQuery("INSERT INTO file").
 		WithArgs(
 			pgxmock.AnyArg(), // id
 			pgxmock.AnyArg(), // externalID
@@ -146,7 +146,7 @@ func TestMock_UpdateFile_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -167,7 +167,7 @@ func TestMock_UpdateFile_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -188,7 +188,7 @@ func TestMock_Delete_Success(t *testing.T) {
 	authID := uuid.New()
 	tagsetID := uuid.New()
 
-	mock.ExpectQuery("DELETE FROM document WHERE id").
+	mock.ExpectQuery("DELETE FROM file WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}).
 			AddRow("abc123", pgtype.UUID{Bytes: authID, Valid: true}, pgtype.UUID{Bytes: tagsetID, Valid: true}))
@@ -213,7 +213,7 @@ func TestMock_Delete_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectQuery("DELETE FROM document WHERE id").
+	mock.ExpectQuery("DELETE FROM file WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}))
 
@@ -252,7 +252,7 @@ func TestMock_UpdateLocation_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -270,7 +270,7 @@ func TestMock_UpdateLocation_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -288,7 +288,7 @@ func TestMock_GetByID_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectQuery("SELECT .+ FROM document WHERE id").
+	mock.ExpectQuery("SELECT .+ FROM file WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -309,7 +309,7 @@ func TestMock_UpdateFile_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -327,7 +327,7 @@ func TestMock_UpdateLocation_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE document SET").
+	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -345,7 +345,7 @@ func TestMock_Delete_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectQuery("DELETE FROM document WHERE id").
+	mock.ExpectQuery("DELETE FROM file WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -384,7 +384,7 @@ func TestMock_Create_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectQuery("INSERT INTO document").
+	mock.ExpectQuery("INSERT INTO file").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
