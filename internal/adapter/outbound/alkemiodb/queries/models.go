@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Document struct {
+type File struct {
 	ID                pgtype.UUID        `json:"id"`
 	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`

@@ -12,7 +12,7 @@ import (
 )
 
 const countDocumentsByExternalID = `-- name: CountDocumentsByExternalID :one
-SELECT COUNT(*) FROM document WHERE "externalID" = $1
+SELECT COUNT(*) FROM file WHERE "externalID" = $1
 `
 
 func (q *Queries) CountDocumentsByExternalID(ctx context.Context, externalid string) (int64, error) {
@@ -23,7 +23,7 @@ func (q *Queries) CountDocumentsByExternalID(ctx context.Context, externalid str
 }
 
 const createDocument = `-- name: CreateDocument :one
-INSERT INTO document (id, "externalID", "mimeType", size, "displayName", "createdBy",
+INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
                       "createdDate", "updatedDate", version)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)
@@ -66,7 +66,7 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 }
 
 const deleteDocument = `-- name: DeleteDocument :one
-DELETE FROM document
+DELETE FROM file
 WHERE id = $1
 RETURNING "externalID", "authorizationId", "tagsetId"
 `
@@ -88,7 +88,7 @@ const getDocumentByID = `-- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
        "createdDate", "updatedDate", version
-FROM document
+FROM file
 WHERE id = $1
 `
 
@@ -130,7 +130,7 @@ func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocum
 }
 
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows
-UPDATE document
+UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5
 WHERE id = $1
 `
@@ -158,7 +158,7 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 }
 
 const updateDocumentLocation = `-- name: UpdateDocumentLocation :execrows
-UPDATE document
+UPDATE file
 SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4, version = version + 1
 WHERE id = $1 AND version = $5
 `

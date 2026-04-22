@@ -30,17 +30,18 @@ func NewRouter(deps Deps) *chi.Mux {
 	// Public endpoints (Oathkeeper strips /api/private, arrives as /rest/storage/...)
 	r.Route("/rest/storage", func(r chi.Router) {
 		r.Use(JWTExtractor)
-		r.Get("/document/{id}", deps.PublicHandler.ServeDocument)
+		r.Get("/document/{id}", deps.PublicHandler.ServeDocument) // backward compat alias
+		r.Get("/file/{id}", deps.PublicHandler.ServeDocument)
 	})
 
 	// Internal endpoints (no auth)
 	r.Route("/internal", func(r chi.Router) {
-		r.Post("/document", deps.DocumentHandler.Create)
-		r.Get("/document/{id}/meta", deps.DocumentHandler.GetMeta)
-		r.Get("/document/{id}/content", deps.DocumentHandler.GetContent)
-		r.Put("/document/{id}/content", deps.DocumentHandler.ReplaceContent)
-		r.Delete("/document/{id}", deps.DocumentHandler.Delete)
-		r.Patch("/document/{id}", deps.DocumentHandler.Update)
+		r.Post("/file", deps.DocumentHandler.Create)
+		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
+		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
+		r.Put("/file/{id}/content", deps.DocumentHandler.ReplaceContent)
+		r.Delete("/file/{id}", deps.DocumentHandler.Delete)
+		r.Patch("/file/{id}", deps.DocumentHandler.Update)
 
 		// Debug/metrics
 		r.Handle("/debug/vars", expvar.Handler())
