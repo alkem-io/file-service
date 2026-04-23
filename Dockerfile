@@ -9,7 +9,7 @@ FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 WORKDIR /app
 
 # Install build dependencies (vips-dev for CGO image processing)
-RUN apk add --no-cache git wget vips-dev vips-heif vips-jxl vips-poppler gcc musl-dev
+RUN apk add --no-cache git wget vips-dev gcc musl-dev
 
 # Download the wait script (architecture-specific)
 ARG TARGETARCH
