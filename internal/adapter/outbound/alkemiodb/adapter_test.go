@@ -35,7 +35,7 @@ func TestGetByID_ExistingDocument(t *testing.T) {
 	a := New(pool)
 
 	// Use a known document from the DB
-	rows, err := pool.Query(context.Background(), `SELECT id FROM document LIMIT 1`)
+	rows, err := pool.Query(context.Background(), `SELECT id FROM file LIMIT 1`)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestCreateAndDelete(t *testing.T) {
 	// We need valid FK references. Get a storageBucket and authorization from an existing doc.
 	var storageBucketID, authorizationID [16]byte
 	err := pool.QueryRow(context.Background(),
-		`SELECT "storageBucketId", "authorizationId" FROM document WHERE "storageBucketId" IS NOT NULL AND "authorizationId" IS NOT NULL LIMIT 1`,
+		`SELECT "storageBucketId", "authorizationId" FROM file WHERE "storageBucketId" IS NOT NULL AND "authorizationId" IS NOT NULL LIMIT 1`,
 	).Scan(&storageBucketID, &authorizationID)
 	if err != nil {
 		t.Skipf("no document with valid FKs: %v", err)
@@ -163,7 +163,7 @@ func TestUpdateFile(t *testing.T) {
 	var origExtID, origMime string
 	var origSize int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "externalID", "mimeType", size FROM document LIMIT 1`,
+		`SELECT id, "externalID", "mimeType", size FROM file LIMIT 1`,
 	).Scan(&id, &origExtID, &origMime, &origSize)
 	if err != nil {
 		t.Skip("no documents")
@@ -206,7 +206,7 @@ func TestCountByExternalID(t *testing.T) {
 	// Known hash from existing data
 	var extID string
 	err := pool.QueryRow(context.Background(),
-		`SELECT "externalID" FROM document LIMIT 1`,
+		`SELECT "externalID" FROM file LIMIT 1`,
 	).Scan(&extID)
 	if err != nil {
 		t.Skip("no documents")
@@ -239,7 +239,7 @@ func TestUpdateLocation(t *testing.T) {
 	var tempLoc bool
 	var version int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "temporaryLocation", version FROM document LIMIT 1`,
+		`SELECT id, "storageBucketId", "temporaryLocation", version FROM file LIMIT 1`,
 	).Scan(&id, &bucketID, &tempLoc, &version)
 	if err != nil {
 		t.Skip("no documents")
