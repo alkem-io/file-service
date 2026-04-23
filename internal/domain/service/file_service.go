@@ -88,7 +88,7 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 
 	processed, finalMIME, err := s.Processor.Process(content, mimeType)
 	if err != nil {
-		return nil, fmt.Errorf("image processing: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
 	}
 
 	stored, err := s.Storage.Save(processed)
@@ -177,7 +177,7 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
 	processed, finalMIME, err := s.Processor.Process(content, mimeType)
 	if err != nil {
-		return nil, fmt.Errorf("image processing: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
 	}
 
 	stored, err := s.Storage.Save(processed)
@@ -239,6 +239,7 @@ var (
 	ErrConflict             = errors.New("conflict: document was modified concurrently")
 	ErrPayloadTooLarge      = errors.New("payload too large")
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
+	ErrImageProcessing      = errors.New("image processing failed")
 )
 
 // normalizeMIME strips parameters and lowercases a MIME type.

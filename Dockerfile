@@ -35,7 +35,7 @@ RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-se
 FROM alpine:${ALPINE_VERSION}
 
 # Install libvips runtime only
-RUN apk add --no-cache vips
+RUN apk add --no-cache vips vips-heif vips-jxl vips-poppler
 
 # Non-root user matching K8s securityContext (fsGroup: 65532)
 RUN addgroup -g 65532 -S nonroot && adduser -u 65532 -S -G nonroot nonroot
