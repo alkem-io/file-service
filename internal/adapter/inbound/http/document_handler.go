@@ -199,6 +199,8 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
 		case errors.Is(err, service.ErrUnsupportedMediaType):
 			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
+		case errors.Is(err, service.ErrImageProcessing):
+			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			h.Logger.Error("failed to create document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -330,12 +332,15 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 
 	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
+		switch {
+		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
+		case errors.Is(err, service.ErrImageProcessing):
+			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			h.Logger.Error("failed to replace content", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
-		h.Logger.Error("failed to replace content", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
