@@ -85,6 +85,9 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	// clean up the auth/tagset rows it pre-created.
 	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 	if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
+		// Lookup failed mid-flight (e.g., DB hiccup). The blob may have just
+		// been written and would be orphaned without cleanup.
+		s.cleanupStoredOnError(stored)
 		return nil, fmt.Errorf("dedup lookup: %w", err)
 	}
 	if err == nil {
@@ -235,12 +238,7 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, finalMIME, stored.Size)
 	if err != nil {
-		// Only delete if this request actually created the file (not a dedup match)
-		if stored.Created {
-			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
-			}
-		}
+		s.cleanupStoredOnError(stored)
 		if errors.Is(err, model.ErrDuplicateKey) {
 			return nil, ErrConflict
 		}

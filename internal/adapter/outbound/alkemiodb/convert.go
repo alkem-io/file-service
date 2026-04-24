@@ -62,38 +62,50 @@ func safeInt32(n int) int32 {
 	return int32(n)
 }
 
-func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
+// documentRow is the subset of fields shared by every sqlc query row that
+// materializes a full document record. sqlc emits a distinct Go type per
+// query; Go structural conversion lets us map any row type into this one
+// as long as the fields match exactly. Field names must match sqlc's
+// generated casing (StorageBucketId, not StorageBucketID) — hence the
+// nolint directives below.
+type documentRow struct {
+	ID                pgtype.UUID
+	ExternalID        string
+	MimeType          string
+	Size              int32
+	DisplayName       string
+	CreatedBy         pgtype.UUID
+	TemporaryLocation bool
+	StorageBucketId   pgtype.UUID //nolint:staticcheck // ST1003: sqlc-generated casing must match for structural conversion
+	AuthorizationId   pgtype.UUID //nolint:staticcheck // ST1003: sqlc-generated casing must match for structural conversion
+	TagsetId          pgtype.UUID //nolint:staticcheck // ST1003: sqlc-generated casing must match for structural conversion
+	CreatedDate       pgtype.Timestamptz
+	UpdatedDate       pgtype.Timestamptz
+	Version           int32
+}
+
+func documentFromRow(r documentRow) model.Document {
 	return model.Document{
-		ID:                pgxToUUID(row.ID),
-		ExternalID:        row.ExternalID,
-		MimeType:          row.MimeType,
-		Size:              int(row.Size),
-		DisplayName:       row.DisplayName,
-		CreatedBy:         pgxToUUIDNullable(row.CreatedBy),
-		TemporaryLocation: row.TemporaryLocation,
-		StorageBucketID:   pgxToUUID(row.StorageBucketId),
-		AuthorizationID:   pgxToUUID(row.AuthorizationId),
-		TagsetID:          pgxToUUIDNullable(row.TagsetId),
-		CreatedDate:       pgxToTime(row.CreatedDate),
-		UpdatedDate:       pgxToTime(row.UpdatedDate),
-		Version:           int(row.Version),
+		ID:                pgxToUUID(r.ID),
+		ExternalID:        r.ExternalID,
+		MimeType:          r.MimeType,
+		Size:              int(r.Size),
+		DisplayName:       r.DisplayName,
+		CreatedBy:         pgxToUUIDNullable(r.CreatedBy),
+		TemporaryLocation: r.TemporaryLocation,
+		StorageBucketID:   pgxToUUID(r.StorageBucketId),
+		AuthorizationID:   pgxToUUID(r.AuthorizationId),
+		TagsetID:          pgxToUUIDNullable(r.TagsetId),
+		CreatedDate:       pgxToTime(r.CreatedDate),
+		UpdatedDate:       pgxToTime(r.UpdatedDate),
+		Version:           int(r.Version),
 	}
 }
 
+func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
+	return documentFromRow(documentRow(row))
+}
+
 func findRowToDocument(row queries.FindDocumentByExternalIDAndBucketRow) model.Document {
-	return model.Document{
-		ID:                pgxToUUID(row.ID),
-		ExternalID:        row.ExternalID,
-		MimeType:          row.MimeType,
-		Size:              int(row.Size),
-		DisplayName:       row.DisplayName,
-		CreatedBy:         pgxToUUIDNullable(row.CreatedBy),
-		TemporaryLocation: row.TemporaryLocation,
-		StorageBucketID:   pgxToUUID(row.StorageBucketId),
-		AuthorizationID:   pgxToUUID(row.AuthorizationId),
-		TagsetID:          pgxToUUIDNullable(row.TagsetId),
-		CreatedDate:       pgxToTime(row.CreatedDate),
-		UpdatedDate:       pgxToTime(row.UpdatedDate),
-		Version:           int(row.Version),
-	}
+	return documentFromRow(documentRow(row))
 }

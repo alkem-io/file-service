@@ -90,6 +90,7 @@ SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "createdDate", "updatedDate", version
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
+ORDER BY "createdDate" ASC, id ASC
 LIMIT 1
 `
 
@@ -114,6 +115,9 @@ type FindDocumentByExternalIDAndBucketRow struct {
 	Version           int32              `json:"version"`
 }
 
+// Deterministic selection: oldest row wins. Matters if historical duplicates
+// exist (pre-migration) or if two racing inserts both succeed before the
+// unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
 func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg FindDocumentByExternalIDAndBucketParams) (FindDocumentByExternalIDAndBucketRow, error) {
 	row := q.db.QueryRow(ctx, findDocumentByExternalIDAndBucket, arg.ExternalID, arg.StorageBucketId)
 	var i FindDocumentByExternalIDAndBucketRow

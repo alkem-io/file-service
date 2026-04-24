@@ -6,11 +6,15 @@ FROM file
 WHERE id = $1;
 
 -- name: FindDocumentByExternalIDAndBucket :one
+-- Deterministic selection: oldest row wins. Matters if historical duplicates
+-- exist (pre-migration) or if two racing inserts both succeed before the
+-- unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
        "createdDate", "updatedDate", version
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
+ORDER BY "createdDate" ASC, id ASC
 LIMIT 1;
 
 -- name: CreateDocument :one
