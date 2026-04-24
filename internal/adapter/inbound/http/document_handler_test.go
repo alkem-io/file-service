@@ -178,6 +178,85 @@ func TestDocumentHandler_Create_Success(t *testing.T) {
 	}
 }
 
+func TestDocumentHandler_Create_Success_NotReused(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || reused {
+		t.Errorf("reused = %v, want false for new insert", resp["reused"])
+	}
+}
+
+// Dedup hit returns 201 (uniform POST success) with reused=true so callers
+// that only branch on 2xx vs 4xx work correctly across all generators.
+func TestDocumentHandler_Create_Dedup_ReturnsReusedTrue(t *testing.T) {
+	h, repo, _ := newDocHandler()
+
+	existingID := uuid.New()
+	existingAuth := uuid.New()
+	bucket := uuid.New()
+	repo.findDoc = &model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-hello",
+		MimeType:        "text/plain",
+		Size:            5,
+		StorageBucketID: bucket,
+		AuthorizationID: existingAuth,
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", bucket.String())
+	_ = writer.WriteField("authorizationId", uuid.New().String()) // caller-supplied, should be ignored
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (uniform POST success), body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || !reused {
+		t.Errorf("reused = %v, want true", resp["reused"])
+	}
+	if resp["id"] != existingID.String() {
+		t.Errorf("id = %v, want existing %v", resp["id"], existingID.String())
+	}
+}
+
 func TestDocumentHandler_Create_AllFields(t *testing.T) {
 	h, _, _ := newDocHandler()
 
@@ -739,6 +818,26 @@ func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// 409 path: new content's hash collides with another file row already in the same
+// bucket. The unique(externalID, storageBucketID) index rejects the UPDATE.
+// Auto-merging would lose distinct document identity, so we surface 409.
+func TestDocumentHandler_ReplaceContent_ContentCollision_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), ExternalID: "old-hash", StorageBucketID: uuid.New()}
+	repo.updateErr = model.ErrDuplicateKey
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+uuid.New().String()+"/content", strings.NewReader("new content"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 on bucket content collision, body: %s", rr.Code, rr.Body.String())
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
@@ -34,6 +36,20 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 	return rowToDocument(row), nil
 }
 
+func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {
+	row, err := a.queries.FindDocumentByExternalIDAndBucket(ctx, queries.FindDocumentByExternalIDAndBucketParams{
+		ExternalID:      externalID,
+		StorageBucketId: uuidToPgx(storageBucketID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return findRowToDocument(row), nil
+}
+
 func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, error) {
 	id, err := a.queries.CreateDocument(ctx, queries.CreateDocumentParams{
 		ID:                uuidToPgx(doc.ID),
@@ -50,6 +66,10 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, er
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+			return uuid.Nil, model.ErrDuplicateKey
+		}
 		return uuid.Nil, err
 	}
 	return pgxToUUID(id), nil
@@ -64,6 +84,10 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 		UpdatedDate: timeToPgxNow(),
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+			return model.ErrDuplicateKey
+		}
 		return err
 	}
 	if rows == 0 {

@@ -17,14 +17,21 @@ var nopLogger = zap.NewNop()
 // --- Mocks ---
 
 type mockRepo struct {
-	doc          model.Document
-	getErr       error
-	createErr    error
-	updateErr    error
-	deleteResult model.DeletedDocument
-	deleteErr    error
-	count        int
-	countErr     error
+	doc           model.Document
+	getErr        error
+	findDoc       *model.Document // nil means "not found"
+	findErr       error           // if set, overrides findDoc
+	findCalls     int
+	lastFindExt   string
+	lastFindBkt   uuid.UUID
+	createErr     error
+	createErrOnce error // returned only on the first Create call
+	createCalls   int
+	updateErr     error
+	deleteResult  model.DeletedDocument
+	deleteErr     error
+	count         int
+	countErr      error
 }
 
 // Ensure mockRepo implements the full interface at compile time.
@@ -33,7 +40,23 @@ var _ port.DocumentRepo = (*mockRepo)(nil)
 func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.doc, m.getErr
 }
+func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {
+	m.findCalls++
+	m.lastFindExt = externalID
+	m.lastFindBkt = storageBucketID
+	if m.findErr != nil {
+		return model.Document{}, m.findErr
+	}
+	if m.findDoc == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return *m.findDoc, nil
+}
 func (m *mockRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, error) {
+	m.createCalls++
+	if m.createErrOnce != nil && m.createCalls == 1 {
+		return uuid.Nil, m.createErrOnce
+	}
 	return doc.ID, m.createErr
 }
 func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
@@ -145,6 +168,167 @@ func TestCreateDocument_Happy(t *testing.T) {
 	if doc.ID == uuid.Nil {
 		t.Error("expected non-nil document ID")
 	}
+	if doc.Reused {
+		t.Error("expected Reused=false for new content")
+	}
+}
+
+// Dedup: same content in same bucket → existing row returned, Reused=true,
+// caller-supplied auth/tagset ignored.
+func TestCreateDocument_Dedup_SameContentSameBucket_ReturnsExisting(t *testing.T) {
+	existingID := uuid.New()
+	existingAuth := uuid.New()
+	existingTagset := uuid.New()
+	bucket := uuid.New()
+
+	repo := &mockRepo{
+		findDoc: &model.Document{
+			ID:              existingID,
+			ExternalID:      "sha3-of-content",
+			MimeType:        "text/plain",
+			Size:            7,
+			StorageBucketID: bucket,
+			AuthorizationID: existingAuth,
+			TagsetID:        &existingTagset,
+		},
+	}
+	storage := &mockStorage{}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
+
+	callerAuth := uuid.New()
+	callerTagset := uuid.New()
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: callerAuth,
+		TagsetID:        &callerTagset,
+	}
+
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true for dedup match")
+	}
+	if doc.ID != existingID {
+		t.Errorf("ID = %v, want existing %v", doc.ID, existingID)
+	}
+	if doc.AuthorizationID != existingAuth {
+		t.Errorf("AuthorizationID = %v, want existing %v (caller-supplied must be ignored)", doc.AuthorizationID, existingAuth)
+	}
+	if doc.TagsetID == nil || *doc.TagsetID != existingTagset {
+		t.Errorf("TagsetID = %v, want existing %v", doc.TagsetID, existingTagset)
+	}
+	if repo.createCalls != 0 {
+		t.Errorf("expected 0 Create calls on dedup hit, got %d", repo.createCalls)
+	}
+	if repo.lastFindBkt != bucket {
+		t.Errorf("lookup bucket = %v, want %v", repo.lastFindBkt, bucket)
+	}
+}
+
+// Dedup is per-bucket: same content, different bucket → new row inserted.
+func TestCreateDocument_Dedup_SameContentDifferentBucket_InsertsNew(t *testing.T) {
+	// Default mockRepo findDoc=nil → returns ErrDocumentNotFound (bucket mismatch).
+	repo := &mockRepo{}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false for different-bucket content")
+	}
+	if repo.createCalls != 1 {
+		t.Errorf("expected 1 Create call, got %d", repo.createCalls)
+	}
+}
+
+// Concurrent race: first Create fails with ErrDuplicateKey (other writer
+// won the race on unique(externalID, storageBucketID)). Service re-queries
+// and returns the winner with Reused=true.
+func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
+	winnerID := uuid.New()
+	winnerAuth := uuid.New()
+	bucket := uuid.New()
+
+	callCount := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			callCount++
+			if callCount == 1 {
+				// First lookup: no existing row → fall through to Create.
+				return model.Document{}, model.ErrDocumentNotFound
+			}
+			// After Create race: the winner is now visible.
+			return model.Document{
+				ID:              winnerID,
+				ExternalID:      "sha3-of-content",
+				StorageBucketID: bucket,
+				AuthorizationID: winnerAuth,
+			}, nil
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	storage := &mockStorage{}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true after Create race")
+	}
+	if doc.ID != winnerID {
+		t.Errorf("ID = %v, want winner %v", doc.ID, winnerID)
+	}
+	if doc.AuthorizationID != winnerAuth {
+		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+}
+
+// mockRepoRace is a minimal repo mock supporting a scripted FindByExternalIDAndBucket
+// and a fixed Create error — used for the concurrent race test.
+type mockRepoRace struct {
+	find      func() (model.Document, error)
+	createErr error
+}
+
+var _ port.DocumentRepo = (*mockRepoRace)(nil)
+
+func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	return model.Document{}, nil
+}
+func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	return m.find()
+}
+func (m *mockRepoRace) Create(_ context.Context, _ model.Document) (uuid.UUID, error) {
+	return uuid.Nil, m.createErr
+}
+func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+	return nil
+}
+func (m *mockRepoRace) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+	return nil
+}
+func (m *mockRepoRace) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
+	return model.DeletedDocument{}, nil
+}
+func (m *mockRepoRace) CountByExternalID(_ context.Context, _ string) (int, error) {
+	return 0, nil
 }
 
 func TestCreateDocument_TooLarge(t *testing.T) {
@@ -206,7 +390,12 @@ func TestCreateDocument_EmptyContent_RejectsDisallowedMIME(t *testing.T) {
 	}
 }
 
-func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
+// Post-Save cleanup policy: once a blob is stored, we do NOT delete it on
+// subsequent DB failures. A concurrent cross-bucket writer may have already
+// linked the blob to its own row (storage dedup is global, table dedup is
+// per-bucket). Orphaning a row is worse than orphaning a blob; orphan blobs
+// are handled by a periodic GC sweep.
+func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{createErr: errors.New("db error")},
@@ -219,8 +408,8 @@ func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !storage.deleted {
-		t.Error("expected file cleanup after DB failure")
+	if storage.deleted {
+		t.Error("blob was deleted on DB failure; cross-bucket linker could be orphaned")
 	}
 }
 
@@ -284,7 +473,9 @@ func TestStoreAndLink_Happy(t *testing.T) {
 	}
 }
 
-func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
+// Same post-Save cleanup policy: UpdateFile failures don't delete the new blob,
+// because another cross-bucket writer may have linked it in the meantime.
+func TestStoreAndLink_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}, updateErr: errors.New("db error")},
@@ -296,8 +487,8 @@ func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !storage.deleted {
-		t.Error("expected file cleanup after DB failure")
+	if storage.deleted {
+		t.Error("blob was deleted on UpdateFile failure; cross-bucket linker could be orphaned")
 	}
 }
 

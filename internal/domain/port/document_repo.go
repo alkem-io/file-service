@@ -11,6 +11,7 @@ import (
 // DocumentRepo abstracts database access to the document table.
 type DocumentRepo interface {
 	GetByID(ctx context.Context, id uuid.UUID) (model.Document, error)
+	FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error)
 	Create(ctx context.Context, doc model.Document) (uuid.UUID, error)
 	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int) error
 	UpdateLocation(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) error

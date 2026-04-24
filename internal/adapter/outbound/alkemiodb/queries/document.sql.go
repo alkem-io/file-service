@@ -84,6 +84,61 @@ func (q *Queries) DeleteDocument(ctx context.Context, id pgtype.UUID) (DeleteDoc
 	return i, err
 }
 
+const findDocumentByExternalIDAndBucket = `-- name: FindDocumentByExternalIDAndBucket :one
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version
+FROM file
+WHERE "externalID" = $1 AND "storageBucketId" = $2
+ORDER BY "createdDate" ASC, id ASC
+LIMIT 1
+`
+
+type FindDocumentByExternalIDAndBucketParams struct {
+	ExternalID      string      `json:"externalID"`
+	StorageBucketId pgtype.UUID `json:"storageBucketId"`
+}
+
+type FindDocumentByExternalIDAndBucketRow struct {
+	ID                pgtype.UUID        `json:"id"`
+	ExternalID        string             `json:"externalID"`
+	MimeType          string             `json:"mimeType"`
+	Size              int32              `json:"size"`
+	DisplayName       string             `json:"displayName"`
+	CreatedBy         pgtype.UUID        `json:"createdBy"`
+	TemporaryLocation bool               `json:"temporaryLocation"`
+	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
+	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
+	TagsetId          pgtype.UUID        `json:"tagsetId"`
+	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
+	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
+	Version           int32              `json:"version"`
+}
+
+// Deterministic selection: oldest row wins. Matters if historical duplicates
+// exist (pre-migration) or if two racing inserts both succeed before the
+// unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
+func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg FindDocumentByExternalIDAndBucketParams) (FindDocumentByExternalIDAndBucketRow, error) {
+	row := q.db.QueryRow(ctx, findDocumentByExternalIDAndBucket, arg.ExternalID, arg.StorageBucketId)
+	var i FindDocumentByExternalIDAndBucketRow
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalID,
+		&i.MimeType,
+		&i.Size,
+		&i.DisplayName,
+		&i.CreatedBy,
+		&i.TemporaryLocation,
+		&i.StorageBucketId,
+		&i.AuthorizationId,
+		&i.TagsetId,
+		&i.CreatedDate,
+		&i.UpdatedDate,
+		&i.Version,
+	)
+	return i, err
+}
+
 const getDocumentByID = `-- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",

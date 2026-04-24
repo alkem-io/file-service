@@ -7,6 +7,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.13
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
+	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.50.0

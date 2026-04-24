@@ -6,12 +6,19 @@ import (
 	"time"
 )
 
-// CreateDocumentResponse is returned by POST /internal/document.
+// CreateDocumentResponse is returned by POST /internal/file.
+// Always uses HTTP 201 so strict POST clients and code generators treat
+// every success uniformly. The Reused field distinguishes outcomes:
+//   - Reused=false: a new file row was inserted
+//   - Reused=true:  an existing row matched (externalID, storageBucketID)
+//     and was returned as-is; the caller-supplied authorizationId/tagsetId
+//     were ignored and should be cleaned up by the caller.
 type CreateDocumentResponse struct {
 	ID         string `json:"id"`
 	ExternalID string `json:"externalID"`
 	MimeType   string `json:"mimeType"`
 	Size       int    `json:"size"`
+	Reused     bool   `json:"reused"`
 }
 
 func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
