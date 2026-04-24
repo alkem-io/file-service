@@ -45,6 +45,9 @@ WORKDIR /app
 COPY --from=builder /wait /wait
 COPY --from=builder /bin/file-service /bin/file-service
 
+RUN mkdir /storage && chown nonroot:nonroot /storage
+VOLUME /storage
+
 USER nonroot:nonroot
 
 EXPOSE 4003
