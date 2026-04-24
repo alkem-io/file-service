@@ -86,6 +86,8 @@ func JWTExtractor(next http.Handler) http.Handler {
 }
 
 // RequestLogger logs request start/end with duration.
+// Health-probe endpoints (/live, /health) are excluded from logs: they are hit
+// by Kubernetes probes every few seconds and would dominate the log stream.
 func RequestLogger(logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +95,10 @@ func RequestLogger(logger *zap.Logger) func(http.Handler) http.Handler {
 			ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(ww, r)
+
+			if r.URL.Path == "/live" || r.URL.Path == "/health" {
+				return
+			}
 
 			logger.Info("request",
 				zap.String("requestID", GetRequestID(r.Context())),

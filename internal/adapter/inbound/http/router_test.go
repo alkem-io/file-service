@@ -59,6 +59,24 @@ func TestRouter_HealthEndpoint(t *testing.T) {
 	}
 }
 
+// /live is a process-alive check for K8s livenessProbe. It must return 200
+// regardless of DB/NATS state — the point is to detect deadlocked pods, not
+// dependency failures.
+func TestRouter_LiveEndpoint(t *testing.T) {
+	r := testRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/live", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET /live = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
 func TestRouter_DebugVars(t *testing.T) {
 	r := testRouter()
 

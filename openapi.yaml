@@ -365,6 +365,16 @@ paths:
           description: Internal Server Error
       tags:
         - /internal
+  /live:
+    get:
+      operationId: router.go:31:17
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: string
+          description: OK
   /rest/storage/file/{id}:
     get:
       operationId: PublicHandler.ServeDocument

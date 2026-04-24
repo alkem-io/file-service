@@ -2,6 +2,7 @@ package http
 
 import (
 	"expvar"
+	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -24,7 +25,16 @@ func NewRouter(deps Deps) *chi.Mux {
 	r.Use(RequestID)
 	r.Use(RequestLogger(deps.Logger))
 
-	// Health check (root level)
+	// Liveness (K8s livenessProbe): process-alive check only, no dependencies.
+	// Kept separate from /health so liveness failures don't restart pods when
+	// only a dependency is down.
+	r.Get("/live", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"alive"}`))
+	})
+
+	// Readiness (K8s readinessProbe): checks DB (and NATS if configured).
 	r.Method("GET", "/health", deps.HealthHandler)
 
 	// Public endpoints (Oathkeeper strips /api/private, arrives as /rest/storage/...)
