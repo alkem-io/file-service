@@ -390,7 +390,12 @@ func TestCreateDocument_EmptyContent_RejectsDisallowedMIME(t *testing.T) {
 	}
 }
 
-func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
+// Post-Save cleanup policy: once a blob is stored, we do NOT delete it on
+// subsequent DB failures. A concurrent cross-bucket writer may have already
+// linked the blob to its own row (storage dedup is global, table dedup is
+// per-bucket). Orphaning a row is worse than orphaning a blob; orphan blobs
+// are handled by a periodic GC sweep.
+func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{createErr: errors.New("db error")},
@@ -403,8 +408,8 @@ func TestCreateDocument_DBFails_CleansUpFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !storage.deleted {
-		t.Error("expected file cleanup after DB failure")
+	if storage.deleted {
+		t.Error("blob was deleted on DB failure; cross-bucket linker could be orphaned")
 	}
 }
 
@@ -468,7 +473,9 @@ func TestStoreAndLink_Happy(t *testing.T) {
 	}
 }
 
-func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
+// Same post-Save cleanup policy: UpdateFile failures don't delete the new blob,
+// because another cross-bucket writer may have linked it in the meantime.
+func TestStoreAndLink_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}, updateErr: errors.New("db error")},
@@ -480,8 +487,8 @@ func TestStoreAndLink_DBFails_CleansUpFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !storage.deleted {
-		t.Error("expected file cleanup after DB failure")
+	if storage.deleted {
+		t.Error("blob was deleted on UpdateFile failure; cross-bucket linker could be orphaned")
 	}
 }
 

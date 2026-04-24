@@ -127,11 +127,18 @@ func resolveMIME(p port.ImageProcessor, content []byte, declaredMIME string, all
 
 // insertDocument builds the Document, attempts a Create, and handles the
 // unique-key race by re-querying and returning the concurrent winner.
+//
+// Blob cleanup policy: once Storage.Save has published a blob, we never
+// delete it on subsequent failures. externalID is global content identity,
+// but the dedup rule is per-(externalID, storageBucketID), so another
+// concurrent request in a different bucket may have already linked this
+// same blob to its own document row before our error path runs. Deleting
+// here would orphan that row — a permanent 404 for its users. Orphan blobs
+// left behind are recoverable via a periodic GC sweep.
 func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, finalMIME string) (*model.Document, error) {
 	now := time.Now()
 	docID, err := uuid.NewV7()
 	if err != nil {
-		s.cleanupStoredOnError(stored)
 		return nil, fmt.Errorf("generate UUIDv7: %w", err)
 	}
 
@@ -156,8 +163,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 	}
 
 	// Concurrent creator won the race on the unique(externalID, storageBucketID) index.
-	// Re-query and return the winner with Reused=true. Never clean up the blob here —
-	// the winning row references it, so deletion would orphan that row.
+	// Re-query and return the winner with Reused=true.
 	if errors.Is(err, model.ErrDuplicateKey) {
 		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
@@ -168,22 +174,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
 		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
 	}
-	// Non-duplicate Create failure (e.g., FK violation): no row was inserted,
-	// so the blob is safe to clean up.
-	s.cleanupStoredOnError(stored)
 	return nil, fmt.Errorf("create document record: %w", err)
-}
-
-// cleanupStoredOnError deletes the blob only if this request created it
-// (not a storage-layer dedup match).
-func (s *FileService) cleanupStoredOnError(stored model.StoredFile) {
-	if !stored.Created {
-		return
-	}
-	if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
-		s.Logger.Warn("cleanup: failed to delete stored file",
-			zap.String("externalID", stored.ExternalID), zap.Error(delErr))
-	}
 }
 
 // DeleteDocument removes a document record and its file (if not shared).
@@ -243,12 +234,13 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, finalMIME, stored.Size)
 	if err != nil {
+		// Never delete the newly-stored blob on failure: another concurrent
+		// request in any bucket may have already linked this externalID
+		// (storage dedup is global, index is per-bucket). Orphan blobs are
+		// GC'able; orphan rows are permanent 404s.
 		if errors.Is(err, model.ErrDuplicateKey) {
-			// Another row in this bucket already has this externalID and
-			// references our blob. Cleanup would orphan that row.
 			return nil, ErrConflict
 		}
-		s.cleanupStoredOnError(stored)
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
 
