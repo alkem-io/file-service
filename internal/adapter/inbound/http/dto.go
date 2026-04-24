@@ -7,9 +7,12 @@ import (
 )
 
 // CreateDocumentResponse is returned by POST /internal/file.
-// Reused=true means an existing row matched (externalID, storageBucketID) and
-// was returned as-is; the caller-supplied authorizationId/tagsetId were ignored
-// and should be cleaned up by the caller. HTTP status is 200 on reuse, 201 on insert.
+// Always uses HTTP 201 so strict POST clients and code generators treat
+// every success uniformly. The Reused field distinguishes outcomes:
+//   - Reused=false: a new file row was inserted
+//   - Reused=true:  an existing row matched (externalID, storageBucketID)
+//     and was returned as-is; the caller-supplied authorizationId/tagsetId
+//     were ignored and should be cleaned up by the caller.
 type CreateDocumentResponse struct {
 	ID         string `json:"id"`
 	ExternalID string `json:"externalID"`
@@ -20,11 +23,6 @@ type CreateDocumentResponse struct {
 
 func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Reused {
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(r)
-		return
-	}
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(r)
 }

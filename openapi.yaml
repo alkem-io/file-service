@@ -143,12 +143,6 @@ paths:
           schema:
             type: string
       responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/http.CreateDocumentResponse'
-          description: OK
         "201":
           content:
             application/json:

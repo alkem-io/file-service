@@ -209,7 +209,9 @@ func TestDocumentHandler_Create_Success_NotReused(t *testing.T) {
 	}
 }
 
-func TestDocumentHandler_Create_Dedup_Returns200Reused(t *testing.T) {
+// Dedup hit returns 201 (uniform POST success) with reused=true so callers
+// that only branch on 2xx vs 4xx work correctly across all generators.
+func TestDocumentHandler_Create_Dedup_ReturnsReusedTrue(t *testing.T) {
 	h, repo, _ := newDocHandler()
 
 	existingID := uuid.New()
@@ -241,8 +243,8 @@ func TestDocumentHandler_Create_Dedup_Returns200Reused(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 on dedup hit, body: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (uniform POST success), body: %s", rr.Code, rr.Body.String())
 	}
 
 	var resp map[string]any
@@ -816,6 +818,26 @@ func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// 409 path: new content's hash collides with another file row already in the same
+// bucket. The unique(externalID, storageBucketID) index rejects the UPDATE.
+// Auto-merging would lose distinct document identity, so we surface 409.
+func TestDocumentHandler_ReplaceContent_ContentCollision_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), ExternalID: "old-hash", StorageBucketID: uuid.New()}
+	repo.updateErr = model.ErrDuplicateKey
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+uuid.New().String()+"/content", strings.NewReader("new content"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 on bucket content collision, body: %s", rr.Code, rr.Body.String())
 	}
 }
 
