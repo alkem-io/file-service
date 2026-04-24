@@ -79,3 +79,21 @@ func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
 		Version:           int(row.Version),
 	}
 }
+
+func findRowToDocument(row queries.FindDocumentByExternalIDAndBucketRow) model.Document {
+	return model.Document{
+		ID:                pgxToUUID(row.ID),
+		ExternalID:        row.ExternalID,
+		MimeType:          row.MimeType,
+		Size:              int(row.Size),
+		DisplayName:       row.DisplayName,
+		CreatedBy:         pgxToUUIDNullable(row.CreatedBy),
+		TemporaryLocation: row.TemporaryLocation,
+		StorageBucketID:   pgxToUUID(row.StorageBucketId),
+		AuthorizationID:   pgxToUUID(row.AuthorizationId),
+		TagsetID:          pgxToUUIDNullable(row.TagsetId),
+		CreatedDate:       pgxToTime(row.CreatedDate),
+		UpdatedDate:       pgxToTime(row.UpdatedDate),
+		Version:           int(row.Version),
+	}
+}

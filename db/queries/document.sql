@@ -5,6 +5,14 @@ SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
 FROM file
 WHERE id = $1;
 
+-- name: FindDocumentByExternalIDAndBucket :one
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version
+FROM file
+WHERE "externalID" = $1 AND "storageBucketId" = $2
+LIMIT 1;
+
 -- name: CreateDocument :one
 INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",

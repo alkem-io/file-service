@@ -8,6 +8,8 @@ components:
           type: string
         mimeType:
           type: string
+        reused:
+          type: boolean
         size:
           type: integer
       required:
@@ -15,6 +17,7 @@ components:
         - externalID
         - mimeType
         - size
+        - reused
       type: object
     http.DeleteDocumentResponse:
       properties:
@@ -140,6 +143,12 @@ paths:
           schema:
             type: string
       responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.CreateDocumentResponse'
+          description: OK
         "201":
           content:
             application/json:
@@ -306,6 +315,12 @@ paths:
           content:
             application/json: {}
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Conflict
         "413":
           content:
             application/json:

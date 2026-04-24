@@ -213,6 +213,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ExternalID: doc.ExternalID,
 		MimeType:   doc.MimeType,
 		Size:       doc.Size,
+		Reused:     doc.Reused,
 	}.Render(w)
 }
 
@@ -330,6 +331,10 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// ReplaceContent note: if the new content's hash matches another file row in
+	// the same bucket, the unique(externalID, storageBucketID) index is violated.
+	// The service returns ErrConflict → 409 in that case. UpdateFile (PATCH) does
+	// not touch externalID, so it cannot trigger this.
 	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
 	if err != nil {
 		switch {
@@ -337,6 +342,8 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusNotFound, "document not found")
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, service.ErrConflict):
+			writeJSONError(w, http.StatusConflict, "new content conflicts with another document in this bucket")
 		default:
 			h.Logger.Error("failed to replace content", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")

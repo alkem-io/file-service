@@ -178,6 +178,83 @@ func TestDocumentHandler_Create_Success(t *testing.T) {
 	}
 }
 
+func TestDocumentHandler_Create_Success_NotReused(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || reused {
+		t.Errorf("reused = %v, want false for new insert", resp["reused"])
+	}
+}
+
+func TestDocumentHandler_Create_Dedup_Returns200Reused(t *testing.T) {
+	h, repo, _ := newDocHandler()
+
+	existingID := uuid.New()
+	existingAuth := uuid.New()
+	bucket := uuid.New()
+	repo.findDoc = &model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-hello",
+		MimeType:        "text/plain",
+		Size:            5,
+		StorageBucketID: bucket,
+		AuthorizationID: existingAuth,
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", bucket.String())
+	_ = writer.WriteField("authorizationId", uuid.New().String()) // caller-supplied, should be ignored
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 on dedup hit, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || !reused {
+		t.Errorf("reused = %v, want true", resp["reused"])
+	}
+	if resp["id"] != existingID.String() {
+		t.Errorf("id = %v, want existing %v", resp["id"], existingID.String())
+	}
+}
+
 func TestDocumentHandler_Create_AllFields(t *testing.T) {
 	h, _, _ := newDocHandler()
 

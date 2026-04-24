@@ -21,6 +21,12 @@ type Document struct {
 	CreatedDate       time.Time
 	UpdatedDate       time.Time
 	Version           int
+
+	// Reused is set to true when a dedup lookup returned an existing row
+	// instead of inserting a new one. Response-only; not persisted.
+	// When Reused is true, the caller-supplied AuthorizationID and TagsetID
+	// were ignored — the existing row's values are authoritative.
+	Reused bool
 }
 
 // CreateDocumentInput contains fields needed to create a new document.

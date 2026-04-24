@@ -64,26 +64,9 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, ErrPayloadTooLarge
 	}
 
-	var mimeType string
-	if len(content) == 0 {
-		// Empty document (e.g., Collabora placeholder): no bytes to detect from.
-		// Trust the declared MIME from the multipart Content-Type header.
-		mimeType = normalizeMIME(declaredMIME)
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
-	} else {
-		mimeType = normalizeMIME(s.Processor.DetectMIME(content))
-	}
-
-	if len(allowedMimeTypes) > 0 {
-		normalized := make([]string, len(allowedMimeTypes))
-		for i, m := range allowedMimeTypes {
-			normalized[i] = normalizeMIME(m)
-		}
-		if !slices.Contains(normalized, mimeType) {
-			return nil, ErrUnsupportedMediaType
-		}
+	mimeType, err := resolveMIME(s.Processor, content, declaredMIME, allowedMimeTypes)
+	if err != nil {
+		return nil, err
 	}
 
 	processed, finalMIME, err := s.Processor.Process(content, mimeType)
@@ -96,14 +79,55 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
+	// Row-level dedup: if a file row already exists for (externalID, storageBucketID),
+	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
+	// the existing row's values are authoritative. Caller must use Reused=true to
+	// clean up the auth/tagset rows it pre-created.
+	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+	if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
+		return nil, fmt.Errorf("dedup lookup: %w", err)
+	}
+	if err == nil {
+		existing.Reused = true
+		return &existing, nil
+	}
+
+	return s.insertDocument(ctx, input, stored, finalMIME)
+}
+
+// resolveMIME determines the effective MIME type and validates it against the allow-list.
+// Empty content: trust declaredMIME (no bytes to detect from).
+// Non-empty: detect from content bytes.
+func resolveMIME(p port.ImageProcessor, content []byte, declaredMIME string, allowedMimeTypes []string) (string, error) {
+	var mimeType string
+	if len(content) == 0 {
+		mimeType = normalizeMIME(declaredMIME)
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+	} else {
+		mimeType = normalizeMIME(p.DetectMIME(content))
+	}
+
+	if len(allowedMimeTypes) > 0 {
+		normalized := make([]string, len(allowedMimeTypes))
+		for i, m := range allowedMimeTypes {
+			normalized[i] = normalizeMIME(m)
+		}
+		if !slices.Contains(normalized, mimeType) {
+			return "", ErrUnsupportedMediaType
+		}
+	}
+	return mimeType, nil
+}
+
+// insertDocument builds the Document, attempts a Create, and handles the
+// unique-key race by re-querying and returning the concurrent winner.
+func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, finalMIME string) (*model.Document, error) {
 	now := time.Now()
 	docID, err := uuid.NewV7()
 	if err != nil {
-		if stored.Created {
-			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
-			}
-		}
+		s.cleanupStoredOnError(stored)
 		return nil, fmt.Errorf("generate UUIDv7: %w", err)
 	}
 
@@ -123,17 +147,35 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	}
 
 	_, err = s.Repo.Create(ctx, doc)
-	if err != nil {
-		// Only delete file if this request actually created it (not a dedup match)
-		if stored.Created {
-			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
-			}
-		}
-		return nil, fmt.Errorf("create document record: %w", err)
+	if err == nil {
+		return &doc, nil
 	}
 
-	return &doc, nil
+	// Concurrent creator won the race on the unique(externalID, storageBucketID) index.
+	// Re-query and return the winner with Reused=true.
+	if errors.Is(err, model.ErrDuplicateKey) {
+		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		if findErr == nil {
+			raced.Reused = true
+			return &raced, nil
+		}
+		s.Logger.Warn("dedup: unique violation but re-query failed",
+			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
+	}
+	s.cleanupStoredOnError(stored)
+	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// cleanupStoredOnError deletes the blob only if this request created it
+// (not a storage-layer dedup match).
+func (s *FileService) cleanupStoredOnError(stored model.StoredFile) {
+	if !stored.Created {
+		return
+	}
+	if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
+		s.Logger.Warn("cleanup: failed to delete stored file",
+			zap.String("externalID", stored.ExternalID), zap.Error(delErr))
+	}
 }
 
 // DeleteDocument removes a document record and its file (if not shared).
@@ -167,6 +209,12 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 // StoreAndLink replaces file content for an existing document atomically.
 // Cleans up the old file if no other documents reference it.
+//
+// Conflict case: if the new content's hash matches another file row already
+// in this document's bucket, the unique(externalID, storageBucketID) index
+// is violated. This can't be auto-merged without losing distinct document
+// identity, so we surface it as ErrConflict (HTTP 409). The caller should
+// delete one of the conflicting rows or abort the operation.
 func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, content []byte) (*model.StoredFile, error) {
 	doc, err := s.Repo.GetByID(ctx, documentID)
 	if err != nil {
@@ -192,6 +240,9 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 			if delErr := s.Storage.Delete(stored.ExternalID); delErr != nil {
 				s.Logger.Warn("cleanup: failed to delete stored file", zap.String("externalID", stored.ExternalID), zap.Error(delErr))
 			}
+		}
+		if errors.Is(err, model.ErrDuplicateKey) {
+			return nil, ErrConflict
 		}
 		return nil, fmt.Errorf("update document record: %w", err)
 	}

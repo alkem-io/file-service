@@ -17,6 +17,8 @@ import (
 type mockDocRepo struct {
 	doc          model.Document
 	err          error
+	findDoc      *model.Document // non-nil → FindByExternalIDAndBucket returns this (dedup hit)
+	findErr      error
 	createErr    error
 	updateErr    error
 	deleteResult model.DeletedDocument
@@ -26,6 +28,16 @@ type mockDocRepo struct {
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.doc, m.err
+}
+func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	if m.findErr != nil {
+		return model.Document{}, m.findErr
+	}
+	if m.findDoc != nil {
+		return *m.findDoc, nil
+	}
+	// Default to "not found" so CreateDocument proceeds to insert.
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockDocRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, error) {
 	return doc.ID, m.createErr
