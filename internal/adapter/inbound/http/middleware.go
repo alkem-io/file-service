@@ -96,7 +96,7 @@ func RequestLogger(logger *zap.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(ww, r)
 
-			if r.URL.Path == "/live" || r.URL.Path == "/health" {
+			if r.Method == http.MethodGet && (r.URL.Path == "/live" || r.URL.Path == "/health") {
 				return
 			}
 

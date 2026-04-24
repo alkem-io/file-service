@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,18 +64,42 @@ func TestRouter_HealthEndpoint(t *testing.T) {
 // regardless of DB/NATS state — the point is to detect deadlocked pods, not
 // dependency failures.
 func TestRouter_LiveEndpoint(t *testing.T) {
-	r := testRouter()
+	t.Run("HealthyDeps", func(t *testing.T) {
+		r := testRouter()
+		req := httptest.NewRequest(http.MethodGet, "/live", nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
 
-	req := httptest.NewRequest(http.MethodGet, "/live", nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("GET /live = %d, want 200", rr.Code)
+		}
+		if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+	})
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("GET /live = %d, want 200", rr.Code)
-	}
-	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", ct)
-	}
+	// Critical invariant: /live MUST return 200 even when readiness dependencies
+	// are broken. Liveness = process alive; dependency health belongs to /health.
+	t.Run("BrokenDeps", func(t *testing.T) {
+		logger, _ := zap.NewDevelopment()
+		r := NewRouter(Deps{
+			PublicHandler:   &PublicHandler{},
+			DocumentHandler: &DocumentHandler{},
+			HealthHandler: &HealthHandler{
+				DB:   &mockPinger{err: errors.New("db down")},
+				NATS: &mockConnChecker{connected: false},
+			},
+			Logger: logger,
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/live", nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("GET /live with broken deps = %d, want 200 (liveness must not depend on readiness)", rr.Code)
+		}
+	})
 }
 
 func TestRouter_DebugVars(t *testing.T) {

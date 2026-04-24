@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	"expvar"
 	"net/http"
 
@@ -8,6 +9,23 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 )
+
+// LiveResponse is the body returned by GET /live.
+type LiveResponse struct {
+	Status string `json:"status"`
+}
+
+// ServeLive is the K8s liveness handler: returns 200 unconditionally so the
+// probe reflects process-alive only, independent of DB/NATS availability.
+func ServeLive(w http.ResponseWriter, _ *http.Request) {
+	LiveResponse{Status: "alive"}.Render(w)
+}
+
+func (r LiveResponse) Render(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(r)
+}
 
 // Deps contains all handler dependencies.
 type Deps struct {
@@ -28,11 +46,7 @@ func NewRouter(deps Deps) *chi.Mux {
 	// Liveness (K8s livenessProbe): process-alive check only, no dependencies.
 	// Kept separate from /health so liveness failures don't restart pods when
 	// only a dependency is down.
-	r.Get("/live", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"alive"}`))
-	})
+	r.Get("/live", ServeLive)
 
 	// Readiness (K8s readinessProbe): checks DB (and NATS if configured).
 	r.Method("GET", "/health", deps.HealthHandler)

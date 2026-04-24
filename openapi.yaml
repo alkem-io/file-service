@@ -68,6 +68,13 @@ components:
         - createdDate
         - updatedDate
       type: object
+    http.LiveResponse:
+      properties:
+        status:
+          type: string
+      required:
+        - status
+      type: object
     http.ReplaceContentResponse:
       properties:
         externalID:
@@ -367,14 +374,17 @@ paths:
         - /internal
   /live:
     get:
-      operationId: router.go:31:17
+      operationId: http.ServeLive
       responses:
         "200":
           content:
             application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/http.LiveResponse'
           description: OK
+      summary: |-
+        ServeLive is the K8s liveness handler: returns 200 unconditionally so the
+        probe reflects process-alive only, independent of DB/NATS availability.
   /rest/storage/file/{id}:
     get:
       operationId: PublicHandler.ServeDocument
