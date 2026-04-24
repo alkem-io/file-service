@@ -85,9 +85,10 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	// clean up the auth/tagset rows it pre-created.
 	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 	if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
-		// Lookup failed mid-flight (e.g., DB hiccup). The blob may have just
-		// been written and would be orphaned without cleanup.
-		s.cleanupStoredOnError(stored)
+		// Lookup failed for a reason we can't diagnose (DB hiccup).
+		// Another row may already reference this blob — deleting it would
+		// orphan that row, which is worse than orphaning a blob (blobs are
+		// GC-able by a periodic sweep). Leave the blob in place.
 		return nil, fmt.Errorf("dedup lookup: %w", err)
 	}
 	if err == nil {
@@ -155,7 +156,8 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 	}
 
 	// Concurrent creator won the race on the unique(externalID, storageBucketID) index.
-	// Re-query and return the winner with Reused=true.
+	// Re-query and return the winner with Reused=true. Never clean up the blob here —
+	// the winning row references it, so deletion would orphan that row.
 	if errors.Is(err, model.ErrDuplicateKey) {
 		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
@@ -164,7 +166,10 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		}
 		s.Logger.Warn("dedup: unique violation but re-query failed",
 			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
+		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
 	}
+	// Non-duplicate Create failure (e.g., FK violation): no row was inserted,
+	// so the blob is safe to clean up.
 	s.cleanupStoredOnError(stored)
 	return nil, fmt.Errorf("create document record: %w", err)
 }
@@ -238,10 +243,12 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, finalMIME, stored.Size)
 	if err != nil {
-		s.cleanupStoredOnError(stored)
 		if errors.Is(err, model.ErrDuplicateKey) {
+			// Another row in this bucket already has this externalID and
+			// references our blob. Cleanup would orphan that row.
 			return nil, ErrConflict
 		}
+		s.cleanupStoredOnError(stored)
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
 
