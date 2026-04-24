@@ -56,19 +56,24 @@ spec:
           volumeMounts:
             - name: file-storage
               mountPath: /storage
+          # Readiness: checks dependencies (DB, NATS). Pulls pod from Service
+          # when deps are unreachable so traffic doesn't hit a broken instance.
           readinessProbe:
             httpGet:
               path: /health
               port: 4003
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 30
             failureThreshold: 3
+          # Liveness: process-alive check only, no deps. Restarting the pod
+          # when the DB is down would not fix anything and would amplify an
+          # outage. Separate /live endpoint avoids that.
           livenessProbe:
             httpGet:
-              path: /health
+              path: /live
               port: 4003
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 30
             failureThreshold: 3
           resources:
             requests:
