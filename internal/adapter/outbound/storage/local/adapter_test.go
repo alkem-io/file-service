@@ -3,6 +3,7 @@ package local
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alkem-io/file-service-go/internal/domain/service"
@@ -249,7 +250,7 @@ func TestIsValidExternalID(t *testing.T) {
 		// Reject: length bounds
 		{"too short", "abc", false},
 		{"empty", "", false},
-		{"too long", string(make([]byte, 200)), false},
+		{"too long", strings.Repeat("a", 129), false}, // valid chars, just exceeds max length 128
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
