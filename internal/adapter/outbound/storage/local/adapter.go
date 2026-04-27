@@ -105,13 +105,25 @@ func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
 }
 
-// isValidExternalID checks that the ID is a valid SHA3-256 hex string (64 lowercase hex chars).
+// isValidExternalID rejects path-traversal attempts and other dangerous
+// characters in storage IDs. Accepts both formats produced across the
+// service's history:
+//   - SHA3-256 hex: 64 lowercase hex chars (current Go file-service format)
+//   - IPFS CIDv0:   46 base58btc chars starting with "Qm" (legacy TS file-service)
+//
+// Conservative allow-list: alphanumeric only, length 32-128. This blocks
+// '/', '\', '.', '..', NUL, control chars, whitespace — anything that
+// could escape the basePath.
 func isValidExternalID(id string) bool {
-	if len(id) != 64 {
+	if len(id) < 32 || len(id) > 128 {
 		return false
 	}
 	for _, c := range id {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		default:
 			return false
 		}
 	}
