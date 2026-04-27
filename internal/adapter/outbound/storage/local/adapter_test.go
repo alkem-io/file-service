@@ -3,6 +3,7 @@ package local
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alkem-io/file-service-go/internal/domain/service"
@@ -225,5 +226,37 @@ func TestExists_InvalidExternalID(t *testing.T) {
 	_, err := a.Exists("../etc/passwd")
 	if err == nil {
 		t.Fatal("expected error for invalid external ID")
+	}
+}
+
+func TestIsValidExternalID(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		// Accept: current SHA3-256 hex format
+		{"sha3 lowercase hex", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", true},
+		// Accept: legacy IPFS CIDv0 (base58btc, starts with Qm)
+		{"ipfs CIDv0", "QmeNLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjhD", true},
+		{"ipfs CIDv0 mixed case", "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", true},
+		// Reject: path traversal & special chars
+		{"path traversal", "../etc/passwd", false},
+		{"forward slash", "abc/def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"backslash", "abc\\def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"dot", "abc.def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"nul byte", "abc\x00def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"hyphen", "abc-def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		// Reject: length bounds
+		{"too short", "abc", false},
+		{"empty", "", false},
+		{"too long", strings.Repeat("a", 129), false}, // valid chars, just exceeds max length 128
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidExternalID(tc.id); got != tc.want {
+				t.Errorf("isValidExternalID(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
 	}
 }
