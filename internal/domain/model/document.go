@@ -47,6 +47,21 @@ type CreateDocumentInput struct {
 	SkipDedup bool
 }
 
+// CopyDocumentInput contains fields needed to copy an existing document into
+// another bucket. The new row references the same content (same externalID,
+// mimeType, size, displayName) as the source; only ownership/placement
+// changes. The source row is not modified.
+type CopyDocumentInput struct {
+	DestinationBucketID uuid.UUID
+	AuthorizationID     uuid.UUID
+	TagsetID            *uuid.UUID
+	CreatedBy           *uuid.UUID
+
+	// SkipDedup mirrors the same flag on CreateDocumentInput. Default false
+	// runs the per-bucket dedup lookup; true forces a fresh row insert.
+	SkipDedup bool
+}
+
 // StoredFile represents the result of a file storage operation.
 type StoredFile struct {
 	ExternalID string

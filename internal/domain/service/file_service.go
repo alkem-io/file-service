@@ -109,6 +109,53 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	return s.insertDocument(ctx, input, stored, finalMIME)
 }
 
+// CopyDocument creates a new file row in another bucket that references the
+// same content as an existing source row. No bytes are moved or re-uploaded:
+// content is content-addressed by hash, so two rows in different buckets
+// can share underlying storage. The source row is not modified.
+//
+// Per-bucket dedup applies by default (skip with SkipDedup): if the
+// destination bucket already has a row with the same externalID, return
+// it as-is with Reused=true, matching the CreateDocument contract.
+func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, input model.CopyDocumentInput) (*model.Document, error) {
+	source, err := s.Repo.GetByID(ctx, sourceID)
+	if err != nil {
+		// ErrDocumentNotFound surfaces as 404 in the handler.
+		return nil, err
+	}
+
+	if !input.SkipDedup {
+		existing, err := s.Repo.FindByExternalIDAndBucket(ctx, source.ExternalID, input.DestinationBucketID)
+		if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
+			return nil, fmt.Errorf("dedup lookup: %w", err)
+		}
+		if err == nil {
+			existing.Reused = true
+			return &existing, nil
+		}
+	}
+
+	// Reuse insertDocument so race-handling, error mapping (ErrDuplicateKey →
+	// ErrConflict on SkipDedup, race re-query otherwise), and audit fields
+	// stay identical to CreateDocument.
+	createInput := model.CreateDocumentInput{
+		DisplayName:       source.DisplayName,
+		CreatedBy:         input.CreatedBy,
+		TemporaryLocation: false, // copies are deliberate placements
+		StorageBucketID:   input.DestinationBucketID,
+		AuthorizationID:   input.AuthorizationID,
+		TagsetID:          input.TagsetID,
+		SkipDedup:         input.SkipDedup,
+	}
+	stored := model.StoredFile{
+		ExternalID: source.ExternalID,
+		MimeType:   source.MimeType,
+		Size:       source.Size,
+		// Created intentionally false: no blob was written by this request.
+	}
+	return s.insertDocument(ctx, createInput, stored, source.MimeType)
+}
+
 // resolveMIME determines the effective MIME type and validates it against the allow-list.
 // Empty content: trust declaredMIME (no bytes to detect from).
 // Non-empty: detect from content bytes.

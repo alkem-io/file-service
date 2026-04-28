@@ -357,6 +357,193 @@ func TestDocumentHandler_Create_SkipDedup_InvalidValue_400(t *testing.T) {
 	}
 }
 
+// POST /internal/file/copy: happy path. Source exists; copy to a different
+// bucket returns 201 with Reused=false and a fresh ID.
+func TestDocumentHandler_Copy_Success(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	sourceID := uuid.New()
+	repo.doc = model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "banner.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || reused {
+		t.Errorf("reused = %v, want false for fresh copy", resp["reused"])
+	}
+	if resp["externalID"] != "sha3-of-content" {
+		t.Errorf("externalID = %v, want preserved from source", resp["externalID"])
+	}
+	if resp["mimeType"] != "image/png" {
+		t.Errorf("mimeType = %v, want preserved from source", resp["mimeType"])
+	}
+}
+
+// POST /internal/file/copy: dedup hit returns 201 + reused=true.
+func TestDocumentHandler_Copy_DedupHit_ReturnsReusedTrue(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	existingID := uuid.New()
+	repo.doc = model.Document{
+		ID:         sourceID,
+		ExternalID: "sha3-of-content",
+		MimeType:   "image/png",
+		Size:       42,
+	}
+	repo.findDoc = &model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		StorageBucketID: bucketB,
+		AuthorizationID: uuid.New(),
+	}
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: bucketB.String(),
+		AuthorizationID:     uuid.New().String(),
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if reused, ok := resp["reused"].(bool); !ok || !reused {
+		t.Errorf("reused = %v, want true on dedup hit", resp["reused"])
+	}
+	if resp["id"] != existingID.String() {
+		t.Errorf("id = %v, want existing %v", resp["id"], existingID.String())
+	}
+}
+
+// POST /internal/file/copy: source not found → 404.
+func TestDocumentHandler_Copy_SourceNotFound_404(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.err = model.ErrDocumentNotFound
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            uuid.New().String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// POST /internal/file/copy: invalid sourceId → 400.
+func TestDocumentHandler_Copy_InvalidSourceID_400(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            "not-a-uuid",
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// POST /internal/file/copy: malformed JSON body → 400.
+func TestDocumentHandler_Copy_MalformedJSON_400(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader("{not-json"))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// POST /internal/file/copy: skipDedup=true + unique-key violation → 409.
+func TestDocumentHandler_Copy_SkipDedup_Conflict_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	sourceID := uuid.New()
+	repo.doc = model.Document{
+		ID:         sourceID,
+		ExternalID: "sha3-of-content",
+		MimeType:   "image/png",
+		Size:       42,
+	}
+	repo.createErr = model.ErrDuplicateKey
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+		SkipDedup:           true,
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestDocumentHandler_Create_AllFields(t *testing.T) {
 	h, _, _ := newDocHandler()
 

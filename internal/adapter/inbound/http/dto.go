@@ -93,6 +93,17 @@ type UpdateDocumentRequest struct {
 	TemporaryLocation *bool   `json:"temporaryLocation"`
 }
 
+// CopyDocumentRequest is the JSON body for POST /internal/file/copy.
+// Reuses CreateDocumentResponse for the response shape.
+type CopyDocumentRequest struct {
+	SourceID            string  `json:"sourceId"`
+	DestinationBucketID string  `json:"destinationBucketId"`
+	AuthorizationID     string  `json:"authorizationId"`
+	TagsetID            *string `json:"tagsetId,omitempty"`
+	CreatedBy           *string `json:"createdBy,omitempty"`
+	SkipDedup           bool    `json:"skipDedup,omitempty"`
+}
+
 // HealthResponse is returned by GET /health.
 type HealthResponse struct {
 	Status  string            `json:"status"`
