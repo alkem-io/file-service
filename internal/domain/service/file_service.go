@@ -141,7 +141,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	createInput := model.CreateDocumentInput{
 		DisplayName:       source.DisplayName,
 		CreatedBy:         input.CreatedBy,
-		TemporaryLocation: false, // copies are deliberate placements
+		TemporaryLocation: false,
 		StorageBucketID:   input.DestinationBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
@@ -151,7 +151,6 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		ExternalID: source.ExternalID,
 		MimeType:   source.MimeType,
 		Size:       source.Size,
-		// Created intentionally false: no blob was written by this request.
 	}
 	return s.insertDocument(ctx, createInput, stored, source.MimeType)
 }
