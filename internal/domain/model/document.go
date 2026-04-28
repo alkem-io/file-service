@@ -37,6 +37,14 @@ type CreateDocumentInput struct {
 	StorageBucketID   uuid.UUID
 	AuthorizationID   uuid.UUID
 	TagsetID          *uuid.UUID
+
+	// SkipDedup, when true, bypasses the per-bucket content-hash dedup
+	// lookup and forces a fresh row insert even if an existing row in the
+	// same bucket has the same externalID. Use case: placeholder uploads
+	// (e.g., empty buffers for Collabora documents) where two logical
+	// documents must NOT share a backing row even though their content
+	// hashes match. Default false preserves the dedup behavior.
+	SkipDedup bool
 }
 
 // StoredFile represents the result of a file storage operation.

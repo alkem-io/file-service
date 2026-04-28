@@ -300,6 +300,143 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 }
 
+// SkipDedup: true → fresh row inserted even when an existing row matches.
+// Lookup must NOT be called; existing row must NOT be returned/mutated.
+func TestCreateDocument_SkipDedup_InsertsFreshRowWhenContentExists(t *testing.T) {
+	bucket := uuid.New()
+	repo := &mockRepo{
+		// findDoc set deliberately — proves we never even call FindByExternalIDAndBucket.
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	callerAuth := uuid.New()
+	callerTagset := uuid.New()
+	input := model.CreateDocumentInput{
+		DisplayName:     "placeholder.docx",
+		StorageBucketID: bucket,
+		AuthorizationID: callerAuth,
+		TagsetID:        &callerTagset,
+		SkipDedup:       true,
+	}
+
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false when SkipDedup=true")
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("expected 0 FindByExternalIDAndBucket calls when SkipDedup=true, got %d", repo.findCalls)
+	}
+	if repo.createCalls != 1 {
+		t.Errorf("expected 1 Create call, got %d", repo.createCalls)
+	}
+	if doc.AuthorizationID != callerAuth {
+		t.Errorf("AuthorizationID = %v, want caller-supplied %v (existing row's auth must not leak in)", doc.AuthorizationID, callerAuth)
+	}
+	if doc.TagsetID == nil || *doc.TagsetID != callerTagset {
+		t.Errorf("TagsetID = %v, want caller-supplied %v", doc.TagsetID, callerTagset)
+	}
+}
+
+// SkipDedup: true with empty content → still gets a fresh row.
+// This is the Collabora placeholder path: 0-byte create that must not
+// merge with another empty-content row in the same bucket.
+func TestCreateDocument_SkipDedup_EmptyContent_GetsFreshRow(t *testing.T) {
+	bucket := uuid.New()
+	repo := &mockRepo{
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-empty",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "doc.docx",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+		SkipDedup:       true,
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false for skipDedup placeholder")
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("expected 0 FindByExternalIDAndBucket calls, got %d", repo.findCalls)
+	}
+}
+
+// SkipDedup default false → backward-compatible: existing dedup behavior preserved.
+// This is the regression guard against accidentally turning dedup off for everyone.
+func TestCreateDocument_SkipDedupOmitted_DedupStillApplies(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	repo := &mockRepo{
+		findDoc: &model.Document{
+			ID:              existingID,
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+		// SkipDedup omitted → defaults to false
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true (default dedup path)")
+	}
+	if doc.ID != existingID {
+		t.Errorf("expected existing row ID %v, got %v", existingID, doc.ID)
+	}
+}
+
+// SkipDedup hits the unique index: surface as ErrConflict, not Reused=true.
+// Server-side may add unique(externalID, storageBucketID); if present, a
+// SkipDedup placeholder collision must error rather than silently coalesce.
+func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			t.Fatal("FindByExternalIDAndBucket must not be called when SkipDedup=true")
+			return model.Document{}, nil
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.docx",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		SkipDedup:       true,
+	}
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("expected ErrConflict on SkipDedup duplicate-key, got %v", err)
+	}
+}
+
 // mockRepoRace is a minimal repo mock supporting a scripted FindByExternalIDAndBucket
 // and a fixed Create error — used for the concurrent race test.
 type mockRepoRace struct {

@@ -139,6 +139,15 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		temporaryLocation = parsed
 	}
 
+	skipDedup := false
+	if v := r.FormValue("skipDedup"); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, "", input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
+		}
+		skipDedup = parsed
+	}
+
 	if v := r.FormValue("allowedMimeTypes"); v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
@@ -163,6 +172,7 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		StorageBucketID:   storageBucketID,
 		AuthorizationID:   authorizationID,
 		TagsetID:          tagsetID,
+		SkipDedup:         skipDedup,
 	}
 
 	return content, declaredMIME, input, allowedMimeTypes, maxFileSize, nil
@@ -201,6 +211,10 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, service.ErrConflict):
+			// Reachable only when SkipDedup=true and a row with this
+			// (externalID, storageBucketID) already exists.
+			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
 		default:
 			h.Logger.Error("failed to create document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
