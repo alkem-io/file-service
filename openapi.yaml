@@ -3,16 +3,21 @@ components:
     http.CopyDocumentRequest:
       properties:
         authorizationId:
+          format: uuid
           type: string
         createdBy:
+          format: uuid
           type: string
         destinationBucketId:
+          format: uuid
           type: string
         skipDedup:
           type: boolean
         sourceId:
+          format: uuid
           type: string
         tagsetId:
+          format: uuid
           type: string
       required:
         - sourceId
@@ -110,6 +115,7 @@ components:
     http.UpdateDocumentRequest:
       properties:
         storageBucketId:
+          format: uuid
           type: string
         temporaryLocation:
           type: boolean
@@ -256,6 +262,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/http.CopyDocumentRequest'
+        required: true
       responses:
         "201":
           content:
@@ -334,6 +341,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/http.UpdateDocumentRequest'
+        required: true
       responses:
         "200":
           content:
