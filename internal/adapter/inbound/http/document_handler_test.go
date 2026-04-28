@@ -1254,10 +1254,14 @@ func TestPublicHandler_InvalidUUID(t *testing.T) {
 	}
 }
 
-func TestPublicHandler_MissingActorID(t *testing.T) {
+// Anonymous request (no actorID in context) reaches the auth-evaluation
+// service. The auth port decides the outcome based on the document's
+// authorization policy. With a deny-by-default mock, anonymous gets 403
+// — not 401 from the handler.
+func TestPublicHandler_AnonymousRequest_DeniedByPolicy_403(t *testing.T) {
 	h := &PublicHandler{
 		Repo:    &mockDocRepo{doc: model.Document{ID: uuid.New()}},
-		Auth:    &mockAuth{},
+		Auth:    &mockAuth{}, // Allowed: false, no error
 		Storage: &mockStorage{},
 		MaxAge:  86400,
 		Logger:  zap.NewNop(),
@@ -1267,12 +1271,43 @@ func TestPublicHandler_MissingActorID(t *testing.T) {
 	r.Get("/rest/storage/document/{id}", h.ServeDocument)
 
 	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
-	// no actorID in context
+	// no actorID in context — anonymous
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 for missing actorID", rr.Code)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (policy denies anonymous)", rr.Code)
+	}
+}
+
+// Anonymous request hits a public-bucket document whose policy grants
+// global-anonymous: read. Auth port allows; handler must serve the file.
+func TestPublicHandler_AnonymousRequest_AllowedByPolicy_200(t *testing.T) {
+	h := &PublicHandler{
+		Repo: &mockDocRepo{doc: model.Document{
+			ID:         uuid.New(),
+			ExternalID: "abc",
+			MimeType:   "image/png",
+		}},
+		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+		Storage: &mockStorage{data: []byte("png-bytes")},
+		MaxAge:  86400,
+		Logger:  zap.NewNop(),
+	}
+
+	r := chi.NewRouter()
+	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+
+	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+	// no actorID in context — anonymous
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (anonymous read allowed)", rr.Code)
+	}
+	if rr.Body.String() != "png-bytes" {
+		t.Errorf("body = %q, want file content", rr.Body.String())
 	}
 }
 

@@ -33,11 +33,10 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// actorID may be empty here: anonymous requests are valid input.
+	// The auth-evaluation-service evaluates the document's policy
+	// against the (possibly anonymous) caller and returns the decision.
 	actorID := GetActorID(r.Context())
-	if actorID == "" {
-		writeJSONError(w, http.StatusUnauthorized, "missing actor identity")
-		return
-	}
 
 	doc, err := h.Repo.GetByID(r.Context(), docID)
 	if err != nil {
@@ -50,7 +49,10 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization via NATS
+	// Authorization check via h2c HTTP/2 (or NATS fallback). For anonymous
+	// callers, actorID is empty — the auth-evaluation-service treats that
+	// as "no asserted identity" and matches against global-anonymous
+	// credential rules in the document's authorization policy.
 	result, err := h.Auth.CheckPrivilege(r.Context(), actorID, "read", doc.AuthorizationID.String())
 	if err != nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "authorization service unavailable")

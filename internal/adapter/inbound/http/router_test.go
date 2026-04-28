@@ -114,16 +114,20 @@ func TestRouter_DebugVars(t *testing.T) {
 	}
 }
 
-func TestRouter_PublicDocumentRequiresJWT(t *testing.T) {
+// Anonymous reach-through: the public route does NOT 401 on a missing JWT.
+// JWTExtractor is permissive; the auth-evaluation-service decides whether
+// anonymous reads are allowed against the document's policy.
+// With testRouter()'s mockAuth allowing all requests, anonymous → 200.
+func TestRouter_PublicDocument_AcceptsAnonymous(t *testing.T) {
 	r := testRouter()
 
 	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
-	// No Authorization header
+	// No Authorization header — anonymous
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("GET /rest/storage/document/:id without JWT = %d, want 401", rr.Code)
+	if rr.Code == http.StatusUnauthorized {
+		t.Errorf("GET /rest/storage/document/:id without JWT must not 401 — middleware is permissive, auth-eval is the policy decision point")
 	}
 }
 
