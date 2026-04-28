@@ -1259,9 +1259,11 @@ func TestPublicHandler_InvalidUUID(t *testing.T) {
 // authorization policy. With a deny-by-default mock, anonymous gets 403
 // — not 401 from the handler.
 func TestPublicHandler_AnonymousRequest_DeniedByPolicy_403(t *testing.T) {
+	policyID := uuid.New()
+	auth := &mockAuth{} // Allowed: false, no error
 	h := &PublicHandler{
-		Repo:    &mockDocRepo{doc: model.Document{ID: uuid.New()}},
-		Auth:    &mockAuth{}, // Allowed: false, no error
+		Repo:    &mockDocRepo{doc: model.Document{ID: uuid.New(), AuthorizationID: policyID}},
+		Auth:    auth,
 		Storage: &mockStorage{},
 		MaxAge:  86400,
 		Logger:  zap.NewNop(),
@@ -1278,18 +1280,33 @@ func TestPublicHandler_AnonymousRequest_DeniedByPolicy_403(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (policy denies anonymous)", rr.Code)
 	}
+	if auth.calls != 1 {
+		t.Fatalf("auth-eval called %d times, want exactly 1 (anonymous must reach the policy decision point)", auth.calls)
+	}
+	if auth.lastActorID != "" {
+		t.Errorf("auth received actorID = %q, want empty (anonymous)", auth.lastActorID)
+	}
+	if auth.lastPrivilege != "read" {
+		t.Errorf("auth received privilege = %q, want %q", auth.lastPrivilege, "read")
+	}
+	if auth.lastAuthPolicyID != policyID.String() {
+		t.Errorf("auth received policy = %q, want %q", auth.lastAuthPolicyID, policyID.String())
+	}
 }
 
 // Anonymous request hits a public-bucket document whose policy grants
 // global-anonymous: read. Auth port allows; handler must serve the file.
 func TestPublicHandler_AnonymousRequest_AllowedByPolicy_200(t *testing.T) {
+	policyID := uuid.New()
+	auth := &mockAuth{result: model.AuthResult{Allowed: true}}
 	h := &PublicHandler{
 		Repo: &mockDocRepo{doc: model.Document{
-			ID:         uuid.New(),
-			ExternalID: "abc",
-			MimeType:   "image/png",
+			ID:              uuid.New(),
+			ExternalID:      "abc",
+			MimeType:        "image/png",
+			AuthorizationID: policyID,
 		}},
-		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+		Auth:    auth,
 		Storage: &mockStorage{data: []byte("png-bytes")},
 		MaxAge:  86400,
 		Logger:  zap.NewNop(),
@@ -1308,6 +1325,12 @@ func TestPublicHandler_AnonymousRequest_AllowedByPolicy_200(t *testing.T) {
 	}
 	if rr.Body.String() != "png-bytes" {
 		t.Errorf("body = %q, want file content", rr.Body.String())
+	}
+	if auth.lastActorID != "" {
+		t.Errorf("auth received actorID = %q, want empty (anonymous)", auth.lastActorID)
+	}
+	if auth.lastAuthPolicyID != policyID.String() {
+		t.Errorf("auth received policy = %q, want %q", auth.lastAuthPolicyID, policyID.String())
 	}
 }
 
