@@ -93,20 +93,80 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
 	// the existing row's values are authoritative. Caller must use Reused=true to
 	// clean up the auth/tagset rows it pre-created.
-	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
-	if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
-		// Lookup failed for a reason we can't diagnose (DB hiccup).
-		// Another row may already reference this blob — deleting it would
-		// orphan that row, which is worse than orphaning a blob (blobs are
-		// GC-able by a periodic sweep). Leave the blob in place.
-		return nil, fmt.Errorf("dedup lookup: %w", err)
+	//
+	// Lookup failure (non-not-found): another row may already reference this
+	// blob — deleting it would orphan that row, which is worse than orphaning
+	// a blob (blobs are GC-able). Leave the blob in place.
+	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)
+	if err != nil {
+		return nil, err
 	}
-	if err == nil {
+	if found {
 		existing.Reused = true
-		return &existing, nil
+		return existing, nil
 	}
 
 	return s.insertDocument(ctx, input, stored, finalMIME)
+}
+
+// findDedupDocument looks up an existing file row for (externalID, bucketID).
+// Returns (doc, true, nil) on hit, (nil, false, nil) when no row exists, and
+// (nil, false, err) on lookup failure.
+func (s *FileService) findDedupDocument(ctx context.Context, externalID string, bucketID uuid.UUID) (*model.Document, bool, error) {
+	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, externalID, bucketID)
+	if err != nil {
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("dedup lookup: %w", err)
+	}
+	return &existing, true, nil
+}
+
+// CopyDocument creates a new file row in another bucket that references the
+// same content as an existing source row. No bytes are moved or re-uploaded:
+// content is content-addressed by hash, so two rows in different buckets
+// can share underlying storage. The source row is not modified.
+//
+// Per-bucket dedup applies by default (skip with SkipDedup): if the
+// destination bucket already has a row with the same externalID, return
+// it as-is with Reused=true, matching the CreateDocument contract.
+func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, input model.CopyDocumentInput) (*model.Document, error) {
+	source, err := s.Repo.GetByID(ctx, sourceID)
+	if err != nil {
+		// ErrDocumentNotFound surfaces as 404 in the handler.
+		return nil, err
+	}
+
+	if !input.SkipDedup {
+		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			existing.Reused = true
+			return existing, nil
+		}
+	}
+
+	// Reuse insertDocument so race-handling, error mapping (ErrDuplicateKey →
+	// ErrConflict on SkipDedup, race re-query otherwise), and audit fields
+	// stay identical to CreateDocument.
+	createInput := model.CreateDocumentInput{
+		DisplayName:       source.DisplayName,
+		CreatedBy:         input.CreatedBy,
+		TemporaryLocation: false,
+		StorageBucketID:   input.DestinationBucketID,
+		AuthorizationID:   input.AuthorizationID,
+		TagsetID:          input.TagsetID,
+		SkipDedup:         input.SkipDedup,
+	}
+	stored := model.StoredFile{
+		ExternalID: source.ExternalID,
+		MimeType:   source.MimeType,
+		Size:       source.Size,
+	}
+	return s.insertDocument(ctx, createInput, stored, source.MimeType)
 }
 
 // resolveMIME determines the effective MIME type and validates it against the allow-list.

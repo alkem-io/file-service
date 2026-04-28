@@ -1,5 +1,24 @@
 components:
   schemas:
+    http.CopyDocumentRequest:
+      properties:
+        authorizationId:
+          type: string
+        createdBy:
+          type: string
+        destinationBucketId:
+          type: string
+        skipDedup:
+          type: boolean
+        sourceId:
+          type: string
+        tagsetId:
+          type: string
+      required:
+        - sourceId
+        - destinationBucketId
+        - authorizationId
+      type: object
     http.CreateDocumentResponse:
       properties:
         externalID:
@@ -142,13 +161,50 @@ paths:
       operationId: DocumentHandler.Create
       parameters:
         - in: form
+          name: file
+          schema:
+            format: binary
+            type: string
+        - in: form
+          name: displayName
+          schema:
+            type: string
+        - in: form
           name: storageBucketId
           schema:
+            format: uuid
             type: string
         - in: form
           name: authorizationId
           schema:
+            format: uuid
             type: string
+        - in: form
+          name: tagsetId
+          schema:
+            format: uuid
+            type: string
+        - in: form
+          name: createdBy
+          schema:
+            format: uuid
+            type: string
+        - in: form
+          name: temporaryLocation
+          schema:
+            type: boolean
+        - in: form
+          name: skipDedup
+          schema:
+            type: boolean
+        - in: form
+          name: allowedMimeTypes
+          schema:
+            type: string
+        - in: form
+          name: maxFileSize
+          schema:
+            type: integer
       responses:
         "201":
           content:
@@ -192,6 +248,47 @@ paths:
           description: Internal Server Error
       tags:
         - /internal
+  /internal/file/copy:
+    post:
+      operationId: DocumentHandler.Copy
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/http.CopyDocumentRequest'
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.CreateDocumentResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Internal Server Error
+      tags:
+        - /internal
   /internal/file/{id}:
     delete:
       operationId: DocumentHandler.Delete
@@ -200,6 +297,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -229,6 +327,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       requestBody:
         content:
@@ -274,6 +373,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -304,6 +404,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -356,6 +457,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -399,6 +501,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":

@@ -231,6 +231,90 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}.Render(w)
 }
 
+// Copy handles POST /internal/file/copy.
+// Materializes a new file row in another bucket that references the same
+// content as the source. No bytes traverse the wire — content is
+// content-addressed, so the new row simply points at the existing blob.
+//
+// Per-bucket dedup applies by default; SkipDedup=true forces a fresh row.
+// On dedup hit, caller-supplied authorizationId/tagsetId are ignored
+// (existing row is authoritative), matching the createDocument contract.
+func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
+	var body CopyDocumentRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	sourceID, err := uuid.Parse(body.SourceID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid sourceId")
+		return
+	}
+	destBucketID, err := uuid.Parse(body.DestinationBucketID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid destinationBucketId")
+		return
+	}
+	authID, err := uuid.Parse(body.AuthorizationID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
+		return
+	}
+
+	var tagsetID *uuid.UUID
+	if body.TagsetID != nil && *body.TagsetID != "" {
+		parsed, err := uuid.Parse(*body.TagsetID)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid tagsetId")
+			return
+		}
+		tagsetID = &parsed
+	}
+
+	var createdBy *uuid.UUID
+	if body.CreatedBy != nil && *body.CreatedBy != "" {
+		parsed, err := uuid.Parse(*body.CreatedBy)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid createdBy")
+			return
+		}
+		createdBy = &parsed
+	}
+
+	input := model.CopyDocumentInput{
+		DestinationBucketID: destBucketID,
+		AuthorizationID:     authID,
+		TagsetID:            tagsetID,
+		CreatedBy:           createdBy,
+		SkipDedup:           body.SkipDedup,
+	}
+
+	doc, err := h.Service.CopyDocument(r.Context(), sourceID, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, model.ErrDocumentNotFound):
+			writeJSONError(w, http.StatusNotFound, "source document not found")
+		case errors.Is(err, service.ErrConflict):
+			// Reachable only when SkipDedup=true and the destination bucket
+			// already has a row with this content under the unique index.
+			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the destination bucket")
+		default:
+			h.Logger.Error("failed to copy document", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+
+	CreateDocumentResponse{
+		ID:         doc.ID.String(),
+		ExternalID: doc.ExternalID,
+		MimeType:   doc.MimeType,
+		Size:       doc.Size,
+		Reused:     doc.Reused,
+	}.Render(w)
+}
+
 // Delete handles DELETE /internal/document/{id}
 func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)

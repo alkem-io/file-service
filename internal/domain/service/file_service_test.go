@@ -550,6 +550,220 @@ func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	}
 }
 
+// CopyDocument: happy path. Source exists in bucket A; copy to bucket B
+// produces a fresh row with same content metadata, caller's auth/tagset.
+func TestCopyDocument_Happy(t *testing.T) {
+	sourceID := uuid.New()
+	bucketA := uuid.New()
+	bucketB := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "banner.png",
+		StorageBucketID: bucketA,
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	callerAuth := uuid.New()
+	callerTagset := uuid.New()
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     callerAuth,
+		TagsetID:            &callerTagset,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false for fresh copy")
+	}
+	if doc.ID == sourceID {
+		t.Error("copy must have a fresh ID, got source ID")
+	}
+	if doc.ExternalID != source.ExternalID {
+		t.Errorf("ExternalID = %q, want %q (content preserved)", doc.ExternalID, source.ExternalID)
+	}
+	if doc.MimeType != source.MimeType {
+		t.Errorf("MimeType = %q, want %q", doc.MimeType, source.MimeType)
+	}
+	if doc.Size != source.Size {
+		t.Errorf("Size = %d, want %d", doc.Size, source.Size)
+	}
+	if doc.DisplayName != source.DisplayName {
+		t.Errorf("DisplayName = %q, want %q", doc.DisplayName, source.DisplayName)
+	}
+	if doc.StorageBucketID != bucketB {
+		t.Errorf("StorageBucketID = %v, want destination %v", doc.StorageBucketID, bucketB)
+	}
+	if doc.AuthorizationID != callerAuth {
+		t.Errorf("AuthorizationID = %v, want caller's %v", doc.AuthorizationID, callerAuth)
+	}
+	if doc.TagsetID == nil || *doc.TagsetID != callerTagset {
+		t.Errorf("TagsetID = %v, want caller's %v", doc.TagsetID, callerTagset)
+	}
+	if doc.TemporaryLocation {
+		t.Error("copies are deliberate placements; TemporaryLocation must be false")
+	}
+}
+
+// CopyDocument: dedup hit. Destination bucket already has a row with
+// this content → returns existing row with Reused=true; caller-supplied
+// auth/tagset are NOT applied (regression guard for the reused contract).
+func TestCopyDocument_DedupHit_ReturnsExistingReused(t *testing.T) {
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	existingID := uuid.New()
+	existingAuth := uuid.New()
+	repo := &mockRepo{
+		doc: model.Document{
+			ID:         sourceID,
+			ExternalID: "sha3-of-content",
+			MimeType:   "image/png",
+			Size:       42,
+		},
+		findDoc: &model.Document{
+			ID:              existingID,
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucketB,
+			AuthorizationID: existingAuth,
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	callerAuth := uuid.New() // should be ignored on dedup hit
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     callerAuth,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true on dedup hit")
+	}
+	if doc.ID != existingID {
+		t.Errorf("ID = %v, want existing %v", doc.ID, existingID)
+	}
+	if doc.AuthorizationID != existingAuth {
+		t.Errorf("AuthorizationID = %v, want existing %v (caller's must be ignored)", doc.AuthorizationID, existingAuth)
+	}
+	if repo.createCalls != 0 {
+		t.Errorf("expected 0 Create calls on dedup hit, got %d", repo.createCalls)
+	}
+}
+
+// CopyDocument with SkipDedup=true forces a fresh row even when an
+// existing row matches. Dedup lookup must NOT be called.
+func TestCopyDocument_SkipDedup_BypassesDedup(t *testing.T) {
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	repo := &mockRepo{
+		doc: model.Document{
+			ID:         sourceID,
+			ExternalID: "sha3-of-content",
+			MimeType:   "image/png",
+			Size:       42,
+		},
+		// findDoc set to prove we never call FindByExternalIDAndBucket.
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			StorageBucketID: bucketB,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     uuid.New(),
+		SkipDedup:           true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false when SkipDedup=true")
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("expected 0 FindByExternalIDAndBucket calls, got %d", repo.findCalls)
+	}
+	if repo.createCalls != 1 {
+		t.Errorf("expected 1 Create call, got %d", repo.createCalls)
+	}
+}
+
+// CopyDocument when source doesn't exist surfaces ErrDocumentNotFound
+// (handler maps to 404).
+func TestCopyDocument_SourceNotFound(t *testing.T) {
+	repo := &mockRepo{getErr: model.ErrDocumentNotFound}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CopyDocument(context.Background(), uuid.New(), model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+	})
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Errorf("expected ErrDocumentNotFound, got %v", err)
+	}
+}
+
+// CopyDocument with SkipDedup=true and a unique-key violation surfaces
+// ErrConflict (handler maps to 409). Mirrors CreateDocument's behavior.
+func TestCopyDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
+	sourceID := uuid.New()
+	source := model.Document{ID: sourceID, ExternalID: "sha3-of-content", MimeType: "image/png", Size: 42}
+
+	// Use mockRepoRace to script the create behavior (ErrDuplicateKey).
+	// GetByID returns the source; find must not be called when SkipDedup=true.
+	repo := &copyRaceRepo{source: source, createErr: model.ErrDuplicateKey}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+		SkipDedup:           true,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("expected ErrConflict on SkipDedup duplicate-key, got %v", err)
+	}
+}
+
+// copyRaceRepo: minimal mock for CopyDocument duplicate-key tests.
+// Returns source on GetByID, errors on Find (must not be called when
+// SkipDedup=true), and a fixed Create error.
+type copyRaceRepo struct {
+	source    model.Document
+	createErr error
+}
+
+var _ port.DocumentRepo = (*copyRaceRepo)(nil)
+
+func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	return m.source, nil
+}
+func (m *copyRaceRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *copyRaceRepo) Create(_ context.Context, _ model.Document) (uuid.UUID, error) {
+	return uuid.Nil, m.createErr
+}
+func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+	return nil
+}
+func (m *copyRaceRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+	return nil
+}
+func (m *copyRaceRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
+	return model.DeletedDocument{}, nil
+}
+func (m *copyRaceRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
+
 func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
 	authID := uuid.New()
 	storage := &mockStorage{}
