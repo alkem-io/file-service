@@ -79,6 +79,16 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
+	// Caller opt-out: skip the dedup lookup and force a fresh row insert
+	// even when an existing row in this bucket has the same externalID.
+	// Used by placeholder flows (e.g., Collabora documents) where two
+	// logical documents must NOT share a backing row even if their content
+	// hashes collide. The caller-supplied AuthorizationID / TagsetID are
+	// honored on the new row.
+	if input.SkipDedup {
+		return s.insertDocument(ctx, input, stored, finalMIME)
+	}
+
 	// Row-level dedup: if a file row already exists for (externalID, storageBucketID),
 	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
 	// the existing row's values are authoritative. Caller must use Reused=true to
@@ -162,9 +172,17 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		return &doc, nil
 	}
 
-	// Concurrent creator won the race on the unique(externalID, storageBucketID) index.
-	// Re-query and return the winner with Reused=true.
 	if errors.Is(err, model.ErrDuplicateKey) {
+		// SkipDedup means the caller explicitly asked for a fresh row. If the
+		// schema enforces unique(externalID, storageBucketID), we can't honor
+		// that intent — surface as ErrConflict rather than masquerading as a
+		// dedup hit (which would silently corrupt placeholder flows).
+		if input.SkipDedup {
+			return nil, ErrConflict
+		}
+		// Default path: another concurrent creator won the race on the
+		// unique(externalID, storageBucketID) index. Re-query and return
+		// the winner with Reused=true.
 		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
 			raced.Reused = true
