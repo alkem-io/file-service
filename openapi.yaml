@@ -161,13 +161,50 @@ paths:
       operationId: DocumentHandler.Create
       parameters:
         - in: form
+          name: file
+          schema:
+            format: binary
+            type: string
+        - in: form
+          name: displayName
+          schema:
+            type: string
+        - in: form
           name: storageBucketId
           schema:
+            format: uuid
             type: string
         - in: form
           name: authorizationId
           schema:
+            format: uuid
             type: string
+        - in: form
+          name: tagsetId
+          schema:
+            format: uuid
+            type: string
+        - in: form
+          name: createdBy
+          schema:
+            format: uuid
+            type: string
+        - in: form
+          name: temporaryLocation
+          schema:
+            type: boolean
+        - in: form
+          name: skipDedup
+          schema:
+            type: boolean
+        - in: form
+          name: allowedMimeTypes
+          schema:
+            type: string
+        - in: form
+          name: maxFileSize
+          schema:
+            type: integer
       responses:
         "201":
           content:
@@ -260,6 +297,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -289,6 +327,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       requestBody:
         content:
@@ -334,6 +373,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -364,6 +404,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -416,6 +457,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
@@ -459,6 +501,7 @@ paths:
           name: id
           required: true
           schema:
+            format: uuid
             type: string
       responses:
         "200":
