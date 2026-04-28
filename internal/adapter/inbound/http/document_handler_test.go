@@ -1326,8 +1326,14 @@ func TestPublicHandler_AnonymousRequest_AllowedByPolicy_200(t *testing.T) {
 	if rr.Body.String() != "png-bytes" {
 		t.Errorf("body = %q, want file content", rr.Body.String())
 	}
+	if auth.calls != 1 {
+		t.Fatalf("auth-eval called %d times, want exactly 1", auth.calls)
+	}
 	if auth.lastActorID != "" {
 		t.Errorf("auth received actorID = %q, want empty (anonymous)", auth.lastActorID)
+	}
+	if auth.lastPrivilege != "read" {
+		t.Errorf("auth received privilege = %q, want %q", auth.lastPrivilege, "read")
 	}
 	if auth.lastAuthPolicyID != policyID.String() {
 		t.Errorf("auth received policy = %q, want %q", auth.lastAuthPolicyID, policyID.String())
