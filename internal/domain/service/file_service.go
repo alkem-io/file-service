@@ -93,20 +93,34 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
 	// the existing row's values are authoritative. Caller must use Reused=true to
 	// clean up the auth/tagset rows it pre-created.
-	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
-	if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
-		// Lookup failed for a reason we can't diagnose (DB hiccup).
-		// Another row may already reference this blob — deleting it would
-		// orphan that row, which is worse than orphaning a blob (blobs are
-		// GC-able by a periodic sweep). Leave the blob in place.
-		return nil, fmt.Errorf("dedup lookup: %w", err)
+	//
+	// Lookup failure (non-not-found): another row may already reference this
+	// blob — deleting it would orphan that row, which is worse than orphaning
+	// a blob (blobs are GC-able). Leave the blob in place.
+	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)
+	if err != nil {
+		return nil, err
 	}
-	if err == nil {
+	if found {
 		existing.Reused = true
-		return &existing, nil
+		return existing, nil
 	}
 
 	return s.insertDocument(ctx, input, stored, finalMIME)
+}
+
+// findDedupDocument looks up an existing file row for (externalID, bucketID).
+// Returns (doc, true, nil) on hit, (nil, false, nil) when no row exists, and
+// (nil, false, err) on lookup failure.
+func (s *FileService) findDedupDocument(ctx context.Context, externalID string, bucketID uuid.UUID) (*model.Document, bool, error) {
+	existing, err := s.Repo.FindByExternalIDAndBucket(ctx, externalID, bucketID)
+	if err != nil {
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("dedup lookup: %w", err)
+	}
+	return &existing, true, nil
 }
 
 // CopyDocument creates a new file row in another bucket that references the
@@ -125,13 +139,13 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	}
 
 	if !input.SkipDedup {
-		existing, err := s.Repo.FindByExternalIDAndBucket(ctx, source.ExternalID, input.DestinationBucketID)
-		if err != nil && !errors.Is(err, model.ErrDocumentNotFound) {
-			return nil, fmt.Errorf("dedup lookup: %w", err)
+		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
+		if err != nil {
+			return nil, err
 		}
-		if err == nil {
+		if found {
 			existing.Reused = true
-			return &existing, nil
+			return existing, nil
 		}
 	}
 
