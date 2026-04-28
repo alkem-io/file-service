@@ -299,6 +299,37 @@ func TestDocumentHandler_Create_SkipDedup_BypassesDedup(t *testing.T) {
 	}
 }
 
+// HTTP-level coverage for the ErrConflict → 409 mapping in the Create handler.
+// Reachable when SkipDedup=true and the schema enforces unique(externalID,
+// storageBucketID); the service surfaces ErrConflict rather than
+// masquerading as Reused=true.
+func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.createErr = model.ErrDuplicateKey
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "placeholder.docx")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "placeholder.docx")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.WriteField("skipDedup", "true")
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // Malformed skipDedup value → 400.
 func TestDocumentHandler_Create_SkipDedup_InvalidValue_400(t *testing.T) {
 	h, _, _ := newDocHandler()
