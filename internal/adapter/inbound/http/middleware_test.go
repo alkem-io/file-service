@@ -35,53 +35,52 @@ func TestJWTMiddleware_ValidJWT(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_MissingAuth(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-
-	handler := JWTExtractor(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("handler should not be called")
-	}))
-
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rr.Code)
+// JWTExtractor is a permissive parser, not a gatekeeper. Anonymous requests
+// (no header, malformed token, missing claim) flow through with empty actorID;
+// the auth-evaluation-service makes the policy decision downstream.
+func TestJWTMiddleware_AnonymousCases(t *testing.T) {
+	cases := []struct {
+		name      string
+		setHeader bool
+		headerVal string
+	}{
+		{"NoAuthHeader", false, ""},
+		{"NonBearerScheme", true, "Basic dXNlcjpwYXNz"},
+		{"BearerNotJWT", true, "Bearer not-a-jwt"},
+		{"BearerMalformedBase64", true, "Bearer header.NOT_BASE64!.sig"},
+		{"BearerNoActorClaim", true, "Bearer " + fakeJWT(t, map[string]any{"sub": "some-user"})},
+		{"BearerEmptyActorClaim", true, "Bearer " + fakeJWT(t, map[string]any{"alkemio_actor_id": ""})},
 	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			if tc.setHeader {
+				req.Header.Set("Authorization", tc.headerVal)
+			}
 
-func TestJWTMiddleware_InvalidToken(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Authorization", "Bearer not-a-jwt")
+			var (
+				handlerCalled bool
+				gotActorID    string
+			)
+			handler := JWTExtractor(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handlerCalled = true
+				gotActorID = GetActorID(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	handler := JWTExtractor(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("handler should not be called")
-	}))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
 
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rr.Code)
-	}
-}
-
-func TestJWTMiddleware_MissingActorClaim(t *testing.T) {
-	payload := map[string]any{"sub": "some-user"}
-	token := fakeJWT(t, payload)
-
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	handler := JWTExtractor(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("handler should not be called")
-	}))
-
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rr.Code)
+			if !handlerCalled {
+				t.Fatal("handler must be called for anonymous requests; middleware must not 401")
+			}
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (middleware passes through)", rr.Code)
+			}
+			if gotActorID != "" {
+				t.Errorf("actorID = %q, want empty for anonymous", gotActorID)
+			}
+		})
 	}
 }
 

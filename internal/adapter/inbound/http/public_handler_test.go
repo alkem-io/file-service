@@ -58,9 +58,19 @@ func (m *mockDocRepo) CountByExternalID(_ context.Context, _ string) (int, error
 type mockAuth struct {
 	result model.AuthResult
 	err    error
+
+	// Captured args from the most recent CheckPrivilege call.
+	calls            int
+	lastActorID      string
+	lastPrivilege    string
+	lastAuthPolicyID string
 }
 
-func (m *mockAuth) CheckPrivilege(_ context.Context, _, _, _ string) (model.AuthResult, error) {
+func (m *mockAuth) CheckPrivilege(_ context.Context, actorID, privilege, authPolicyID string) (model.AuthResult, error) {
+	m.calls++
+	m.lastActorID = actorID
+	m.lastPrivilege = privilege
+	m.lastAuthPolicyID = authPolicyID
 	return m.result, m.err
 }
 

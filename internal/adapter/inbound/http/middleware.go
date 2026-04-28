@@ -47,42 +47,48 @@ func GetActorID(ctx context.Context) string {
 
 // JWTExtractor extracts the alkemio_actor_id claim from the Oathkeeper-injected JWT.
 // Oathkeeper has already validated the token; we just decode the payload.
+//
+// Permissive by design: never 401s. Anonymous requests (no Authorization
+// header, missing claim, even malformed token) flow through with an empty
+// actorID. Authorization decisions belong to the auth-evaluation-service,
+// which evaluates the resource's policy against the (possibly anonymous)
+// caller. This unblocks the public file-serve route, which must serve
+// public-bucket visuals to non-authenticated users — those documents'
+// authorization policies grant `read` to the `global-anonymous` credential
+// that every caller implicitly carries.
 func JWTExtractor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeJSONError(w, http.StatusUnauthorized, "missing or invalid authorization header")
-			return
-		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-
-		parts := strings.Split(token, ".")
-		if len(parts) < 2 {
-			writeJSONError(w, http.StatusUnauthorized, "invalid token format")
-			return
-		}
-
-		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-		if err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "invalid token encoding")
-			return
-		}
-
-		var claims map[string]any
-		if err := json.Unmarshal(payload, &claims); err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "invalid token payload")
-			return
-		}
-
-		actorID, ok := claims["alkemio_actor_id"].(string)
-		if !ok || actorID == "" {
-			writeJSONError(w, http.StatusUnauthorized, "missing alkemio_actor_id claim")
-			return
-		}
-
+		actorID := extractActorID(r.Header.Get("Authorization"))
 		ctx := context.WithValue(r.Context(), ctxKeyActorID, actorID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// extractActorID parses an Authorization header and returns the
+// alkemio_actor_id claim if present and non-empty. Any failure to extract
+// (missing header, wrong scheme, malformed JWT, missing/empty claim)
+// returns "" — anonymous. The function never errors; the auth-evaluation
+// service is the policy decision point, not this parser.
+func extractActorID(auth string) string {
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(auth, "Bearer "), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	if id, ok := claims["alkemio_actor_id"].(string); ok {
+		return id
+	}
+	return ""
 }
 
 // RequestLogger logs request start/end with duration.

@@ -523,12 +523,6 @@ paths:
           content:
             application/octet-stream: {}
           description: Not Modified
-        "401":
-          content:
-            application/octet-stream:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Unauthorized
         "403":
           content:
             application/octet-stream:
