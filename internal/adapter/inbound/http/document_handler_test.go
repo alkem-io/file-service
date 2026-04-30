@@ -1686,6 +1686,66 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	r.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409, body: %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_Patch_RejectsTrailingJSON(t *testing.T) {
+	// json.Decoder.Decode consumes only the first JSON value, so a body
+	// like `{"displayName":"x.txt"}{"foo":1}` would otherwise parse the
+	// first object and silently drop the second. Reject it instead.
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"displayName":"x.txt"}{"foo":1}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("UpdateMetadata called %d times; trailing JSON must be rejected before service", repo.updateMetadataCalls)
+	}
+}
+
+func TestDocumentHandler_Copy_RejectsTrailingJSON(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	body := `{"sourceId":"` + uuid.New().String() + `","destinationBucketId":"` + uuid.New().String() + `","authorizationId":"` + uuid.New().String() + `"}{"extra":1}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_Copy_RejectsUnknownFields(t *testing.T) {
+	// Tightening the Copy decoder along with the trailing-data check
+	// also catches caller typos and immutable-field attempts.
+	h, _, _ := newDocHandler()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	body := `{"sourceId":"` + uuid.New().String() + `","destinationBucketId":"` + uuid.New().String() + `","authorizationId":"` + uuid.New().String() + `","mimeType":"text/plain"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
 	}
 }
