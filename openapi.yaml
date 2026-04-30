@@ -282,19 +282,19 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/http.errorResponse'
+                $ref: '#/components/schemas/source-document-not-found'
           description: Not Found
         "409":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/http.errorResponse'
+                $ref: '#/components/schemas/skipDedup-requested-but-a-row-with-this-content-already-exists-in-the-destination-bucket'
           description: Conflict
         "500":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/http.errorResponse'
+                $ref: '#/components/schemas/internal-error'
           description: Internal Server Error
       tags:
         - /internal
