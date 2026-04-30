@@ -98,8 +98,8 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 	}
 
 	displayName := r.FormValue("displayName")
-	if displayName == "" {
-		return nil, "", input, nil, 0, fmt.Errorf("displayName is required")
+	if err := validateDisplayName(displayName); err != nil {
+		return nil, "", input, nil, 0, err
 	}
 
 	storageBucketID, err := uuid.Parse(r.FormValue("storageBucketId"))
@@ -366,8 +366,10 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body UpdateDocumentRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // immutable fields like mimeType must not silently no-op
+	if err := dec.Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 
@@ -420,6 +422,10 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
 			return
 		}
+		if errors.Is(err, model.ErrDuplicateKey) {
+			writeJSONError(w, http.StatusConflict, "destination bucket already contains a document with this content")
+			return
+		}
 		h.Logger.Error("failed to update document", zap.Error(err))
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -434,14 +440,18 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateDisplayName rejects renames that would corrupt the row or
-// produce a filename consumers can't safely use. The file."displayName"
-// column is VARCHAR(512), so 512 bytes is the hard upper bound.
+// produce a filename consumers can't safely use. Shared by POST (create)
+// and PATCH (update) so both paths apply the same rules.
+//
+// The 512-byte cap is intentionally tighter than file."displayName"
+// VARCHAR(512), which is character-based in Postgres: capping at bytes
+// guarantees any accepted value fits regardless of UTF-8 expansion.
 func validateDisplayName(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("displayName must not be empty or whitespace-only")
 	}
 	if len(name) > 512 {
-		return fmt.Errorf("displayName exceeds maximum length of 512 characters")
+		return fmt.Errorf("displayName exceeds maximum length of 512 bytes")
 	}
 	if strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("displayName must not contain path separators ('/' or '\\')")

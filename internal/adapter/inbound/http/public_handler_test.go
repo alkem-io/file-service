@@ -58,7 +58,17 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uu
 	m.lastUpdateTemporary = temporary
 	m.lastUpdateDisplayName = displayName
 	m.lastUpdateVersion = version
-	return m.updateErr
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	// Mirror real adapter behavior so the subsequent service GetByID
+	// reflects the update — otherwise tests can't tell whether the
+	// handler propagated the new values or returned stale ones.
+	m.doc.StorageBucketID = bucketID
+	m.doc.TemporaryLocation = temporary
+	m.doc.DisplayName = displayName
+	m.doc.Version = version + 1
+	return nil
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return m.deleteResult, m.deleteErr

@@ -252,12 +252,17 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
+	// Param order in UpdateDocumentMetadata: $1=id, $2=storageBucketId,
+	// $3=temporaryLocation, $4=displayName, $5=updatedDate, $6=version.
+	// Pin everything except updatedDate (timestamp computed in adapter).
+	docID := uuid.New()
+	bucketID := uuid.New()
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", pgxmock.AnyArg(), int32(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	err = a.UpdateMetadata(context.Background(), docID, bucketID, false, "name.txt", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

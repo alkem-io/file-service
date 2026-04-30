@@ -1403,7 +1403,7 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 		ID:                docID,
 		StorageBucketID:   bucket,
 		TemporaryLocation: false,
-		DisplayName:       "renamed.txt",
+		DisplayName:       "old.txt", // genuine rename, not a no-op
 		Version:           7,
 	}
 
@@ -1551,22 +1551,141 @@ func TestDocumentHandler_Patch_DisplayName_Validation(t *testing.T) {
 }
 
 func TestDocumentHandler_Patch_DisplayName_LengthBoundary(t *testing.T) {
-	// Exactly 512 bytes is the largest accepted value (column is VARCHAR(512)).
+	// validateDisplayName caps at 512 bytes (intentionally tighter than
+	// VARCHAR(512), which is character-based in Postgres). These cases
+	// pin that the cap is byte-based so a future rune-based regression
+	// fails loudly.
+	cases := []struct {
+		name     string
+		display  string
+		wantCode int
+	}{
+		{"ascii_512", strings.Repeat("a", 512), http.StatusOK},
+		{"ascii_513", strings.Repeat("a", 513), http.StatusBadRequest},
+		// "€" = 3 bytes in UTF-8. 170*3 + 2 = 512 bytes exactly.
+		{"utf8_512_bytes_172_runes", strings.Repeat("€", 170) + "ab", http.StatusOK},
+		// One more "€" pushes to 513 bytes (171*3 + 2 = 515, pick 170+1+rest).
+		{"utf8_over_512_bytes", strings.Repeat("€", 171), http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo, _ := newDocHandler()
+			docID := uuid.New()
+			repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+
+			r := chi.NewRouter()
+			r.Patch("/internal/file/{id}", h.Update)
+
+			body := `{"displayName":"` + tc.display + `"}`
+			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (display has %d bytes), body: %s", rr.Code, tc.wantCode, len(tc.display), rr.Body.String())
+			}
+			if tc.wantCode == http.StatusBadRequest && repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; should reject before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_RejectsUnknownFields(t *testing.T) {
+	// Immutable fields like mimeType must produce a clear 400 instead of
+	// silently no-op'ing when sent through PATCH.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"immutable_mimeType", `{"displayName":"x.txt","mimeType":"text/plain"}`},
+		{"immutable_externalID", `{"displayName":"x.txt","externalID":"abc"}`},
+		{"immutable_size", `{"displayName":"x.txt","size":42}`},
+		{"unknown_field", `{"displayName":"x.txt","foo":"bar"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo, _ := newDocHandler()
+			repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+
+			r := chi.NewRouter()
+			r.Patch("/internal/file/{id}", h.Update)
+
+			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+			if repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; unknown-field reject must come before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Create_RejectsInvalidDisplayName(t *testing.T) {
+	// validateDisplayName must run on POST too, otherwise POST accepts
+	// names that the handler later refuses to update via PATCH.
+	cases := []struct {
+		name        string
+		displayName string
+	}{
+		{"whitespace_only", "   "},
+		{"forward_slash", "sub/dir.txt"},
+		{"backslash", `sub\dir.txt`},
+		{"too_long", strings.Repeat("a", 513)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newDocHandler()
+
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			part, _ := writer.CreateFormFile("file", "test.txt")
+			_, _ = part.Write([]byte("hello"))
+			_ = writer.WriteField("displayName", tc.displayName)
+			_ = writer.WriteField("storageBucketId", uuid.New().String())
+			_ = writer.WriteField("authorizationId", uuid.New().String())
+			_ = writer.Close()
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
+	// Defensive: if a UNIQUE constraint (e.g. (externalID, storageBucketId))
+	// fires when the caller PATCHes a doc into a bucket that already
+	// contains the same blob, the handler must surface 409, not 500.
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+	repo.updateErr = model.ErrDuplicateKey
 
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	name := strings.Repeat("a", 512)
-	body := `{"displayName":"` + name + `"}`
+	body := `{"storageBucketId":"` + uuid.New().String() + `"}`
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 for exactly 512-byte name, body: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body: %s", rr.Code, rr.Body.String())
 	}
 }
