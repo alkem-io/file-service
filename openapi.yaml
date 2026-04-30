@@ -114,17 +114,18 @@ components:
       type: object
     http.UpdateDocumentRequest:
       properties:
+        displayName:
+          type: string
         storageBucketId:
           format: uuid
           type: string
         temporaryLocation:
           type: boolean
-      required:
-        - storageBucketId
-        - temporaryLocation
       type: object
     http.UpdateDocumentResponse:
       properties:
+        displayName:
+          type: string
         id:
           type: string
         storageBucketId:
@@ -135,6 +136,7 @@ components:
         - id
         - storageBucketId
         - temporaryLocation
+        - displayName
       type: object
     http.errorResponse:
       properties:

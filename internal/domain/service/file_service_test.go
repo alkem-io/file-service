@@ -62,7 +62,7 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, err
 func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return m.updateErr
 }
-func (m *mockRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return m.updateErr
 }
 func (m *mockRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -458,7 +458,7 @@ func (m *mockRepoRace) Create(_ context.Context, _ model.Document) (uuid.UUID, e
 func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return nil
 }
-func (m *mockRepoRace) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return nil
 }
 func (m *mockRepoRace) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -754,7 +754,7 @@ func (m *copyRaceRepo) Create(_ context.Context, _ model.Document) (uuid.UUID, e
 func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return nil
 }
-func (m *copyRaceRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return nil
 }
 func (m *copyRaceRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -843,7 +843,7 @@ func TestStoreAndLink_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	}
 }
 
-func TestUpdateDocumentLocation_Happy(t *testing.T) {
+func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 	docID := uuid.New()
 	newBucket := uuid.New()
 	svc := &FileService{Logger: nopLogger,
@@ -854,7 +854,7 @@ func TestUpdateDocumentLocation_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentLocation(context.Background(), docID, newBucket, false, 1)
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, newBucket, false, "renamed.txt", 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -863,18 +863,18 @@ func TestUpdateDocumentLocation_Happy(t *testing.T) {
 	}
 }
 
-func TestUpdateDocumentLocation_NotFound(t *testing.T) {
+func TestUpdateDocumentMetadata_NotFound(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
 }
 
-func TestUpdateDocumentLocation_UpdateFails(t *testing.T) {
+func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:       model.Document{ID: uuid.New()},
@@ -882,7 +882,7 @@ func TestUpdateDocumentLocation_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1082,7 +1082,7 @@ func TestStoreAndLink_KeepsOldBlobWhenShared(t *testing.T) {
 	}
 }
 
-func TestUpdateDocumentLocation_VersionConflict(t *testing.T) {
+func TestUpdateDocumentMetadata_VersionConflict(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
 		Repo: &mockRepo{
 			doc:       model.Document{ID: uuid.New(), Version: 5},
@@ -1090,7 +1090,7 @@ func TestUpdateDocumentLocation_VersionConflict(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentLocation(context.Background(), uuid.New(), uuid.New(), false, 3)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 3)
 	if err == nil {
 		t.Fatal("expected error for version conflict")
 	}

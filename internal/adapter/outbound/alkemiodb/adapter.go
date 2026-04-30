@@ -96,11 +96,12 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 	return nil
 }
 
-func (a *Adapter) UpdateLocation(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) error {
-	rows, err := a.queries.UpdateDocumentLocation(ctx, queries.UpdateDocumentLocationParams{
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
+	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
 		ID:                uuidToPgx(id),
 		StorageBucketId:   uuidToPgx(storageBucketID),
 		TemporaryLocation: temporaryLocation,
+		DisplayName:       displayName,
 		UpdatedDate:       timeToPgxNow(),
 		Version:           safeInt32(version),
 	})

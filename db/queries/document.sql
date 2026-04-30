@@ -29,10 +29,18 @@ UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5
 WHERE id = $1;
 
--- name: UpdateDocumentLocation :execrows
+-- name: UpdateDocumentMetadata :execrows
+-- Updates the mutable metadata fields (storageBucketId, temporaryLocation,
+-- displayName) atomically with optimistic locking. Caller fills unchanged
+-- fields with their current values. mimeType, externalID, size are not
+-- mutable through this query — they change only via UpdateDocumentFile.
 UPDATE file
-SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4, version = version + 1
-WHERE id = $1 AND version = $5;
+SET "storageBucketId"    = $2,
+    "temporaryLocation"  = $3,
+    "displayName"        = $4,
+    "updatedDate"        = $5,
+    version              = version + 1
+WHERE id = $1 AND version = $6;
 
 -- name: DeleteDocument :one
 DELETE FROM file

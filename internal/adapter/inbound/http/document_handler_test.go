@@ -1392,3 +1392,181 @@ func TestInitMetrics(_ *testing.T) {
 	InitMetrics()
 	InitMetrics() // idempotent
 }
+
+// --- PATCH displayName ---
+
+func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	bucket := uuid.New()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   bucket,
+		TemporaryLocation: false,
+		DisplayName:       "renamed.txt",
+		Version:           7,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"displayName": "renamed.txt"}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 1 {
+		t.Fatalf("UpdateMetadata calls = %d, want 1", repo.updateMetadataCalls)
+	}
+	if repo.lastUpdateDisplayName != "renamed.txt" {
+		t.Errorf("displayName passed = %q, want %q", repo.lastUpdateDisplayName, "renamed.txt")
+	}
+	if repo.lastUpdateBucketID != bucket {
+		t.Errorf("bucketID passed = %s, want %s (should fall through from current)", repo.lastUpdateBucketID, bucket)
+	}
+	if repo.lastUpdateTemporary {
+		t.Errorf("temporary passed = %v, want false (should fall through)", repo.lastUpdateTemporary)
+	}
+	if repo.lastUpdateVersion != 7 {
+		t.Errorf("version passed = %d, want 7 (current version for optimistic lock)", repo.lastUpdateVersion)
+	}
+
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.DisplayName != "renamed.txt" {
+		t.Errorf("response displayName = %q, want %q", resp.DisplayName, "renamed.txt")
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
+	// Renaming to the same name twice: handler/service does not branch on
+	// "no-op", but the row's version still advances (DB UPDATE always
+	// runs). The contract is "stable result", not "no DB write".
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		DisplayName:     "stable.txt",
+		Version:         3,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"displayName": "stable.txt"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
+		}
+		if repo.lastUpdateDisplayName != "stable.txt" {
+			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
+		}
+	}
+	if repo.updateMetadataCalls != 2 {
+		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_CombinedFields(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	newBucket := uuid.New()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		TemporaryLocation: true,
+		DisplayName:       "new.pdf",
+		Version:           1,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"storageBucketId":"` + newBucket.String() + `","temporaryLocation":false,"displayName":"new.pdf"}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastUpdateBucketID != newBucket {
+		t.Errorf("bucketID = %s, want %s", repo.lastUpdateBucketID, newBucket)
+	}
+	if repo.lastUpdateTemporary {
+		t.Errorf("temporary = %v, want false", repo.lastUpdateTemporary)
+	}
+	if repo.lastUpdateDisplayName != "new.pdf" {
+		t.Errorf("displayName = %q, want new.pdf", repo.lastUpdateDisplayName)
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_Validation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty", `{"displayName":""}`},
+		{"whitespace_only", `{"displayName":"   "}`},
+		{"too_long", `{"displayName":"` + strings.Repeat("a", 513) + `"}`},
+		{"forward_slash", `{"displayName":"sub/dir.txt"}`},
+		{"backslash", `{"displayName":"sub\\dir.txt"}`},
+		{"control_char_null", `{"displayName":"a\u0000b"}`},
+		{"control_char_newline", `{"displayName":"a\u000ab"}`},
+		{"control_char_del", `{"displayName":"a\u007fb"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo, _ := newDocHandler()
+			repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New(), DisplayName: "ok.txt"}
+
+			r := chi.NewRouter()
+			r.Patch("/internal/file/{id}", h.Update)
+
+			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+			if repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; should reject before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_LengthBoundary(t *testing.T) {
+	// Exactly 512 bytes is the largest accepted value (column is VARCHAR(512)).
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	name := strings.Repeat("a", 512)
+	body := `{"displayName":"` + name + `"}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for exactly 512-byte name, body: %s", rr.Code, rr.Body.String())
+	}
+}

@@ -24,6 +24,13 @@ type mockDocRepo struct {
 	deleteResult model.DeletedDocument
 	deleteErr    error
 	count        int
+
+	// Captured args from the most recent UpdateMetadata call.
+	updateMetadataCalls   int
+	lastUpdateBucketID    uuid.UUID
+	lastUpdateTemporary   bool
+	lastUpdateDisplayName string
+	lastUpdateVersion     int
 }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -45,7 +52,12 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, 
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return m.updateErr
 }
-func (m *mockDocRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+	m.updateMetadataCalls++
+	m.lastUpdateBucketID = bucketID
+	m.lastUpdateTemporary = temporary
+	m.lastUpdateDisplayName = displayName
+	m.lastUpdateVersion = version
 	return m.updateErr
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {

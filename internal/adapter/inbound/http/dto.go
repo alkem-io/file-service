@@ -39,11 +39,12 @@ func (r DeleteDocumentResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// UpdateDocumentResponse is returned by PATCH /internal/document/:id.
+// UpdateDocumentResponse is returned by PATCH /internal/file/:id.
 type UpdateDocumentResponse struct {
 	ID                string `json:"id"`
 	StorageBucketID   string `json:"storageBucketId"`
 	TemporaryLocation bool   `json:"temporaryLocation"`
+	DisplayName       string `json:"displayName"`
 }
 
 func (r UpdateDocumentResponse) Render(w http.ResponseWriter) {
@@ -87,10 +88,15 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// UpdateDocumentRequest is the body for PATCH /internal/document/:id.
+// UpdateDocumentRequest is the body for PATCH /internal/file/:id.
+// All fields are optional; at least one must be present. Omitted fields
+// retain their current value. mimeType, externalID, and size are immutable
+// through this endpoint — see PUT /internal/file/{id}/content for content
+// replacement (which also updates mimeType and size).
 type UpdateDocumentRequest struct {
-	StorageBucketID   *string `json:"storageBucketId"`
-	TemporaryLocation *bool   `json:"temporaryLocation"`
+	StorageBucketID   *string `json:"storageBucketId,omitempty"`
+	TemporaryLocation *bool   `json:"temporaryLocation,omitempty"`
+	DisplayName       *string `json:"displayName,omitempty"`
 }
 
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.

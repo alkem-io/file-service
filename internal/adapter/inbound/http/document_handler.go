@@ -344,7 +344,20 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	resp.Render(w)
 }
 
-// Update handles PATCH /internal/document/{id}
+// Update handles PATCH /internal/file/{id}.
+// Mutates storageBucketId, temporaryLocation, and/or displayName. Each
+// field is optional; at least one must be present. Omitted fields retain
+// their current value.
+//
+// displayName notes:
+//   - Validation rejects empty/whitespace-only, length > 512 (matches
+//     the file."displayName" VARCHAR(512) column), path separators, and
+//     control characters.
+//   - mimeType is immutable on this endpoint, so callers renaming a file
+//     are responsible for keeping the extension consistent with mimeType.
+//     This service does not parse extensions or enforce mimeType matching.
+//   - displayName is not part of any uniqueness/dedup index, so renames
+//     never conflict at the DB level.
 func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -358,13 +371,18 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Need at least one field
-	if body.StorageBucketID == nil && body.TemporaryLocation == nil {
+	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
-	// Get current doc to fill defaults
+	if body.DisplayName != nil {
+		if err := validateDisplayName(*body.DisplayName); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -391,7 +409,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		tempLoc = *body.TemporaryLocation
 	}
 
-	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc, doc.Version)
+	displayName := doc.DisplayName
+	if body.DisplayName != nil {
+		displayName = *body.DisplayName
+	}
+
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
@@ -406,7 +429,29 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ID:                updated.ID.String(),
 		StorageBucketID:   updated.StorageBucketID.String(),
 		TemporaryLocation: updated.TemporaryLocation,
+		DisplayName:       updated.DisplayName,
 	}.Render(w)
+}
+
+// validateDisplayName rejects renames that would corrupt the row or
+// produce a filename consumers can't safely use. The file."displayName"
+// column is VARCHAR(512), so 512 bytes is the hard upper bound.
+func validateDisplayName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("displayName must not be empty or whitespace-only")
+	}
+	if len(name) > 512 {
+		return fmt.Errorf("displayName exceeds maximum length of 512 characters")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("displayName must not contain path separators ('/' or '\\')")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("displayName must not contain control characters")
+		}
+	}
+	return nil
 }
 
 // ReplaceContent handles PUT /internal/document/{id}/content (store-and-link)
