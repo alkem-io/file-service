@@ -1508,7 +1508,7 @@ func TestDocumentHandler_Patch_DisplayName_CombinedFields(t *testing.T) {
 		ID:                docID,
 		StorageBucketID:   uuid.New(),
 		TemporaryLocation: true,
-		DisplayName:       "new.pdf",
+		DisplayName:       "old.pdf", // fixture differs from body so a missing rename fails the test
 		Version:           1,
 	}
 
@@ -1635,6 +1635,9 @@ func TestDocumentHandler_Create_RejectsInvalidDisplayName(t *testing.T) {
 		{"forward_slash", "sub/dir.txt"},
 		{"backslash", `sub\dir.txt`},
 		{"too_long", strings.Repeat("a", 513)},
+		{"control_char_null", "a\x00b"},
+		{"control_char_newline", "a\nb"},
+		{"control_char_del", "a\x7fb"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1668,6 +1671,9 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	// Defensive: if a UNIQUE constraint (e.g. (externalID, storageBucketId))
 	// fires when the caller PATCHes a doc into a bucket that already
 	// contains the same blob, the handler must surface 409, not 500.
+	// Asserting the body too pins the duplicate-key vs version-conflict
+	// distinction so callers can act on it without parsing structured
+	// error codes.
 	docID := uuid.New()
 	rr, _ := runPatch(t, docID, `{"storageBucketId":"`+uuid.New().String()+`"}`, func(repo *mockDocRepo) {
 		repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
@@ -1675,6 +1681,9 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	})
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
 	}
 }
 
