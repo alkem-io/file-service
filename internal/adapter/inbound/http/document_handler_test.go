@@ -39,6 +39,28 @@ func (p *stubProcessor) Process(content []byte, mimeType string) ([]byte, string
 	return content, mimeType, nil
 }
 
+// runPatch wires a fresh handler + chi router and dispatches a single
+// PATCH /internal/file/{id} request with the given JSON body. The
+// configure callback (if non-nil) lets the caller seed mock state on
+// the repo before the request is served. Returns the response recorder
+// and the captured repo so callers can assert status + UpdateMetadata
+// args without repeating chi/httptest boilerplate per test.
+func runPatch(t *testing.T, docID uuid.UUID, body string, configure func(*mockDocRepo)) (*httptest.ResponseRecorder, *mockDocRepo) {
+	t.Helper()
+	h, repo, _ := newDocHandler()
+	if configure != nil {
+		configure(repo)
+	}
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr, repo
+}
+
 func TestDocumentHandler_GetMeta_Found(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
@@ -1529,17 +1551,9 @@ func TestDocumentHandler_Patch_DisplayName_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, repo, _ := newDocHandler()
-			repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New(), DisplayName: "ok.txt"}
-
-			r := chi.NewRouter()
-			r.Patch("/internal/file/{id}", h.Update)
-
-			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
-			rr := httptest.NewRecorder()
-			r.ServeHTTP(rr, req)
-
+			rr, repo := runPatch(t, uuid.New(), tc.body, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New(), DisplayName: "ok.txt"}
+			})
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
 			}
@@ -1564,24 +1578,15 @@ func TestDocumentHandler_Patch_DisplayName_LengthBoundary(t *testing.T) {
 		{"ascii_513", strings.Repeat("a", 513), http.StatusBadRequest},
 		// "€" = 3 bytes in UTF-8. 170*3 + 2 = 512 bytes exactly.
 		{"utf8_512_bytes_172_runes", strings.Repeat("€", 170) + "ab", http.StatusOK},
-		// One more "€" pushes to 513 bytes (171*3 + 2 = 515, pick 170+1+rest).
+		// 171 * 3 = 513 bytes, just over the limit.
 		{"utf8_over_512_bytes", strings.Repeat("€", 171), http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, repo, _ := newDocHandler()
 			docID := uuid.New()
-			repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
-
-			r := chi.NewRouter()
-			r.Patch("/internal/file/{id}", h.Update)
-
-			body := `{"displayName":"` + tc.display + `"}`
-			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			rr := httptest.NewRecorder()
-			r.ServeHTTP(rr, req)
-
+			rr, repo := runPatch(t, docID, `{"displayName":"`+tc.display+`"}`, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+			})
 			if rr.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d (display has %d bytes), body: %s", rr.Code, tc.wantCode, len(tc.display), rr.Body.String())
 			}
@@ -1606,17 +1611,9 @@ func TestDocumentHandler_Patch_RejectsUnknownFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, repo, _ := newDocHandler()
-			repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
-
-			r := chi.NewRouter()
-			r.Patch("/internal/file/{id}", h.Update)
-
-			req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
-			rr := httptest.NewRecorder()
-			r.ServeHTTP(rr, req)
-
+			rr, repo := runPatch(t, uuid.New(), tc.body, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+			})
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
 			}
@@ -1671,20 +1668,11 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	// Defensive: if a UNIQUE constraint (e.g. (externalID, storageBucketId))
 	// fires when the caller PATCHes a doc into a bucket that already
 	// contains the same blob, the handler must surface 409, not 500.
-	h, repo, _ := newDocHandler()
 	docID := uuid.New()
-	repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
-	repo.updateErr = model.ErrDuplicateKey
-
-	r := chi.NewRouter()
-	r.Patch("/internal/file/{id}", h.Update)
-
-	body := `{"storageBucketId":"` + uuid.New().String() + `"}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
+	rr, _ := runPatch(t, docID, `{"storageBucketId":"`+uuid.New().String()+`"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+		repo.updateErr = model.ErrDuplicateKey
+	})
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
 	}
@@ -1694,18 +1682,9 @@ func TestDocumentHandler_Patch_RejectsTrailingJSON(t *testing.T) {
 	// json.Decoder.Decode consumes only the first JSON value, so a body
 	// like `{"displayName":"x.txt"}{"foo":1}` would otherwise parse the
 	// first object and silently drop the second. Reject it instead.
-	h, repo, _ := newDocHandler()
-	repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
-
-	r := chi.NewRouter()
-	r.Patch("/internal/file/{id}", h.Update)
-
-	body := `{"displayName":"x.txt"}{"foo":1}`
-	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
+	rr, repo := runPatch(t, uuid.New(), `{"displayName":"x.txt"}{"foo":1}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+	})
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
 	}
