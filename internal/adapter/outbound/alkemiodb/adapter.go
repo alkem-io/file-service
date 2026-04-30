@@ -96,15 +96,25 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 	return nil
 }
 
-func (a *Adapter) UpdateLocation(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) error {
-	rows, err := a.queries.UpdateDocumentLocation(ctx, queries.UpdateDocumentLocationParams{
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
+	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
 		ID:                uuidToPgx(id),
 		StorageBucketId:   uuidToPgx(storageBucketID),
 		TemporaryLocation: temporaryLocation,
+		DisplayName:       displayName,
 		UpdatedDate:       timeToPgxNow(),
 		Version:           safeInt32(version),
 	})
 	if err != nil {
+		// Defensive: keeps PATCH consistent with Create/UpdateFile if a
+		// uniqueness constraint is added later (e.g. (externalID,
+		// storageBucketId)). No such constraint exists in this repo's
+		// db/schema/document.sql today, but the production schema can
+		// diverge, and a 409 beats a 500 if it fires.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+			return model.ErrDuplicateKey
+		}
 		return err
 	}
 	if rows == 0 {

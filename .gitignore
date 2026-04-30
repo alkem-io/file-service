@@ -28,3 +28,6 @@ vendor/
 
 # sqlc generated (tracked, but ignore local overrides)
 # internal/adapter/outbound/alkemiodb/queries/ is tracked
+
+# Local Claude Code state
+.claude/

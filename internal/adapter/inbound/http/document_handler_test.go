@@ -39,6 +39,28 @@ func (p *stubProcessor) Process(content []byte, mimeType string) ([]byte, string
 	return content, mimeType, nil
 }
 
+// runPatch wires a fresh handler + chi router and dispatches a single
+// PATCH /internal/file/{id} request with the given JSON body. The
+// configure callback (if non-nil) lets the caller seed mock state on
+// the repo before the request is served. Returns the response recorder
+// and the captured repo so callers can assert status + UpdateMetadata
+// args without repeating chi/httptest boilerplate per test.
+func runPatch(t *testing.T, docID uuid.UUID, body string, configure func(*mockDocRepo)) (*httptest.ResponseRecorder, *mockDocRepo) {
+	t.Helper()
+	h, repo, _ := newDocHandler()
+	if configure != nil {
+		configure(repo)
+	}
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr, repo
+}
+
 func TestDocumentHandler_GetMeta_Found(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
@@ -1391,4 +1413,327 @@ func TestInitMetrics(_ *testing.T) {
 	// Just verify it doesn't panic
 	InitMetrics()
 	InitMetrics() // idempotent
+}
+
+// --- PATCH displayName ---
+
+func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	bucket := uuid.New()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   bucket,
+		TemporaryLocation: false,
+		DisplayName:       "old.txt", // genuine rename, not a no-op
+		Version:           7,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"displayName": "renamed.txt"}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 1 {
+		t.Fatalf("UpdateMetadata calls = %d, want 1", repo.updateMetadataCalls)
+	}
+	if repo.lastUpdateDisplayName != "renamed.txt" {
+		t.Errorf("displayName passed = %q, want %q", repo.lastUpdateDisplayName, "renamed.txt")
+	}
+	if repo.lastUpdateBucketID != bucket {
+		t.Errorf("bucketID passed = %s, want %s (should fall through from current)", repo.lastUpdateBucketID, bucket)
+	}
+	if repo.lastUpdateTemporary {
+		t.Errorf("temporary passed = %v, want false (should fall through)", repo.lastUpdateTemporary)
+	}
+	if repo.lastUpdateVersion != 7 {
+		t.Errorf("version passed = %d, want 7 (current version for optimistic lock)", repo.lastUpdateVersion)
+	}
+
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.DisplayName != "renamed.txt" {
+		t.Errorf("response displayName = %q, want %q", resp.DisplayName, "renamed.txt")
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
+	// Renaming to the same name twice: handler/service does not branch on
+	// "no-op", but the row's version still advances (DB UPDATE always
+	// runs). The contract is "stable result", not "no DB write".
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		DisplayName:     "stable.txt",
+		Version:         3,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"displayName": "stable.txt"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
+		}
+		if repo.lastUpdateDisplayName != "stable.txt" {
+			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
+		}
+	}
+	if repo.updateMetadataCalls != 2 {
+		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_CombinedFields(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	newBucket := uuid.New()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		TemporaryLocation: true,
+		DisplayName:       "old.pdf", // fixture differs from body so a missing rename fails the test
+		Version:           1,
+	}
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+
+	body := `{"storageBucketId":"` + newBucket.String() + `","temporaryLocation":false,"displayName":"new.pdf"}`
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastUpdateBucketID != newBucket {
+		t.Errorf("bucketID = %s, want %s", repo.lastUpdateBucketID, newBucket)
+	}
+	if repo.lastUpdateTemporary {
+		t.Errorf("temporary = %v, want false", repo.lastUpdateTemporary)
+	}
+	if repo.lastUpdateDisplayName != "new.pdf" {
+		t.Errorf("displayName = %q, want new.pdf", repo.lastUpdateDisplayName)
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_Validation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty", `{"displayName":""}`},
+		{"whitespace_only", `{"displayName":"   "}`},
+		{"too_long", `{"displayName":"` + strings.Repeat("a", 513) + `"}`},
+		{"forward_slash", `{"displayName":"sub/dir.txt"}`},
+		{"backslash", `{"displayName":"sub\\dir.txt"}`},
+		{"control_char_null", `{"displayName":"a\u0000b"}`},
+		{"control_char_newline", `{"displayName":"a\u000ab"}`},
+		{"control_char_del", `{"displayName":"a\u007fb"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr, repo := runPatch(t, uuid.New(), tc.body, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New(), DisplayName: "ok.txt"}
+			})
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+			if repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; should reject before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_DisplayName_LengthBoundary(t *testing.T) {
+	// validateDisplayName caps at 512 bytes (intentionally tighter than
+	// VARCHAR(512), which is character-based in Postgres). These cases
+	// pin that the cap is byte-based so a future rune-based regression
+	// fails loudly.
+	cases := []struct {
+		name     string
+		display  string
+		wantCode int
+	}{
+		{"ascii_512", strings.Repeat("a", 512), http.StatusOK},
+		{"ascii_513", strings.Repeat("a", 513), http.StatusBadRequest},
+		// "€" = 3 bytes in UTF-8. 170*3 + 2 = 512 bytes exactly.
+		{"utf8_512_bytes_172_runes", strings.Repeat("€", 170) + "ab", http.StatusOK},
+		// 171 * 3 = 513 bytes, just over the limit.
+		{"utf8_over_512_bytes", strings.Repeat("€", 171), http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			docID := uuid.New()
+			rr, repo := runPatch(t, docID, `{"displayName":"`+tc.display+`"}`, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+			})
+			if rr.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (display has %d bytes), body: %s", rr.Code, tc.wantCode, len(tc.display), rr.Body.String())
+			}
+			if tc.wantCode == http.StatusBadRequest && repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; should reject before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_RejectsUnknownFields(t *testing.T) {
+	// Immutable fields like mimeType must produce a clear 400 instead of
+	// silently no-op'ing when sent through PATCH.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"immutable_mimeType", `{"displayName":"x.txt","mimeType":"text/plain"}`},
+		{"immutable_externalID", `{"displayName":"x.txt","externalID":"abc"}`},
+		{"immutable_size", `{"displayName":"x.txt","size":42}`},
+		{"unknown_field", `{"displayName":"x.txt","foo":"bar"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr, repo := runPatch(t, uuid.New(), tc.body, func(repo *mockDocRepo) {
+				repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+			})
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+			if repo.updateMetadataCalls != 0 {
+				t.Errorf("UpdateMetadata called %d times; unknown-field reject must come before service", repo.updateMetadataCalls)
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Create_RejectsInvalidDisplayName(t *testing.T) {
+	// validateDisplayName must run on POST too, otherwise POST accepts
+	// names that the handler later refuses to update via PATCH.
+	cases := []struct {
+		name        string
+		displayName string
+	}{
+		{"whitespace_only", "   "},
+		{"forward_slash", "sub/dir.txt"},
+		{"backslash", `sub\dir.txt`},
+		{"too_long", strings.Repeat("a", 513)},
+		{"control_char_null", "a\x00b"},
+		{"control_char_newline", "a\nb"},
+		{"control_char_del", "a\x7fb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := newDocHandler()
+
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			part, _ := writer.CreateFormFile("file", "test.txt")
+			_, _ = part.Write([]byte("hello"))
+			_ = writer.WriteField("displayName", tc.displayName)
+			_ = writer.WriteField("storageBucketId", uuid.New().String())
+			_ = writer.WriteField("authorizationId", uuid.New().String())
+			_ = writer.Close()
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
+	// Defensive: if a UNIQUE constraint (e.g. (externalID, storageBucketId))
+	// fires when the caller PATCHes a doc into a bucket that already
+	// contains the same blob, the handler must surface 409, not 500.
+	// Asserting the body too pins the duplicate-key vs version-conflict
+	// distinction so callers can act on it without parsing structured
+	// error codes.
+	docID := uuid.New()
+	rr, _ := runPatch(t, docID, `{"storageBucketId":"`+uuid.New().String()+`"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+		repo.updateErr = model.ErrDuplicateKey
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_Patch_RejectsTrailingJSON(t *testing.T) {
+	// json.Decoder.Decode consumes only the first JSON value, so a body
+	// like `{"displayName":"x.txt"}{"foo":1}` would otherwise parse the
+	// first object and silently drop the second. Reject it instead.
+	rr, repo := runPatch(t, uuid.New(), `{"displayName":"x.txt"}{"foo":1}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: uuid.New(), StorageBucketID: uuid.New()}
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("UpdateMetadata called %d times; trailing JSON must be rejected before service", repo.updateMetadataCalls)
+	}
+}
+
+func TestDocumentHandler_Copy_RejectsTrailingJSON(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	body := `{"sourceId":"` + uuid.New().String() + `","destinationBucketId":"` + uuid.New().String() + `","authorizationId":"` + uuid.New().String() + `"}{"extra":1}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_Copy_RejectsUnknownFields(t *testing.T) {
+	// Tightening the Copy decoder along with the trailing-data check
+	// also catches caller typos and immutable-field attempts.
+	h, _, _ := newDocHandler()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+
+	body := `{"sourceId":"` + uuid.New().String() + `","destinationBucketId":"` + uuid.New().String() + `","authorizationId":"` + uuid.New().String() + `","mimeType":"text/plain"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
 }

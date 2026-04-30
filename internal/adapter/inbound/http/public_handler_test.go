@@ -24,6 +24,13 @@ type mockDocRepo struct {
 	deleteResult model.DeletedDocument
 	deleteErr    error
 	count        int
+
+	// Captured args from the most recent UpdateMetadata call.
+	updateMetadataCalls   int
+	lastUpdateBucketID    uuid.UUID
+	lastUpdateTemporary   bool
+	lastUpdateDisplayName string
+	lastUpdateVersion     int
 }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -45,8 +52,23 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, 
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
 	return m.updateErr
 }
-func (m *mockDocRepo) UpdateLocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ int) error {
-	return m.updateErr
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+	m.updateMetadataCalls++
+	m.lastUpdateBucketID = bucketID
+	m.lastUpdateTemporary = temporary
+	m.lastUpdateDisplayName = displayName
+	m.lastUpdateVersion = version
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	// Mirror real adapter behavior so the subsequent service GetByID
+	// reflects the update — otherwise tests can't tell whether the
+	// handler propagated the new values or returned stale ones.
+	m.doc.StorageBucketID = bucketID
+	m.doc.TemporaryLocation = temporary
+	m.doc.DisplayName = displayName
+	m.doc.Version = version + 1
+	return nil
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return m.deleteResult, m.deleteErr

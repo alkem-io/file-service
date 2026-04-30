@@ -98,8 +98,8 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 	}
 
 	displayName := r.FormValue("displayName")
-	if displayName == "" {
-		return nil, "", input, nil, 0, fmt.Errorf("displayName is required")
+	if err := validateDisplayName(displayName); err != nil {
+		return nil, "", input, nil, 0, err
 	}
 
 	storageBucketID, err := uuid.Parse(r.FormValue("storageBucketId"))
@@ -241,8 +241,14 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 // (existing row is authoritative), matching the createDocument contract.
 func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	var body CopyDocumentRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
 		return
 	}
 
@@ -344,7 +350,20 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	resp.Render(w)
 }
 
-// Update handles PATCH /internal/document/{id}
+// Update handles PATCH /internal/file/{id}.
+// Mutates storageBucketId, temporaryLocation, and/or displayName. Each
+// field is optional; at least one must be present. Omitted fields retain
+// their current value.
+//
+// displayName notes:
+//   - Validation rejects empty/whitespace-only, length > 512 (matches
+//     the file."displayName" VARCHAR(512) column), path separators, and
+//     control characters.
+//   - mimeType is immutable on this endpoint, so callers renaming a file
+//     are responsible for keeping the extension consistent with mimeType.
+//     This service does not parse extensions or enforce mimeType matching.
+//   - displayName is not part of any uniqueness/dedup index, so renames
+//     never conflict at the DB level.
 func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -353,18 +372,29 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body UpdateDocumentRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // immutable fields like mimeType must not silently no-op
+	if err := dec.Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
 		return
 	}
 
-	// Need at least one field
-	if body.StorageBucketID == nil && body.TemporaryLocation == nil {
+	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
-	// Get current doc to fill defaults
+	if body.DisplayName != nil {
+		if err := validateDisplayName(*body.DisplayName); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -391,10 +421,19 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		tempLoc = *body.TemporaryLocation
 	}
 
-	updated, err := h.Service.UpdateDocumentLocation(r.Context(), docID, bucketID, tempLoc, doc.Version)
+	displayName := doc.DisplayName
+	if body.DisplayName != nil {
+		displayName = *body.DisplayName
+	}
+
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
+			return
+		}
+		if errors.Is(err, model.ErrDuplicateKey) {
+			writeJSONError(w, http.StatusConflict, "destination bucket already contains a document with this content")
 			return
 		}
 		h.Logger.Error("failed to update document", zap.Error(err))
@@ -406,7 +445,33 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ID:                updated.ID.String(),
 		StorageBucketID:   updated.StorageBucketID.String(),
 		TemporaryLocation: updated.TemporaryLocation,
+		DisplayName:       updated.DisplayName,
 	}.Render(w)
+}
+
+// validateDisplayName rejects renames that would corrupt the row or
+// produce a filename consumers can't safely use. Shared by POST (create)
+// and PATCH (update) so both paths apply the same rules.
+//
+// The 512-byte cap is intentionally tighter than file."displayName"
+// VARCHAR(512), which is character-based in Postgres: capping at bytes
+// guarantees any accepted value fits regardless of UTF-8 expansion.
+func validateDisplayName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("displayName must not be empty or whitespace-only")
+	}
+	if len(name) > 512 {
+		return fmt.Errorf("displayName exceeds maximum length of 512 bytes")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("displayName must not contain path separators ('/' or '\\')")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("displayName must not contain control characters")
+		}
+	}
+	return nil
 }
 
 // ReplaceContent handles PUT /internal/document/{id}/content (store-and-link)

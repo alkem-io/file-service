@@ -212,25 +212,35 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 	return result.RowsAffected(), nil
 }
 
-const updateDocumentLocation = `-- name: UpdateDocumentLocation :execrows
+const updateDocumentMetadata = `-- name: UpdateDocumentMetadata :execrows
 UPDATE file
-SET "storageBucketId" = $2, "temporaryLocation" = $3, "updatedDate" = $4, version = version + 1
-WHERE id = $1 AND version = $5
+SET "storageBucketId"    = $2,
+    "temporaryLocation"  = $3,
+    "displayName"        = $4,
+    "updatedDate"        = $5,
+    version              = version + 1
+WHERE id = $1 AND version = $6
 `
 
-type UpdateDocumentLocationParams struct {
+type UpdateDocumentMetadataParams struct {
 	ID                pgtype.UUID        `json:"id"`
 	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
 	TemporaryLocation bool               `json:"temporaryLocation"`
+	DisplayName       string             `json:"displayName"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
 }
 
-func (q *Queries) UpdateDocumentLocation(ctx context.Context, arg UpdateDocumentLocationParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateDocumentLocation,
+// Updates the mutable metadata fields (storageBucketId, temporaryLocation,
+// displayName) atomically with optimistic locking. Caller fills unchanged
+// fields with their current values. mimeType, externalID, size are not
+// mutable through this query — they change only via UpdateDocumentFile.
+func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocumentMetadataParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateDocumentMetadata,
 		arg.ID,
 		arg.StorageBucketId,
 		arg.TemporaryLocation,
+		arg.DisplayName,
 		arg.UpdatedDate,
 		arg.Version,
 	)

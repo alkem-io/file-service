@@ -230,17 +230,18 @@ func TestCountByExternalID(t *testing.T) {
 	}
 }
 
-func TestUpdateLocation(t *testing.T) {
+func TestUpdateMetadata(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
 	a := New(pool)
 
 	var id, bucketID [16]byte
 	var tempLoc bool
+	var displayName string
 	var version int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "temporaryLocation", version FROM file LIMIT 1`,
-	).Scan(&id, &bucketID, &tempLoc, &version)
+		`SELECT id, "storageBucketId", "temporaryLocation", "displayName", version FROM file LIMIT 1`,
+	).Scan(&id, &bucketID, &tempLoc, &displayName, &version)
 	if err != nil {
 		t.Skip("no documents")
 	}
@@ -248,13 +249,13 @@ func TestUpdateLocation(t *testing.T) {
 	origBucket := uuid.UUID(bucketID)
 
 	// Update with current version (optimistic lock)
-	err = a.UpdateLocation(context.Background(), docID, origBucket, !tempLoc, int(version))
+	err = a.UpdateMetadata(context.Background(), docID, origBucket, !tempLoc, displayName, int(version))
 	if err != nil {
-		t.Fatalf("UpdateLocation: %v", err)
+		t.Fatalf("UpdateMetadata: %v", err)
 	}
 	defer func() {
 		// Restore with incremented version
-		_ = a.UpdateLocation(context.Background(), docID, origBucket, tempLoc, int(version+1))
+		_ = a.UpdateMetadata(context.Background(), docID, origBucket, tempLoc, displayName, int(version+1))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -263,12 +264,12 @@ func TestUpdateLocation(t *testing.T) {
 	}
 }
 
-func TestUpdateLocation_NotFound(t *testing.T) {
+func TestUpdateMetadata_NotFound(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	err := a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}

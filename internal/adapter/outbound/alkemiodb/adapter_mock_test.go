@@ -245,25 +245,30 @@ func TestMock_CountByExternalID(t *testing.T) {
 	}
 }
 
-func TestMock_UpdateLocation_Success(t *testing.T) {
+func TestMock_UpdateMetadata_Success(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mock.Close()
 
+	// Param order in UpdateDocumentMetadata: $1=id, $2=storageBucketId,
+	// $3=temporaryLocation, $4=displayName, $5=updatedDate, $6=version.
+	// Pin everything except updatedDate (timestamp computed in adapter).
+	docID := uuid.New()
+	bucketID := uuid.New()
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", pgxmock.AnyArg(), int32(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	err = a.UpdateMetadata(context.Background(), docID, bucketID, false, "name.txt", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestMock_UpdateLocation_NotFound(t *testing.T) {
+func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -271,11 +276,11 @@ func TestMock_UpdateLocation_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -320,7 +325,7 @@ func TestMock_UpdateFile_DBError(t *testing.T) {
 	}
 }
 
-func TestMock_UpdateLocation_DBError(t *testing.T) {
+func TestMock_UpdateMetadata_DBError(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -328,11 +333,11 @@ func TestMock_UpdateLocation_DBError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateLocation(context.Background(), uuid.New(), uuid.New(), false, 1)
+	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}

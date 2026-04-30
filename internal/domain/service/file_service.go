@@ -342,10 +342,19 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	}, nil
 }
 
-// UpdateDocumentLocation updates the storage bucket and temporary location flag.
-// Uses optimistic locking via the version column to prevent concurrent overwrites.
-func (s *FileService) UpdateDocumentLocation(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, version int) (*model.Document, error) {
-	err := s.Repo.UpdateLocation(ctx, documentID, storageBucketID, temporaryLocation, version)
+// UpdateDocumentMetadata updates the mutable metadata fields (storage bucket,
+// temporary-location flag, display name) atomically. The handler reads the
+// current row first and fills any fields the caller didn't supply, so this
+// method always overwrites all three columns. Uses optimistic locking via
+// the version column.
+//
+// mimeType, externalID, and size are not mutable through this method — they
+// change only via StoreAndLink (replace content). Callers that rename a
+// document are responsible for keeping displayName's extension consistent
+// with the (immutable) mimeType; this service does not enforce extension
+// matching.
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) (*model.Document, error) {
+	err := s.Repo.UpdateMetadata(ctx, documentID, storageBucketID, temporaryLocation, displayName, version)
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
