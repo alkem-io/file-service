@@ -19,6 +19,11 @@ type CreateDocumentResponse struct {
 	MimeType   string `json:"mimeType"`
 	Size       int    `json:"size"`
 	Reused     bool   `json:"reused"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions sourced from
+	// content_metadata for image rows. Both nil for non-images and for
+	// image rows whose metadata is empty/sentinel.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
@@ -45,6 +50,11 @@ type UpdateDocumentResponse struct {
 	StorageBucketID   string `json:"storageBucketId"`
 	TemporaryLocation bool   `json:"temporaryLocation"`
 	DisplayName       string `json:"displayName"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions sourced from
+	// content_metadata. Both nil for non-image rows and for image rows
+	// whose metadata is empty/sentinel.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 func (r UpdateDocumentResponse) Render(w http.ResponseWriter) {
@@ -58,6 +68,11 @@ type ReplaceContentResponse struct {
 	ExternalID string `json:"externalID"`
 	MimeType   string `json:"mimeType"`
 	Size       int    `json:"size"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions for the
+	// just-replaced bytes, populated from the ProcessResult inside
+	// StoreAndLink. Both nil for non-image content.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 func (r ReplaceContentResponse) Render(w http.ResponseWriter) {

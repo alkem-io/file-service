@@ -22,4 +22,5 @@ type File struct {
 	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
 	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
 	TagsetId          pgtype.UUID        `json:"tagsetId"`
+	ContentMetadata   []byte             `json:"content_metadata"`
 }

@@ -2,6 +2,7 @@ package alkemiodb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
@@ -50,7 +51,11 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
-func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, error) {
+func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
+	raw, err := marshalContentMetadata(contentMetadata)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	id, err := a.queries.CreateDocument(ctx, queries.CreateDocumentParams{
 		ID:                uuidToPgx(doc.ID),
 		ExternalID:        doc.ExternalID,
@@ -64,6 +69,7 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, er
 		TagsetId:          uuidToPgxNullable(doc.TagsetID),
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
+		ContentMetadata:   raw,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -75,13 +81,18 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, er
 	return pgxToUUID(id), nil
 }
 
-func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int) error {
+func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
+	raw, err := marshalContentMetadata(contentMetadata)
+	if err != nil {
+		return err
+	}
 	rows, err := a.queries.UpdateDocumentFile(ctx, queries.UpdateDocumentFileParams{
-		ID:          uuidToPgx(id),
-		ExternalID:  externalID,
-		MimeType:    mimeType,
-		Size:        safeInt32(size),
-		UpdatedDate: timeToPgxNow(),
+		ID:              uuidToPgx(id),
+		ExternalID:      externalID,
+		MimeType:        mimeType,
+		Size:            safeInt32(size),
+		UpdatedDate:     timeToPgxNow(),
+		ContentMetadata: raw,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -121,6 +132,63 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 		return model.ErrDocumentNotFound
 	}
 	return nil
+}
+
+// BackfillContentMetadata persists computed content_metadata on a row without
+// bumping version. Compare-and-set: only writes when content_metadata is still
+// empty AND the row's externalID matches expectedExternalID. A 0-rows-affected
+// outcome means another writer (Replace, or another backfill) won the race; we
+// treat that as a non-error since the winner already wrote fresh metadata.
+// FR-018.
+func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error {
+	raw, err := marshalContentMetadata(contentMetadata)
+	if err != nil {
+		return err
+	}
+	// Defensive: writing "{}" would leave the row matching the lazy-backfill
+	// predicate (content_metadata = '{}'::jsonb), re-arming the helper to
+	// retry on every subsequent metadata read. Service layer never reaches
+	// here with an empty-equivalent value, but skip explicitly to keep the
+	// backfill loop closed even if a future caller misuses this method.
+	if string(raw) == `{}` {
+		return nil
+	}
+	_, err = a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
+		ID:              uuidToPgx(id),
+		ContentMetadata: raw,
+		ExternalID:      expectedExternalID,
+	})
+	// rowsAffected==0 → race lost (treated as success); any DB error
+	// surfaces normally.
+	return err
+}
+
+// marshalContentMetadata serializes the typed value to the JSONB shape stored
+// in the file.content_metadata column. Empty Populated → "{}". DecodeFailed
+// → {"_decodeFailed": true}. Both dims set → {"imageWidth": N, "imageHeight":
+// M}. Other shapes (e.g. non-image rows where Populated=true) default to "{}".
+//
+// Rejects half-populated dims (exactly one of ImageWidth / ImageHeight set):
+// silently serializing those as "{}" would round-trip the row as
+// "unmeasured" and trigger lazy-backfill on every read — masking what is
+// almost certainly a caller bug.
+func marshalContentMetadata(meta model.ContentMetadata) ([]byte, error) {
+	if !meta.Populated {
+		return []byte(`{}`), nil
+	}
+	if meta.DecodeFailed {
+		return []byte(`{"_decodeFailed":true}`), nil
+	}
+	if (meta.ImageWidth == nil) != (meta.ImageHeight == nil) {
+		return nil, errors.New("content metadata: ImageWidth and ImageHeight must both be set or both nil")
+	}
+	if meta.ImageWidth != nil && meta.ImageHeight != nil {
+		return json.Marshal(struct {
+			ImageWidth  int `json:"imageWidth"`
+			ImageHeight int `json:"imageHeight"`
+		}{*meta.ImageWidth, *meta.ImageHeight})
+	}
+	return []byte(`{}`), nil
 }
 
 func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error) {

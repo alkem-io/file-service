@@ -109,5 +109,8 @@ See `.specify/memory/constitution.md` for the complete set of
 principles and governance rules.
 
 ## Active Technologies
-- Go 1.26 (constitution-mandated) + chi v5.2.5 (HTTP), pgx v5.9.1 (DB), sqlc v1.30.0 (codegen), zap v1.27.1 (logging), nats.go v1.50.0 (messaging, optional), govips v2.17.0 (image processing), mimetype v1.4.13 (MIME detection), x/crypto v0.49.0 (SHA3-256), x/net v0.52.0 (h2c), google/uuid (UUIDv7), sony/gobreaker v2.4.0 (circuit breaker)
-- PostgreSQL (Alkemio DB, full CRUD on document table, read-only on all others), local filesystem (file bytes)
+- Go 1.26 (constitution-mandated) + govips v2.18.0 (libvips bindings — `Orientation()`, `RemoveMetadata()`, format exports), mimetype v1.4.13, chi v5.2.5, pgx v5.9.1, sqlc, zap v1.27.1
+- PostgreSQL (Alkemio shared DB; this service owns the `file` table and adds `content_metadata` JSONB) and local filesystem (file bytes; content-addressed by SHA3-256)
+
+## Recent Changes
+- 018-image-orient-dims: Added Go 1.26 (constitution-mandated) + govips v2.18.0 (libvips bindings), mimetype v1.4.13, chi v5.2.5, pgx v5.9.1, sqlc, zap v1.27.1

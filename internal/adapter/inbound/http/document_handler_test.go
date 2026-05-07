@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -17,26 +18,80 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service-go/internal/domain/port"
 	"github.com/alkem-io/file-service-go/internal/domain/service"
 )
 
 func newDocHandler() (*DocumentHandler, *mockDocRepo, *mockStorage) {
+	h, repo, storage, _ := newDocHandlerWithProcessor()
+	return h, repo, storage
+}
+
+// newDocHandlerWithProcessor returns the same handler/repo/storage trio as
+// newDocHandler plus the stubProcessor, so US1 tests can override its
+// per-test fields (Process dim returns, MeasureDims behavior, declared
+// MIME) before issuing the request.
+func newDocHandlerWithProcessor() (*DocumentHandler, *mockDocRepo, *mockStorage, *stubProcessor) {
 	repo := &mockDocRepo{}
 	storage := &mockStorage{}
+	processor := &stubProcessor{}
 	svc := &service.FileService{
 		Repo:      repo,
 		Auth:      &mockAuth{result: model.AuthResult{Allowed: true}},
 		Storage:   storage,
-		Processor: &stubProcessor{},
+		Processor: processor,
+		Logger:    zap.NewNop(),
 	}
-	return &DocumentHandler{Service: svc, MaxAge: 86400, Logger: zap.NewNop()}, repo, storage
+	return &DocumentHandler{Service: svc, MaxAge: 86400, Logger: zap.NewNop()}, repo, storage, processor
 }
 
-type stubProcessor struct{}
+func intp(v int) *int { return &v }
 
-func (p *stubProcessor) DetectMIME(_ []byte) string { return "application/octet-stream" }
-func (p *stubProcessor) Process(content []byte, mimeType string) ([]byte, string, error) {
-	return content, mimeType, nil
+type stubProcessor struct {
+	// Per-test overrides for Process result dims. Measured is derived from
+	// whether dims are set: tests that pin dims model the "decoder ran and
+	// produced dims" path; tests that leave them nil model the "no decoder
+	// available" path (Measured=false). Tests that need to exercise the
+	// "decoder ran but failed" path (Measured=true with nil dims, writing
+	// the _decodeFailed sentinel) must opt in via processMeasured.
+	processDimsW    *int
+	processDimsH    *int
+	processMeasured bool // when true, forces Measured=true regardless of dims
+
+	// MeasureDims override (lazy-backfill tests).
+	measureDimsW   *int
+	measureDimsH   *int
+	measureDimsErr error
+
+	// detectMIME override — when non-empty, replaces the default
+	// application/octet-stream so image-MIME tests exercise the
+	// dims-on-response paths.
+	detectMIME string
+}
+
+func (p *stubProcessor) DetectMIME(_ []byte) string {
+	if p.detectMIME != "" {
+		return p.detectMIME
+	}
+	return "application/octet-stream"
+}
+func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
+	// Mirror the marshalContentMetadata invariant: dims must be both set or both nil.
+	// Fail fast at the source so test setup bugs surface immediately.
+	if (p.processDimsW == nil) != (p.processDimsH == nil) {
+		return port.ProcessResult{}, fmt.Errorf("stubProcessor: inconsistent dims: width=%v height=%v", p.processDimsW, p.processDimsH)
+	}
+	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
+	return port.ProcessResult{
+		Content:     content,
+		MimeType:    mimeType,
+		ImageWidth:  p.processDimsW,
+		ImageHeight: p.processDimsH,
+		Measured:    measured,
+	}, nil
+}
+func (p *stubProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
 // runPatch wires a fresh handler + chi router and dispatches a single
@@ -1735,5 +1790,402 @@ func TestDocumentHandler_Copy_RejectsUnknownFields(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- US1: dim reporting on Create / ReplaceContent responses ---
+
+// TestDocumentHandler_Create_Image_ReturnsDims defends FR-014: a freshly-
+// uploaded image must surface imageWidth/imageHeight on the
+// CreateDocumentResponse.
+func TestDocumentHandler_Create_Image_ReturnsDims(t *testing.T) {
+	h, _, _, processor := newDocHandlerWithProcessor()
+	processor.detectMIME = "image/jpeg"
+	processor.processDimsW = intp(800)
+	processor.processDimsH = intp(600)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "photo.jpg")
+	_, _ = part.Write([]byte("\xFF\xD8\xFF\xE0jpeg-bytes"))
+	_ = writer.WriteField("displayName", "photo.jpg")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp CreateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
+		t.Errorf("imageWidth = %v, want 800", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
+		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
+	}
+}
+
+// TestDocumentHandler_Create_PhonePhoto_Orient6_ReportsRotatedDims is the
+// SC-001 regression repro. Mock processor reports post-rotation dims
+// (127×1082) for input that would have raw dims 1082×127 + orientation 6.
+// Asserts the CreateDocumentResponse carries the rotated values.
+func TestDocumentHandler_Create_PhonePhoto_Orient6_ReportsRotatedDims(t *testing.T) {
+	h, _, _, processor := newDocHandlerWithProcessor()
+	processor.detectMIME = "image/jpeg"
+	processor.processDimsW = intp(127)  // post-rotation width
+	processor.processDimsH = intp(1082) // post-rotation height
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "phone.jpg")
+	_, _ = part.Write([]byte("phone-photo-bytes"))
+	_ = writer.WriteField("displayName", "phone.jpg")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp CreateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 127 {
+		t.Errorf("imageWidth = %v, want 127 (post-rotation)", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 1082 {
+		t.Errorf("imageHeight = %v, want 1082 (post-rotation)", resp.ImageHeight)
+	}
+}
+
+// TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload defends
+// SC-005 / FR-010 on the new PNG canonicalization path: the same bytes
+// uploaded twice must dedup on the second upload (reused=true). The
+// canonical processing is deterministic, so the externalID hash is
+// stable across re-uploads.
+func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
+	h, repo, _, processor := newDocHandlerWithProcessor()
+	processor.detectMIME = "image/png"
+	processor.processDimsW = intp(512)
+	processor.processDimsH = intp(1024)
+
+	bucket := uuid.New()
+	pngBytes := []byte("\x89PNG\r\n\x1a\nfake-but-mock-hashes-deterministically")
+	postPNG := func() *httptest.ResponseRecorder {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, _ := writer.CreateFormFile("file", "rotated.png")
+		_, _ = part.Write(pngBytes)
+		_ = writer.WriteField("displayName", "rotated.png")
+		_ = writer.WriteField("storageBucketId", bucket.String())
+		_ = writer.WriteField("authorizationId", uuid.New().String())
+		_ = writer.Close()
+
+		r := chi.NewRouter()
+		r.Post("/internal/file", h.Create)
+		req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// First upload: fresh insert, reused=false. Capture the externalID.
+	rr1 := postPNG()
+	if rr1.Code != http.StatusCreated {
+		t.Fatalf("first upload: status = %d, want 201, body: %s", rr1.Code, rr1.Body.String())
+	}
+	var resp1 CreateDocumentResponse
+	if err := json.Unmarshal(rr1.Body.Bytes(), &resp1); err != nil {
+		t.Fatalf("unmarshal #1: %v", err)
+	}
+	if resp1.Reused {
+		t.Errorf("first upload Reused = true, want false")
+	}
+
+	// Wire up the dedup hit for the second request: mockRepo.findDoc
+	// returning a row with the same externalID + bucket. ContentMetadata
+	// Populated=true so the lazy-backfill skips it (already measured).
+	repo.findDoc = &model.Document{
+		ID:              uuid.MustParse(resp1.ID),
+		ExternalID:      resp1.ExternalID,
+		MimeType:        "image/png",
+		Size:            resp1.Size,
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: intp(512), ImageHeight: intp(1024)},
+		ImageWidth:      intp(512),
+		ImageHeight:     intp(1024),
+	}
+
+	rr2 := postPNG()
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("second upload: status = %d, want 201, body: %s", rr2.Code, rr2.Body.String())
+	}
+	var resp2 CreateDocumentResponse
+	if err := json.Unmarshal(rr2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("unmarshal #2: %v", err)
+	}
+	if !resp2.Reused {
+		t.Errorf("second upload Reused = false, want true (dedup hit)")
+	}
+	if resp2.ExternalID != resp1.ExternalID {
+		t.Errorf("externalID mismatch on dedup: first=%q, second=%q", resp1.ExternalID, resp2.ExternalID)
+	}
+	// FR-004: every metadata-returning response carries dims, including the dedup-hit branch.
+	if resp2.ImageWidth == nil || *resp2.ImageWidth != 512 {
+		t.Errorf("dedup-hit response imageWidth = %v, want 512", resp2.ImageWidth)
+	}
+	if resp2.ImageHeight == nil || *resp2.ImageHeight != 1024 {
+		t.Errorf("dedup-hit response imageHeight = %v, want 1024", resp2.ImageHeight)
+	}
+}
+
+// --- Phase 7: lazy-backfill on Copy and PATCH for legacy image rows ---
+
+// copyLegacyImageRow shared helper: prepares a handler with a legacy
+// image source row (no dims) and a storage reading PNG-ish bytes whose
+// MeasureDims returns the supplied (w, h, err). Returns the recorder and
+// captured repo so callers can assert.
+func runCopyLegacyImage(
+	t *testing.T,
+	measureW *int, measureH *int, measureErr error,
+	storageData []byte, storageErr error,
+	backfillErr error,
+) (*httptest.ResponseRecorder, *mockDocRepo) {
+	t.Helper()
+	h, repo, storage, processor := newDocHandlerWithProcessor()
+	sourceID := uuid.New()
+	repo.doc = model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-png",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "legacy.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		// dims nil → legacy
+	}
+	storage.data = storageData
+	storage.err = storageErr
+	processor.measureDimsW = measureW
+	processor.measureDimsH = measureH
+	processor.measureDimsErr = measureErr
+	repo.backfillErr = backfillErr
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr, repo
+}
+
+// runPatchLegacyImage mirrors runCopyLegacyImage for the PATCH path.
+func runPatchLegacyImage(
+	t *testing.T,
+	measureW *int, measureH *int, measureErr error,
+	storageData []byte, storageErr error,
+	backfillErr error,
+) (*httptest.ResponseRecorder, *mockDocRepo) {
+	t.Helper()
+	h, repo, storage, processor := newDocHandlerWithProcessor()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		ExternalID:      "sha3-of-png",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "legacy.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	storage.data = storageData
+	storage.err = storageErr
+	processor.measureDimsW = measureW
+	processor.measureDimsH = measureH
+	processor.measureDimsErr = measureErr
+	repo.backfillErr = backfillErr
+
+	r := chi.NewRouter()
+	r.Patch("/internal/file/{id}", h.Update)
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.png"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr, repo
+}
+
+func TestDocumentHandler_Copy_LegacyImageRow_LazyBackfillsBoth(t *testing.T) {
+	rr, repo := runCopyLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp CreateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
+		t.Errorf("imageWidth = %v, want 800", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
+		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
+	}
+	if repo.backfillCalls < 1 {
+		t.Errorf("backfill calls = %d, want >= 1 (source row)", repo.backfillCalls)
+	}
+	// Persisted payload should be the dims, not the sentinel.
+	got := repo.lastBackfillPayload
+	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
+		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
+	}
+}
+
+func TestDocumentHandler_Patch_LegacyImageRow_LazyBackfills(t *testing.T) {
+	rr, repo := runPatchLegacyImage(t, intp(640), intp(480), nil, []byte("png-bytes"), nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 640 {
+		t.Errorf("imageWidth = %v, want 640", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 480 {
+		t.Errorf("imageHeight = %v, want 480", resp.ImageHeight)
+	}
+	if repo.backfillCalls < 1 {
+		t.Errorf("backfill calls = %d, want >= 1", repo.backfillCalls)
+	}
+	got := repo.lastBackfillPayload
+	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
+		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
+	}
+}
+
+// SC-010: MeasureDims returns an error → response 200, dims absent,
+// content_metadata persisted as the {_decodeFailed: true} sentinel.
+func TestDocumentHandler_Patch_DecodeFailure_PersistsSentinel(t *testing.T) {
+	rr, repo := runPatchLegacyImage(t, nil, nil, errors.New("vips load: corrupt header"), []byte("corrupt-bytes"), nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth != nil || resp.ImageHeight != nil {
+		t.Errorf("expected nil dims on decode failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
+	}
+	if repo.backfillCalls < 1 {
+		t.Errorf("backfill not called; sentinel must be persisted")
+	}
+	got := repo.lastBackfillPayload
+	if !got.Populated || !got.DecodeFailed {
+		t.Errorf("backfill payload = %+v, expected Populated=true with DecodeFailed=true", got)
+	}
+}
+
+// SC-012 / FR-020 case b: Storage.Read fails → 200, no dims, no persist.
+func TestDocumentHandler_Patch_StorageReadFails_GracefulDegrade(t *testing.T) {
+	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, nil, errors.New("transient I/O"), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth != nil || resp.ImageHeight != nil {
+		t.Errorf("expected nil dims after Storage.Read failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("backfill calls = %d, want 0 (no sentinel on transient failures, FR-020 b)", repo.backfillCalls)
+	}
+}
+
+// SC-013 / FR-020 case c: BackfillContentMetadata persist fails →
+// response still carries the just-computed dims; row stays empty so the
+// next read retries.
+func TestDocumentHandler_Patch_BackfillPersistFails_ResponseStillCarriesDims(t *testing.T) {
+	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, errors.New("DB transient"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
+		t.Errorf("imageWidth = %v, want 800 (response carries dims even though persist failed)", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
+		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
+	}
+	if repo.backfillCalls < 1 {
+		t.Errorf("backfill must still be attempted before failing")
+	}
+}
+
+// TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims defends FR-004
+// for the Replace endpoint. PUT new image bytes; response carries the
+// post-rotation dims sourced from StoredFile.ImageWidth/Height (which the
+// service plumbs from ProcessResult inside StoreAndLink).
+func TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims(t *testing.T) {
+	h, repo, _, processor := newDocHandlerWithProcessor()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old-hash", MimeType: "image/jpeg"}
+	processor.detectMIME = "image/jpeg"
+	processor.processDimsW = intp(640)
+	processor.processDimsH = intp(480)
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("new image bytes"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp ReplaceContentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 640 {
+		t.Errorf("imageWidth = %v, want 640", resp.ImageWidth)
+	}
+	if resp.ImageHeight == nil || *resp.ImageHeight != 480 {
+		t.Errorf("imageHeight = %v, want 480", resp.ImageHeight)
 	}
 }

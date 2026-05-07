@@ -16,7 +16,7 @@ import (
 func columns() []string {
 	return []string{"id", "externalID", "mimeType", "size", "displayName", "createdBy",
 		"temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-		"createdDate", "updatedDate", "version"}
+		"createdDate", "updatedDate", "version", "content_metadata"}
 }
 
 func TestMock_GetByID_Found(t *testing.T) {
@@ -47,6 +47,7 @@ func TestMock_GetByID_Found(t *testing.T) {
 			pgtype.Timestamptz{Time: now, Valid: true},
 			pgtype.Timestamptz{Time: now, Valid: true},
 			int32(1),
+			[]byte("{}"),
 		))
 
 	a := New(mock)
@@ -112,6 +113,7 @@ func TestMock_Create_Success(t *testing.T) {
 			pgxmock.AnyArg(), // tagsetId
 			pgxmock.AnyArg(), // createdDate
 			pgxmock.AnyArg(), // updatedDate
+			[]byte(`{}`),     // content_metadata: empty Populated=false → "{}"
 		).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 
@@ -127,7 +129,7 @@ func TestMock_Create_Success(t *testing.T) {
 		AuthorizationID: uuid.New(),
 		CreatedDate:     now,
 		UpdatedDate:     now,
-	})
+	}, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -146,12 +148,14 @@ func TestMock_UpdateFile_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
+	// Param order: id, externalID, mimeType, size, updatedDate, content_metadata.
+	// Content metadata is the empty-Populated case → marshals to "{}".
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "newhash", "image/jpeg", 999)
+	err = a.UpdateFile(context.Background(), uuid.New(), "newhash", "image/jpeg", 999, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
@@ -168,11 +172,11 @@ func TestMock_UpdateFile_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1)
+	err = a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -315,11 +319,11 @@ func TestMock_UpdateFile_DBError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "h", "t", 1)
+	err = a.UpdateFile(context.Background(), uuid.New(), "h", "t", 1, model.ContentMetadata{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -394,6 +398,7 @@ func TestMock_Create_DBError(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			[]byte(`{}`), // content_metadata: empty Populated=false → "{}"
 		).
 		WillReturnError(errors.New("FK constraint violation"))
 
@@ -404,7 +409,7 @@ func TestMock_Create_DBError(t *testing.T) {
 		AuthorizationID: uuid.New(),
 		CreatedDate:     time.Now(),
 		UpdatedDate:     time.Now(),
-	})
+	}, model.ContentMetadata{})
 	if err == nil {
 		t.Fatal("expected error")
 	}

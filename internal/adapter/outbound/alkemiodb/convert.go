@@ -1,6 +1,7 @@
 package alkemiodb
 
 import (
+	"encoding/json"
 	"math"
 	"time"
 
@@ -10,6 +11,33 @@ import (
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
+
+// parseContentMetadata produces the typed view of a content_metadata JSONB
+// blob. Empty / `{}` → Populated=false. Otherwise Populated=true with the
+// extracted dim/sentinel fields. Unknown JSON keys are tolerated (FR-017) —
+// json.Unmarshal into the targeted struct ignores extras. Malformed JSON
+// surfaces as Populated=true with no dims; we don't crash on bad bytes.
+func parseContentMetadata(raw []byte) model.ContentMetadata {
+	meta := model.ContentMetadata{}
+	if len(raw) == 0 || string(raw) == `{}` {
+		return meta // Populated=false
+	}
+	meta.Populated = true
+	var v struct {
+		ImageWidth   *int `json:"imageWidth,omitempty"`
+		ImageHeight  *int `json:"imageHeight,omitempty"`
+		DecodeFailed bool `json:"_decodeFailed,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		// Malformed JSON: surface as Populated but no dims; future
+		// revisits can decide whether to retry. Don't crash.
+		return meta
+	}
+	meta.ImageWidth = v.ImageWidth
+	meta.ImageHeight = v.ImageHeight
+	meta.DecodeFailed = v.DecodeFailed
+	return meta
+}
 
 func uuidToPgx(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
@@ -82,10 +110,11 @@ type documentRow struct {
 	CreatedDate       pgtype.Timestamptz
 	UpdatedDate       pgtype.Timestamptz
 	Version           int32
+	ContentMetadata   []byte
 }
 
 func documentFromRow(r documentRow) model.Document {
-	return model.Document{
+	doc := model.Document{
 		ID:                pgxToUUID(r.ID),
 		ExternalID:        r.ExternalID,
 		MimeType:          r.MimeType,
@@ -100,6 +129,15 @@ func documentFromRow(r documentRow) model.Document {
 		UpdatedDate:       pgxToTime(r.UpdatedDate),
 		Version:           int(r.Version),
 	}
+	doc.ContentMetadata = parseContentMetadata(r.ContentMetadata)
+	// Mirror the dim fields onto the Document struct for handlers that
+	// consume the wire shape directly. Sentinel rows (DecodeFailed=true)
+	// surface as nil dims even though Populated=true.
+	if !doc.ContentMetadata.DecodeFailed {
+		doc.ImageWidth = doc.ContentMetadata.ImageWidth
+		doc.ImageHeight = doc.ContentMetadata.ImageHeight
+	}
+	return doc
 }
 
 func rowToDocument(row queries.GetDocumentByIDRow) model.Document {

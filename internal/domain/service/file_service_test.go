@@ -32,6 +32,17 @@ type mockRepo struct {
 	deleteErr     error
 	count         int
 	countErr      error
+
+	// Captured args from Create / UpdateFile content_metadata params.
+	lastCreateContentMetadata     model.ContentMetadata
+	lastUpdateFileContentMetadata model.ContentMetadata
+
+	// Lazy-backfill capture (US1).
+	backfillCalls          int
+	lastBackfillID         uuid.UUID
+	lastBackfillExternalID string
+	lastBackfillPayload    model.ContentMetadata
+	backfillErr            error
 }
 
 // Ensure mockRepo implements the full interface at compile time.
@@ -52,15 +63,24 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 	}
 	return *m.findDoc, nil
 }
-func (m *mockRepo) Create(_ context.Context, doc model.Document) (uuid.UUID, error) {
+func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
+	m.lastCreateContentMetadata = contentMetadata
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
 	}
 	return doc.ID, m.createErr
 }
-func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
+	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
+}
+func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) error {
+	m.backfillCalls++
+	m.lastBackfillID = id
+	m.lastBackfillExternalID = expectedExternalID
+	m.lastBackfillPayload = metadata
+	return m.backfillErr
 }
 func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return m.updateErr
@@ -104,14 +124,37 @@ func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil
 
 type mockProcessor struct {
 	processErr error
+
+	// Per-test overrides for Process result fields. Defaults: Process returns
+	// {Content, MimeType, nil, nil, true} so the marshaling-failed-decode
+	// branch in service.marshalContentMetadata is exercised by image-MIME
+	// inputs unless dims are populated explicitly.
+	processDimsW *int
+	processDimsH *int
+
+	// MeasureDims override — used by tests that exercise the lazy-backfill
+	// helper (backfillIfNeeded). Defaults: returns (nil, nil, nil) so the
+	// helper short-circuits without persisting.
+	measureDimsW   *int
+	measureDimsH   *int
+	measureDimsErr error
 }
 
 func (m *mockProcessor) DetectMIME(_ []byte) string { return "application/octet-stream" }
-func (m *mockProcessor) Process(content []byte, mimeType string) ([]byte, string, error) {
+func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
 	if m.processErr != nil {
-		return nil, "", m.processErr
+		return port.ProcessResult{}, m.processErr
 	}
-	return content, mimeType, nil
+	return port.ProcessResult{
+		Content:     content,
+		MimeType:    mimeType,
+		ImageWidth:  m.processDimsW,
+		ImageHeight: m.processDimsH,
+		Measured:    true,
+	}, nil
+}
+func (m *mockProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+	return m.measureDimsW, m.measureDimsH, m.measureDimsErr
 }
 
 // --- Tests ---
@@ -452,13 +495,16 @@ func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return m.find()
 }
-func (m *mockRepoRace) Create(_ context.Context, _ model.Document) (uuid.UUID, error) {
+func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
 }
-func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+	return nil
+}
+func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *mockRepoRace) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -696,6 +742,41 @@ func TestCopyDocument_SkipDedup_BypassesDedup(t *testing.T) {
 	}
 }
 
+// CR-3 regression: Copy from a source whose content_metadata is the
+// _decodeFailed sentinel must propagate that sentinel verbatim to the new
+// row, not rebuild from (nil, nil) dims into an empty {}. Otherwise the
+// destination row's first metadata-returning read re-runs the doomed
+// decode work the sentinel exists to short-circuit.
+func TestCopyDocument_PropagatesDecodeFailedSentinel(t *testing.T) {
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-corrupt",
+		MimeType:        "image/jpeg",
+		Size:            42,
+		DisplayName:     "broken.jpg",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		// Sentinel: decoder ran and confirmed bytes unreadable.
+		ContentMetadata: model.ContentMetadata{Populated: true, DecodeFailed: true},
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := repo.lastCreateContentMetadata
+	if !got.Populated || !got.DecodeFailed {
+		t.Errorf("Create content_metadata = %+v, want Populated=true with DecodeFailed=true (sentinel must survive Copy)", got)
+	}
+}
+
 // CopyDocument when source doesn't exist surfaces ErrDocumentNotFound
 // (handler maps to 404).
 func TestCopyDocument_SourceNotFound(t *testing.T) {
@@ -748,13 +829,16 @@ func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 func (m *copyRaceRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
 }
-func (m *copyRaceRepo) Create(_ context.Context, _ model.Document) (uuid.UUID, error) {
+func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
 }
-func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int) error {
+func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+	return nil
+}
+func (m *copyRaceRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *copyRaceRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -1144,5 +1228,378 @@ func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 	}
 	if dedupStorage.deleted {
 		t.Error("should NOT delete file on rollback when dedup matched (Created=false)")
+	}
+}
+
+// --- US1: lazy-backfill on Create dedup hit (legacy image rows) ---
+
+// TestCreateDocument_DedupHitOnLegacyImageRow_TriggersBackfill verifies the
+// SC-009 partial path: when Create finds an existing image row whose
+// content_metadata is empty, the service calls MeasureDims, persists the
+// dims via BackfillContentMetadata, and surfaces them on the returned doc.
+func TestCreateDocument_DedupHitOnLegacyImageRow_TriggersBackfill(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	// Legacy row: image MIME, content_metadata empty (ImageWidth/Height nil).
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		Size:            42,
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	storage := &mockStorage{data: []byte("fake-jpeg-bytes")}
+	processor := &mockProcessor{
+		measureDimsW: intpService(800),
+		measureDimsH: intpService(600),
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !doc.Reused {
+		t.Error("expected Reused=true on dedup hit")
+	}
+	if repo.backfillCalls != 1 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 1", repo.backfillCalls)
+	}
+	if doc.ImageWidth == nil || *doc.ImageWidth != 800 {
+		t.Errorf("ImageWidth = %v, want 800", doc.ImageWidth)
+	}
+	if doc.ImageHeight == nil || *doc.ImageHeight != 600 {
+		t.Errorf("ImageHeight = %v, want 600", doc.ImageHeight)
+	}
+	got := repo.lastBackfillPayload
+	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || *got.ImageWidth != 800 || got.ImageHeight == nil || *got.ImageHeight != 600 {
+		t.Errorf("backfill payload = %+v, want Populated=true with dims 800x600", got)
+	}
+	if repo.lastBackfillExternalID != legacyDoc.ExternalID {
+		t.Errorf("backfill expectedExternalID = %q, want %q", repo.lastBackfillExternalID, legacyDoc.ExternalID)
+	}
+}
+
+// Sanity: dedup hit on a non-image row never triggers backfill.
+func TestCreateDocument_DedupHitOnNonImage_NoBackfill(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "application/pdf",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "doc.pdf",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 0 (non-image)", repo.backfillCalls)
+	}
+}
+
+// MeasureDims-failure path: decoder ran and failed → persists _decodeFailed
+// sentinel, response omits dims.
+func TestCreateDocument_DedupHit_MeasureDimsFails_PersistsSentinel(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	storage := &mockStorage{data: []byte("corrupt-image-bytes")}
+	processor := &mockProcessor{measureDimsErr: errors.New("vips load failed")}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.ImageWidth != nil || doc.ImageHeight != nil {
+		t.Errorf("dims = (%v, %v), want both nil after decode failure", doc.ImageWidth, doc.ImageHeight)
+	}
+	if repo.backfillCalls != 1 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 1 (sentinel persist)", repo.backfillCalls)
+	}
+	got := repo.lastBackfillPayload
+	if !got.Populated || !got.DecodeFailed {
+		t.Errorf("backfill payload = %+v, want Populated=true with DecodeFailed=true", got)
+	}
+	if repo.lastBackfillExternalID != legacyDoc.ExternalID {
+		t.Errorf("backfill expectedExternalID = %q, want %q", repo.lastBackfillExternalID, legacyDoc.ExternalID)
+	}
+}
+
+// (nil, nil, nil) from MeasureDims = no decoder available (no-vips stub):
+// service skips persist, response omits dims.
+func TestCreateDocument_DedupHit_NoDecoderAvailable_SkipsPersist(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	storage := &mockStorage{data: []byte("png-bytes")}
+	// mockProcessor default: MeasureDims returns (nil, nil, nil)
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.png",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.ImageWidth != nil || doc.ImageHeight != nil {
+		t.Errorf("dims = (%v, %v), want both nil", doc.ImageWidth, doc.ImageHeight)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 0 (no decoder = skip persist)", repo.backfillCalls)
+	}
+}
+
+// Storage.Read failure: response degrades gracefully — no dims, no
+// sentinel persist (could be transient, retry next read).
+func TestCreateDocument_DedupHit_StorageReadFails_GracefulDegrade(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	storage := &mockStorage{readErr: errors.New("disk error")}
+	processor := &mockProcessor{measureDimsW: intpService(800), measureDimsH: intpService(600)}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.ImageWidth != nil || doc.ImageHeight != nil {
+		t.Errorf("dims = (%v, %v), want both nil after storage read failure", doc.ImageWidth, doc.ImageHeight)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 0 (storage read failed = skip)", repo.backfillCalls)
+	}
+}
+
+// BackfillContentMetadata persist failure: response STILL carries the
+// just-computed dims (FR-020 case c).
+func TestCreateDocument_DedupHit_PersistFails_ResponseStillCarriesDims(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc, backfillErr: errors.New("db connection lost")}
+	storage := &mockStorage{data: []byte("jpeg-bytes")}
+	processor := &mockProcessor{measureDimsW: intpService(800), measureDimsH: intpService(600)}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.ImageWidth == nil || *doc.ImageWidth != 800 {
+		t.Errorf("ImageWidth = %v, want 800 (response carries dims even on persist failure)", doc.ImageWidth)
+	}
+	if doc.ImageHeight == nil || *doc.ImageHeight != 600 {
+		t.Errorf("ImageHeight = %v, want 600", doc.ImageHeight)
+	}
+	if repo.backfillCalls != 1 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 1 (attempted)", repo.backfillCalls)
+	}
+}
+
+// Already-measured dedup hit: skip backfill, dims propagate from the row.
+func TestCreateDocument_DedupHit_AlreadyMeasured_SkipsBackfill(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	w, h := 1200, 900
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
+		ImageWidth:      &w,
+		ImageHeight:     &h,
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	processor := &mockProcessor{measureDimsW: intpService(0), measureDimsH: intpService(0)}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.ImageWidth == nil || *doc.ImageWidth != 1200 {
+		t.Errorf("ImageWidth = %v, want 1200 (from row)", doc.ImageWidth)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 0 (already measured)", repo.backfillCalls)
+	}
+}
+
+// CR-4 regression: a row with the persisted _decodeFailed sentinel must
+// short-circuit the lazy-backfill on subsequent metadata-returning reads,
+// instead of looping decode attempts on every request.
+func TestCreateDocument_DedupHit_DecodeFailedSentinel_SkipsBackfill(t *testing.T) {
+	existingID := uuid.New()
+	bucket := uuid.New()
+	legacyDoc := model.Document{
+		ID:              existingID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/jpeg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+		// Populated=true with DecodeFailed=true → permanent sentinel.
+		ContentMetadata: model.ContentMetadata{Populated: true, DecodeFailed: true},
+	}
+
+	repo := &mockRepo{findDoc: &legacyDoc}
+	storage := &mockStorage{data: []byte("anything")}
+	processor := &mockProcessor{measureDimsW: intpService(800), measureDimsH: intpService(600)}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "img.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.backfillCalls != 0 {
+		t.Errorf("BackfillContentMetadata calls = %d, want 0 (sentinel must short-circuit)", repo.backfillCalls)
+	}
+	if doc.ImageWidth != nil || doc.ImageHeight != nil {
+		t.Errorf("dims = (%v, %v), want both nil for sentinel row", doc.ImageWidth, doc.ImageHeight)
+	}
+}
+
+func intpService(v int) *int { return &v }
+
+// TestProcessResultToContentMetadata_AllBranches locks in the four-case
+// decision tree that turns a ProcessResult into the typed ContentMetadata
+// the adapter persists (Decision 9 / T024). Direct unit test because the
+// four cases would be tedious to thread through every CreateDocument-driven
+// integration scenario.
+func TestProcessResultToContentMetadata_AllBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		in   port.ProcessResult
+		mime string
+		want model.ContentMetadata
+	}{
+		{
+			name: "dims present → Populated with dims",
+			in:   port.ProcessResult{MimeType: "image/jpeg", ImageWidth: intpService(800), ImageHeight: intpService(600), Measured: true},
+			mime: "image/jpeg",
+			want: model.ContentMetadata{Populated: true, ImageWidth: intpService(800), ImageHeight: intpService(600)},
+		},
+		{
+			name: "non-image MIME → empty (Populated=false → '{}' on persist)",
+			in:   port.ProcessResult{MimeType: "application/pdf", Measured: false},
+			mime: "application/pdf",
+			want: model.ContentMetadata{},
+		},
+		{
+			name: "image MIME + Measured=false → empty (no decoder, retry later)",
+			in:   port.ProcessResult{MimeType: "image/png", Measured: false},
+			mime: "image/png",
+			want: model.ContentMetadata{},
+		},
+		{
+			name: "image MIME + Measured=true + nil dims → _decodeFailed sentinel",
+			in:   port.ProcessResult{MimeType: "image/jpeg", Measured: true},
+			mime: "image/jpeg",
+			want: model.ContentMetadata{Populated: true, DecodeFailed: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processResultToContentMetadata(tc.in, tc.mime)
+			if got.Populated != tc.want.Populated || got.DecodeFailed != tc.want.DecodeFailed {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+			if (got.ImageWidth == nil) != (tc.want.ImageWidth == nil) {
+				t.Errorf("ImageWidth nil-ness mismatch: got %v, want %v", got.ImageWidth, tc.want.ImageWidth)
+			}
+			if got.ImageWidth != nil && tc.want.ImageWidth != nil && *got.ImageWidth != *tc.want.ImageWidth {
+				t.Errorf("ImageWidth = %d, want %d", *got.ImageWidth, *tc.want.ImageWidth)
+			}
+			if (got.ImageHeight == nil) != (tc.want.ImageHeight == nil) {
+				t.Errorf("ImageHeight nil-ness mismatch: got %v, want %v", got.ImageHeight, tc.want.ImageHeight)
+			}
+			if got.ImageHeight != nil && tc.want.ImageHeight != nil && *got.ImageHeight != *tc.want.ImageHeight {
+				t.Errorf("ImageHeight = %d, want %d", *got.ImageHeight, *tc.want.ImageHeight)
+			}
+		})
 	}
 }

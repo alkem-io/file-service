@@ -6,6 +6,29 @@ import (
 	"github.com/google/uuid"
 )
 
+// ContentMetadata captures the typed view of the file.content_metadata
+// JSONB column. Empty (Populated=false) means the row has no metadata
+// recorded. Populated=true with DecodeFailed=true means the decoder ran
+// and confirmed the bytes are unreadable — a permanent sentinel; the
+// lazy-backfill MUST short-circuit on this. Populated=true with
+// ImageWidth/ImageHeight non-nil is the normal measured case. Populated
+// can be true with all other fields zero/nil for non-image rows.
+type ContentMetadata struct {
+	ImageWidth   *int
+	ImageHeight  *int
+	DecodeFailed bool
+	// Populated tracks whether the JSONB column was non-empty (i.e. not
+	// `{}`). A read of an empty `{}` column produces Populated=false; a
+	// read of any non-empty JSON object — including {"_decodeFailed":
+	// true} — produces Populated=true. Lazy-backfill skips when
+	// Populated=true regardless of dim fields.
+	Populated bool
+}
+
+// IsEmpty reports whether this metadata represents an empty content_metadata
+// column (the legacy state). Synonym for !m.Populated.
+func (m ContentMetadata) IsEmpty() bool { return !m.Populated }
+
 // Document represents a full document record from Alkemio's document table.
 type Document struct {
 	ID                uuid.UUID
@@ -27,6 +50,21 @@ type Document struct {
 	// When Reused is true, the caller-supplied AuthorizationID and TagsetID
 	// were ignored — the existing row's values are authoritative.
 	Reused bool
+
+	// ContentMetadata is the typed view of the file.content_metadata JSONB
+	// column. Single source of truth for the row's stored metadata; the
+	// ImageWidth / ImageHeight mirrors below are convenience fields for
+	// the wire shape and stay in sync with this value.
+	ContentMetadata ContentMetadata
+
+	// ImageWidth and ImageHeight are post-rotation pixel dimensions for
+	// raster images, SVG (from viewBox), and GIF (canvas dims). Both nil
+	// when the upload is not an image, or when the row's content_metadata
+	// is empty/sentinel. Mirror of ContentMetadata.ImageWidth/ImageHeight;
+	// kept on the struct so handlers don't have to walk into the typed
+	// metadata for the common dim-rendering path.
+	ImageWidth  *int
+	ImageHeight *int
 }
 
 // CreateDocumentInput contains fields needed to create a new document.
@@ -68,6 +106,13 @@ type StoredFile struct {
 	MimeType   string
 	Size       int
 	Created    bool // true if a new file was written; false if dedup matched an existing file
+
+	// ImageWidth and ImageHeight are post-rotation pixel dimensions for
+	// the just-stored bytes, populated by StoreAndLink from the result of
+	// Process. Nil for non-image content. Used by the Replace handler to
+	// surface dims on ReplaceContentResponse without re-reading the row.
+	ImageWidth  *int
+	ImageHeight *int
 }
 
 // AuthResult represents the outcome of an authorization check.
