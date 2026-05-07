@@ -1,6 +1,7 @@
 package alkemiodb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -120,7 +121,7 @@ func TestCreateAndDelete(t *testing.T) {
 		UpdatedDate:       now,
 	}
 
-	createdID, err := a.Create(context.Background(), doc)
+	createdID, err := a.Create(context.Background(), doc, []byte("{}"))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -171,14 +172,14 @@ func TestUpdateFile(t *testing.T) {
 	docID := uuid.UUID(id)
 
 	newExtID := "updated-" + uuid.New().String()[:8]
-	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99)
+	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99, []byte("{}"))
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
 	// Restore original values
 	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize))
+		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize), []byte("{}"))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -192,7 +193,7 @@ func TestUpdateFile_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1)
+	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, []byte("{}"))
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -283,5 +284,144 @@ func TestDelete_NotFound(t *testing.T) {
 	_, err := a.Delete(context.Background(), uuid.New())
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
+	}
+}
+
+// --- Phase 7: BackfillContentMetadata integration tests (FR-018) ---
+
+// createTestRow creates a real `file` row (with valid FKs) so the test
+// can exercise BackfillContentMetadata against a row that actually
+// exists. Returns the row's ID and a teardown function.
+func createTestRow(t *testing.T, pool *pgxpool.Pool, contentMetadata []byte) (uuid.UUID, func()) {
+	t.Helper()
+	a := New(pool)
+
+	// Need valid FK references — pull from an existing row.
+	var storageBucketID [16]byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT "storageBucketId" FROM file WHERE "storageBucketId" IS NOT NULL LIMIT 1`,
+	).Scan(&storageBucketID); err != nil {
+		t.Skipf("no existing storage bucket FK to borrow: %v", err)
+	}
+
+	authUUID, _ := uuid.NewV7()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO authorization_policy (id, "credentialRules", "privilegeRules", type, version)
+		 VALUES ($1, '[]', '[]', 'document', 1)`,
+		authUUID,
+	); err != nil {
+		t.Skipf("cannot create test auth policy: %v", err)
+	}
+
+	docID, _ := uuid.NewV7()
+	now := time.Now()
+	doc := model.Document{
+		ID:                docID,
+		ExternalID:        "backfill-test-" + docID.String()[:8],
+		MimeType:          "image/png",
+		Size:              123,
+		DisplayName:       "backfill-test.png",
+		TemporaryLocation: false,
+		StorageBucketID:   uuid.UUID(storageBucketID),
+		AuthorizationID:   authUUID,
+		CreatedDate:       now,
+		UpdatedDate:       now,
+	}
+	if _, err := a.Create(context.Background(), doc, contentMetadata); err != nil {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
+		t.Fatalf("Create test row: %v", err)
+	}
+	return docID, func() {
+		_, _ = a.Delete(context.Background(), docID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
+	}
+}
+
+// SC-011: BackfillContentMetadata writes content_metadata without bumping
+// the version column.
+func TestAdapter_BackfillContentMetadata_DoesNotBumpVersion(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	a := New(pool)
+
+	docID, cleanup := createTestRow(t, pool, []byte(`{}`))
+	defer cleanup()
+
+	// Read initial version.
+	var versionBefore int32
+	if err := pool.QueryRow(context.Background(),
+		`SELECT version FROM file WHERE id = $1`, docID,
+	).Scan(&versionBefore); err != nil {
+		t.Fatalf("read version before: %v", err)
+	}
+
+	if err := a.BackfillContentMetadata(context.Background(), docID, []byte(`{"imageWidth":100,"imageHeight":50}`)); err != nil {
+		t.Fatalf("BackfillContentMetadata: %v", err)
+	}
+
+	// Verify content_metadata changed AND version did not bump.
+	var versionAfter int32
+	var meta []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT version, "content_metadata" FROM file WHERE id = $1`, docID,
+	).Scan(&versionAfter, &meta); err != nil {
+		t.Fatalf("read after backfill: %v", err)
+	}
+	if versionAfter != versionBefore {
+		t.Errorf("version bumped: before=%d, after=%d (FR-018 disjoint-write)", versionBefore, versionAfter)
+	}
+	// Postgres JSONB normalizes whitespace; just check the field is present.
+	if !bytes.Contains(meta, []byte(`"imageWidth"`)) || !bytes.Contains(meta, []byte(`100`)) {
+		t.Errorf("content_metadata = %s, want imageWidth=100", meta)
+	}
+}
+
+func TestAdapter_BackfillContentMetadata_IsIdempotent(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	a := New(pool)
+
+	docID, cleanup := createTestRow(t, pool, []byte(`{}`))
+	defer cleanup()
+
+	payload := []byte(`{"imageWidth":200,"imageHeight":75}`)
+	if err := a.BackfillContentMetadata(context.Background(), docID, payload); err != nil {
+		t.Fatalf("first BackfillContentMetadata: %v", err)
+	}
+	if err := a.BackfillContentMetadata(context.Background(), docID, payload); err != nil {
+		t.Fatalf("second BackfillContentMetadata: %v", err)
+	}
+
+	var meta []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT "content_metadata" FROM file WHERE id = $1`, docID,
+	).Scan(&meta); err != nil {
+		t.Fatalf("read after backfill: %v", err)
+	}
+	if !bytes.Contains(meta, []byte(`"imageWidth"`)) || !bytes.Contains(meta, []byte(`200`)) {
+		t.Errorf("content_metadata = %s, want imageWidth=200", meta)
+	}
+}
+
+// FR-017 / COV-2: GetByID must tolerate unknown JSON keys in
+// content_metadata and still extract imageWidth/imageHeight.
+func TestAdapter_GetByID_TolerantOfUnknownContentMetadataKeys(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	a := New(pool)
+
+	forwardFit := []byte(`{"imageWidth":100,"imageHeight":50,"_futureField":"x","videoDuration":1.5}`)
+	docID, cleanup := createTestRow(t, pool, forwardFit)
+	defer cleanup()
+
+	doc, err := a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if doc.ImageWidth == nil || *doc.ImageWidth != 100 {
+		t.Errorf("ImageWidth = %v, want 100", doc.ImageWidth)
+	}
+	if doc.ImageHeight == nil || *doc.ImageHeight != 50 {
+		t.Errorf("ImageHeight = %v, want 50", doc.ImageHeight)
 	}
 }

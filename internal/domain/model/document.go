@@ -27,6 +27,14 @@ type Document struct {
 	// When Reused is true, the caller-supplied AuthorizationID and TagsetID
 	// were ignored — the existing row's values are authoritative.
 	Reused bool
+
+	// ImageWidth and ImageHeight are post-rotation pixel dimensions for
+	// raster images, SVG (from viewBox), and GIF (canvas dims). Both nil
+	// when the upload is not an image, or when the row's content_metadata
+	// is empty/sentinel. Sourced from the JSONB content_metadata column on
+	// read; populated from ProcessResult / lazy-backfill on write paths.
+	ImageWidth  *int
+	ImageHeight *int
 }
 
 // CreateDocumentInput contains fields needed to create a new document.
@@ -68,6 +76,13 @@ type StoredFile struct {
 	MimeType   string
 	Size       int
 	Created    bool // true if a new file was written; false if dedup matched an existing file
+
+	// ImageWidth and ImageHeight are post-rotation pixel dimensions for
+	// the just-stored bytes, populated by StoreAndLink from the result of
+	// Process. Nil for non-image content. Used by the Replace handler to
+	// surface dims on ReplaceContentResponse without re-reading the row.
+	ImageWidth  *int
+	ImageHeight *int
 }
 
 // AuthResult represents the outcome of an authorization check.

@@ -1,7 +1,7 @@
 -- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version
+       "createdDate", "updatedDate", version, content_metadata
 FROM file
 WHERE id = $1;
 
@@ -11,7 +11,7 @@ WHERE id = $1;
 -- unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version
+       "createdDate", "updatedDate", version, content_metadata
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
 ORDER BY "createdDate" ASC, id ASC
@@ -20,13 +20,16 @@ LIMIT 1;
 -- name: CreateDocument :one
 INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-                      "createdDate", "updatedDate", version)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)
+                      "createdDate", "updatedDate", version, content_metadata)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13)
 RETURNING id;
 
 -- name: UpdateDocumentFile :execrows
+-- Updates content fields. content_metadata replaces any prior value (Replace
+-- emits fresh dims via Process; the old row's content_metadata is discarded).
 UPDATE file
-SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5
+SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
+    content_metadata = $6
 WHERE id = $1;
 
 -- name: UpdateDocumentMetadata :execrows
@@ -41,6 +44,16 @@ SET "storageBucketId"    = $2,
     "updatedDate"        = $5,
     version              = version + 1
 WHERE id = $1 AND version = $6;
+
+-- name: BackfillContentMetadata :exec
+-- Persists computed image dims (or _decodeFailed sentinel) on a row. Updates
+-- only the content_metadata column; does NOT bump version. This avoids
+-- racing with optimistic-locked PATCH (UpdateDocumentMetadata) — the two
+-- queries write disjoint columns. Used by the lazy-backfill helper for
+-- legacy rows whose content_metadata is empty (FR-018).
+UPDATE file
+SET content_metadata = $2
+WHERE id = $1;
 
 -- name: DeleteDocument :one
 DELETE FROM file

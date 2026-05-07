@@ -1,6 +1,7 @@
 package alkemiodb
 
 import (
+	"encoding/json"
 	"math"
 	"time"
 
@@ -10,6 +11,28 @@ import (
 	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service-go/internal/domain/model"
 )
+
+// parseContentMetadataDims extracts imageWidth/imageHeight from a content_metadata
+// JSONB blob. Returns (nil, nil) when the blob is empty, missing the keys, or
+// carries the {"_decodeFailed": true} sentinel. Unknown JSON keys are tolerated
+// (FR-017) — json.Unmarshal into the targeted struct ignores extras.
+func parseContentMetadataDims(raw []byte) (*int, *int) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var meta struct {
+		ImageWidth   *int `json:"imageWidth,omitempty"`
+		ImageHeight  *int `json:"imageHeight,omitempty"`
+		DecodeFailed bool `json:"_decodeFailed,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil, nil
+	}
+	if meta.DecodeFailed {
+		return nil, nil
+	}
+	return meta.ImageWidth, meta.ImageHeight
+}
 
 func uuidToPgx(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
@@ -82,10 +105,11 @@ type documentRow struct {
 	CreatedDate       pgtype.Timestamptz
 	UpdatedDate       pgtype.Timestamptz
 	Version           int32
+	ContentMetadata   []byte
 }
 
 func documentFromRow(r documentRow) model.Document {
-	return model.Document{
+	doc := model.Document{
 		ID:                pgxToUUID(r.ID),
 		ExternalID:        r.ExternalID,
 		MimeType:          r.MimeType,
@@ -100,6 +124,8 @@ func documentFromRow(r documentRow) model.Document {
 		UpdatedDate:       pgxToTime(r.UpdatedDate),
 		Version:           int(r.Version),
 	}
+	doc.ImageWidth, doc.ImageHeight = parseContentMetadataDims(r.ContentMetadata)
+	return doc
 }
 
 func rowToDocument(row queries.GetDocumentByIDRow) model.Document {

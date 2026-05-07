@@ -8,7 +8,8 @@ as a drop-in replacement with additional write/delete capabilities.
 
 - **Public file serving** with Oathkeeper JWT auth and authorization checks
 - **Document CRUD** (create, read, update, delete) via internal endpoints
-- **Image processing**: HEIC-to-JPEG conversion, compression, EXIF strip (libvips)
+- **Image processing**: HEIC-to-JPEG conversion, compression, physical EXIF-orientation rotation for all raster formats, ICC profile preservation (libvips)
+- **Image dimensions on the wire**: Create / Copy / Replace-content / Patch responses carry post-rotation `imageWidth` / `imageHeight` for every `image/*` upload (rasters, SVG, GIF) — consumers don't decode bytes locally
 - **Content-addressable storage** (SHA3-256 hash as externalID)
 - **h2c HTTP/2 auth** (preferred) with circuit breaker, NATS fallback
 - **Hexagonal architecture** (ports and adapters)

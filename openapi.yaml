@@ -30,6 +30,10 @@ components:
           type: string
         id:
           type: string
+        imageHeight:
+          type: integer
+        imageWidth:
+          type: integer
         mimeType:
           type: string
         reused:
@@ -103,6 +107,10 @@ components:
       properties:
         externalID:
           type: string
+        imageHeight:
+          type: integer
+        imageWidth:
+          type: integer
         mimeType:
           type: string
         size:
@@ -128,6 +136,10 @@ components:
           type: string
         id:
           type: string
+        imageHeight:
+          type: integer
+        imageWidth:
+          type: integer
         storageBucketId:
           type: string
         temporaryLocation:

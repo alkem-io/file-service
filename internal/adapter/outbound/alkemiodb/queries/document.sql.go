@@ -11,6 +11,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const backfillContentMetadata = `-- name: BackfillContentMetadata :exec
+UPDATE file
+SET content_metadata = $2
+WHERE id = $1
+`
+
+type BackfillContentMetadataParams struct {
+	ID              pgtype.UUID `json:"id"`
+	ContentMetadata []byte      `json:"content_metadata"`
+}
+
+// Persists computed image dims (or _decodeFailed sentinel) on a row. Updates
+// only the content_metadata column; does NOT bump version. This avoids
+// racing with optimistic-locked PATCH (UpdateDocumentMetadata) — the two
+// queries write disjoint columns. Used by the lazy-backfill helper for
+// legacy rows whose content_metadata is empty (FR-018).
+func (q *Queries) BackfillContentMetadata(ctx context.Context, arg BackfillContentMetadataParams) error {
+	_, err := q.db.Exec(ctx, backfillContentMetadata, arg.ID, arg.ContentMetadata)
+	return err
+}
+
 const countDocumentsByExternalID = `-- name: CountDocumentsByExternalID :one
 SELECT COUNT(*) FROM file WHERE "externalID" = $1
 `
@@ -25,8 +46,8 @@ func (q *Queries) CountDocumentsByExternalID(ctx context.Context, externalid str
 const createDocument = `-- name: CreateDocument :one
 INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-                      "createdDate", "updatedDate", version)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)
+                      "createdDate", "updatedDate", version, content_metadata)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13)
 RETURNING id
 `
 
@@ -43,6 +64,7 @@ type CreateDocumentParams struct {
 	TagsetId          pgtype.UUID        `json:"tagsetId"`
 	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
+	ContentMetadata   []byte             `json:"content_metadata"`
 }
 
 func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) (pgtype.UUID, error) {
@@ -59,6 +81,7 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 		arg.TagsetId,
 		arg.CreatedDate,
 		arg.UpdatedDate,
+		arg.ContentMetadata,
 	)
 	var id pgtype.UUID
 	err := row.Scan(&id)
@@ -87,7 +110,7 @@ func (q *Queries) DeleteDocument(ctx context.Context, id pgtype.UUID) (DeleteDoc
 const findDocumentByExternalIDAndBucket = `-- name: FindDocumentByExternalIDAndBucket :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version
+       "createdDate", "updatedDate", version, content_metadata
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
 ORDER BY "createdDate" ASC, id ASC
@@ -113,6 +136,7 @@ type FindDocumentByExternalIDAndBucketRow struct {
 	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
+	ContentMetadata   []byte             `json:"content_metadata"`
 }
 
 // Deterministic selection: oldest row wins. Matters if historical duplicates
@@ -135,6 +159,7 @@ func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg Fin
 		&i.CreatedDate,
 		&i.UpdatedDate,
 		&i.Version,
+		&i.ContentMetadata,
 	)
 	return i, err
 }
@@ -142,7 +167,7 @@ func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg Fin
 const getDocumentByID = `-- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version
+       "createdDate", "updatedDate", version, content_metadata
 FROM file
 WHERE id = $1
 `
@@ -161,6 +186,7 @@ type GetDocumentByIDRow struct {
 	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
+	ContentMetadata   []byte             `json:"content_metadata"`
 }
 
 func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocumentByIDRow, error) {
@@ -180,24 +206,29 @@ func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocum
 		&i.CreatedDate,
 		&i.UpdatedDate,
 		&i.Version,
+		&i.ContentMetadata,
 	)
 	return i, err
 }
 
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows
 UPDATE file
-SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5
+SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
+    content_metadata = $6
 WHERE id = $1
 `
 
 type UpdateDocumentFileParams struct {
-	ID          pgtype.UUID        `json:"id"`
-	ExternalID  string             `json:"externalID"`
-	MimeType    string             `json:"mimeType"`
-	Size        int32              `json:"size"`
-	UpdatedDate pgtype.Timestamptz `json:"updatedDate"`
+	ID              pgtype.UUID        `json:"id"`
+	ExternalID      string             `json:"externalID"`
+	MimeType        string             `json:"mimeType"`
+	Size            int32              `json:"size"`
+	UpdatedDate     pgtype.Timestamptz `json:"updatedDate"`
+	ContentMetadata []byte             `json:"content_metadata"`
 }
 
+// Updates content fields. content_metadata replaces any prior value (Replace
+// emits fresh dims via Process; the old row's content_metadata is discarded).
 func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFileParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateDocumentFile,
 		arg.ID,
@@ -205,6 +236,7 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 		arg.MimeType,
 		arg.Size,
 		arg.UpdatedDate,
+		arg.ContentMetadata,
 	)
 	if err != nil {
 		return 0, err

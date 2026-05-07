@@ -50,7 +50,7 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
-func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, error) {
+func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata []byte) (uuid.UUID, error) {
 	id, err := a.queries.CreateDocument(ctx, queries.CreateDocumentParams{
 		ID:                uuidToPgx(doc.ID),
 		ExternalID:        doc.ExternalID,
@@ -64,6 +64,7 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, er
 		TagsetId:          uuidToPgxNullable(doc.TagsetID),
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
+		ContentMetadata:   contentMetadata,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -75,13 +76,14 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document) (uuid.UUID, er
 	return pgxToUUID(id), nil
 }
 
-func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int) error {
+func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata []byte) error {
 	rows, err := a.queries.UpdateDocumentFile(ctx, queries.UpdateDocumentFileParams{
-		ID:          uuidToPgx(id),
-		ExternalID:  externalID,
-		MimeType:    mimeType,
-		Size:        safeInt32(size),
-		UpdatedDate: timeToPgxNow(),
+		ID:              uuidToPgx(id),
+		ExternalID:      externalID,
+		MimeType:        mimeType,
+		Size:            safeInt32(size),
+		UpdatedDate:     timeToPgxNow(),
+		ContentMetadata: contentMetadata,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -121,6 +123,17 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 		return model.ErrDocumentNotFound
 	}
 	return nil
+}
+
+// BackfillContentMetadata persists computed content_metadata on a row without
+// bumping version. The lazy-backfill helper (service.backfillIfNeeded) calls
+// this for legacy rows; it does not race with optimistic-locked PATCH because
+// the two queries write disjoint columns. FR-018.
+func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, metadata []byte) error {
+	return a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
+		ID:              uuidToPgx(id),
+		ContentMetadata: metadata,
+	})
 }
 
 func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error) {

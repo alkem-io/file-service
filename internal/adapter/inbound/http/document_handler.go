@@ -223,11 +223,13 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	CreateDocumentResponse{
-		ID:         doc.ID.String(),
-		ExternalID: doc.ExternalID,
-		MimeType:   doc.MimeType,
-		Size:       doc.Size,
-		Reused:     doc.Reused,
+		ID:          doc.ID.String(),
+		ExternalID:  doc.ExternalID,
+		MimeType:    doc.MimeType,
+		Size:        doc.Size,
+		Reused:      doc.Reused,
+		ImageWidth:  doc.ImageWidth,
+		ImageHeight: doc.ImageHeight,
 	}.Render(w)
 }
 
@@ -313,11 +315,13 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	CreateDocumentResponse{
-		ID:         doc.ID.String(),
-		ExternalID: doc.ExternalID,
-		MimeType:   doc.MimeType,
-		Size:       doc.Size,
-		Reused:     doc.Reused,
+		ID:          doc.ID.String(),
+		ExternalID:  doc.ExternalID,
+		MimeType:    doc.MimeType,
+		Size:        doc.Size,
+		Reused:      doc.Reused,
+		ImageWidth:  doc.ImageWidth,
+		ImageHeight: doc.ImageHeight,
 	}.Render(w)
 }
 
@@ -441,11 +445,18 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lazy-backfill: legacy image rows have empty content_metadata; PATCH
+	// is one of the four metadata-returning endpoints that must surface
+	// dims (FR-015 / FR-018). Best-effort — never fails the PATCH.
+	updated = h.Service.BackfillIfNeeded(r.Context(), updated)
+
 	UpdateDocumentResponse{
 		ID:                updated.ID.String(),
 		StorageBucketID:   updated.StorageBucketID.String(),
 		TemporaryLocation: updated.TemporaryLocation,
 		DisplayName:       updated.DisplayName,
+		ImageWidth:        updated.ImageWidth,
+		ImageHeight:       updated.ImageHeight,
 	}.Render(w)
 }
 
@@ -515,9 +526,11 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 	}
 
 	ReplaceContentResponse{
-		ExternalID: result.ExternalID,
-		MimeType:   result.MimeType,
-		Size:       result.Size,
+		ExternalID:  result.ExternalID,
+		MimeType:    result.MimeType,
+		Size:        result.Size,
+		ImageWidth:  result.ImageWidth,
+		ImageHeight: result.ImageHeight,
 	}.Render(w)
 }
 

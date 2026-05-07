@@ -11,5 +11,6 @@ CREATE TABLE file (
     "temporaryLocation" BOOLEAN NOT NULL DEFAULT FALSE,
     "authorizationId" UUID UNIQUE,
     "storageBucketId" UUID,
-    "tagsetId" UUID UNIQUE
+    "tagsetId" UUID UNIQUE,
+    content_metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
