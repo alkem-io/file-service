@@ -24,7 +24,11 @@ convert -size 1024x512 xc:white -fill black -draw "rectangle 0,0 32,512" canonic
 cp canonical.png rotated.png && exiftool -Orientation=6 -n -overwrite_original rotated.png
 
 # Wide-gamut variant
+# macOS:
 convert canonical.png -profile /System/Library/ColorSync/Profiles/Display\ P3.icc wide-gamut.png
+# Linux fallback (Display P3 ICC profile path varies; install `icc-profiles` or
+# point at any wide-gamut .icc on disk, e.g.):
+# convert canonical.png -profile /usr/share/color/icc/colord/Display-P3.icc wide-gamut.png
 
 # SVG with known viewBox
 cat > test.svg <<'SVG'
@@ -46,12 +50,13 @@ Reproduce the production bug, then verify it's fixed.
 
 ```bash
 # Upload an EXIF-Orientation=6 JPEG with raw bytes 1082×127.
-curl -s -X POST http://localhost:4003/internal/file \
+RESPONSE=$(curl -s -X POST http://localhost:4003/internal/file \
   -F "file=@phone-photo-1082x127-orient6.jpg" \
   -F "displayName=avatar.jpg" \
   -F "storageBucketId=$BUCKET" \
   -F "authorizationId=$AUTH" \
-  | jq '{imageWidth, imageHeight, externalID}'
+  | tee /dev/tty)
+echo "$RESPONSE" | jq '{imageWidth, imageHeight, externalID}'
 ```
 
 Expected output:
@@ -150,7 +155,7 @@ RESP1=$(curl -s -X POST http://localhost:4003/internal/file \
   -F "storageBucketId=$BUCKET1" -F "authorizationId=$AUTH1")
 RESP2=$(curl -s -X POST http://localhost:4003/internal/file \
   -F "file=@rotated.png" -F "displayName=b.png" \
-  -F "storageBucketId=$BUCKET1" -F "authorizationId=$AUTH2")
+  -F "storageBucketId=$BUCKET2" -F "authorizationId=$AUTH2")
 
 echo "$RESP1" | jq '{externalID, reused}'
 echo "$RESP2" | jq '{externalID, reused}'

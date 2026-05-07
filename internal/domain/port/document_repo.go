@@ -12,19 +12,22 @@ import (
 type DocumentRepo interface {
 	GetByID(ctx context.Context, id uuid.UUID) (model.Document, error)
 	FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error)
-	// Create inserts a new document row. contentMetadata is the raw JSON for
-	// the content_metadata column ({"imageWidth":N,"imageHeight":N} for
-	// measurable images, {"_decodeFailed":true} for unreadable image bytes,
-	// {} for non-image rows or stub-no-decoder).
-	Create(ctx context.Context, doc model.Document, contentMetadata []byte) (uuid.UUID, error)
+	// Create inserts a new document row. contentMetadata is the typed view
+	// of the file.content_metadata JSONB column; the adapter owns the
+	// serialization to bytes.
+	Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error)
 	// UpdateFile mutates content fields plus content_metadata in one
 	// statement (Replace flow). The new metadata replaces any prior value.
-	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata []byte) error
+	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
 	UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error
-	// BackfillContentMetadata persists computed content_metadata on a row
-	// without bumping version (FR-018). Used by the service-layer lazy-
-	// backfill helper for legacy rows whose metadata is empty.
-	BackfillContentMetadata(ctx context.Context, id uuid.UUID, metadata []byte) error
+	// BackfillContentMetadata writes computed metadata atomically using
+	// compare-and-set: only succeeds if the row currently has empty
+	// content_metadata AND its externalID matches expectedExternalID. This
+	// protects against a race where Replace ran on the same row between the
+	// lazy-backfill's storage read and its persist. A 0-rows-affected outcome
+	// signals "lost the race" — the helper returns nil (treats as success;
+	// the winner already wrote fresh metadata).
+	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error
 	Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error)
 	CountByExternalID(ctx context.Context, externalID string) (int, error)
 }

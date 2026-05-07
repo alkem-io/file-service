@@ -45,15 +45,16 @@ SET "storageBucketId"    = $2,
     version              = version + 1
 WHERE id = $1 AND version = $6;
 
--- name: BackfillContentMetadata :exec
--- Persists computed image dims (or _decodeFailed sentinel) on a row. Updates
--- only the content_metadata column; does NOT bump version. This avoids
--- racing with optimistic-locked PATCH (UpdateDocumentMetadata) — the two
--- queries write disjoint columns. Used by the lazy-backfill helper for
--- legacy rows whose content_metadata is empty (FR-018).
+-- name: BackfillContentMetadata :execrows
+-- Compare-and-set: only writes when content_metadata is still empty AND
+-- the row's externalID is the one we measured against. Protects against
+-- the lazy-backfill overwriting freshly-replaced content's metadata.
+-- Updates only content_metadata; does NOT bump version (FR-018).
 UPDATE file
 SET content_metadata = $2
-WHERE id = $1;
+WHERE id = $1
+  AND "externalID" = $3
+  AND content_metadata = '{}'::jsonb;
 
 -- name: DeleteDocument :one
 DELETE FROM file

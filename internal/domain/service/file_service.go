@@ -15,6 +15,35 @@ import (
 	"github.com/alkem-io/file-service-go/internal/domain/port"
 )
 
+// processResultToContentMetadata translates the processor's output into the
+// typed ContentMetadata persisted on the row. Decision tree:
+//
+//   - non-image MIME → Populated=true, no dims (writes "{}" via the adapter,
+//     but Populated=true so the lazy-backfill skips this row)
+//   - image MIME, Measured=false → Populated=false (no decoder available;
+//     lazy-backfill or a future vips run can retry)
+//   - image MIME, dims present → Populated=true with dims
+//   - image MIME, Measured=true, no dims → Populated=true with DecodeFailed
+func processResultToContentMetadata(r port.ProcessResult, mimeType string) model.ContentMetadata {
+	if !strings.HasPrefix(mimeType, "image/") {
+		// Non-images: nothing to measure. We persist {} but the row is
+		// considered "decision recorded" so backfill never touches it.
+		return model.ContentMetadata{Populated: false}
+	}
+	if !r.Measured {
+		return model.ContentMetadata{} // Populated=false; lazy-backfill may retry
+	}
+	if r.ImageWidth != nil && r.ImageHeight != nil {
+		return model.ContentMetadata{
+			Populated:   true,
+			ImageWidth:  r.ImageWidth,
+			ImageHeight: r.ImageHeight,
+		}
+	}
+	// Measured ran but no dims → permanent decode failure.
+	return model.ContentMetadata{Populated: true, DecodeFailed: true}
+}
+
 // FileService orchestrates file and document operations.
 type FileService struct {
 	Repo      port.DocumentRepo
@@ -79,7 +108,7 @@ func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocu
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
-	contentMetadata := marshalContentMetadata(result)
+	contentMetadata := processResultToContentMetadata(result, result.MimeType)
 
 	// Caller opt-out: skip the dedup lookup and force a fresh row insert
 	// even when an existing row in this bucket has the same externalID.
@@ -178,10 +207,11 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		Size:       source.Size,
 	}
 	// Propagate the source's content_metadata verbatim — copy doesn't
-	// re-run Process, so dims (and any forward-fit per-content-type fields)
-	// must ride along from the source row. Source has been backfilled above
-	// when it was a legacy image row (FR-014).
-	contentMetadata := marshalDimsOnly(source.ImageWidth, source.ImageHeight)
+	// re-run Process, so dims, the {_decodeFailed:true} sentinel, and any
+	// forward-fit per-content-type fields must ride along from the source
+	// row. Source has been backfilled above when it was a legacy image row
+	// (FR-014).
+	contentMetadata := source.ContentMetadata
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }
 
@@ -221,7 +251,7 @@ func resolveMIME(p port.ImageProcessor, content []byte, declaredMIME string, all
 // same blob to its own document row before our error path runs. Deleting
 // here would orphan that row — a permanent 404 for its users. Orphan blobs
 // left behind are recoverable via a periodic GC sweep.
-func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, finalMIME string, contentMetadata []byte, imageWidth, imageHeight *int) (*model.Document, error) {
+func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, finalMIME string, contentMetadata model.ContentMetadata, imageWidth, imageHeight *int) (*model.Document, error) {
 	now := time.Now()
 	docID, err := uuid.NewV7()
 	if err != nil {
@@ -241,6 +271,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		TagsetID:          input.TagsetID,
 		CreatedDate:       now,
 		UpdatedDate:       now,
+		ContentMetadata:   contentMetadata,
 		ImageWidth:        imageWidth,
 		ImageHeight:       imageHeight,
 	}
@@ -328,7 +359,7 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
-	contentMetadata := marshalContentMetadata(result)
+	contentMetadata := processResultToContentMetadata(result, result.MimeType)
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, result.MimeType, stored.Size, contentMetadata)
 	if err != nil {
 		// Never delete the newly-stored blob on failure: another concurrent
@@ -403,44 +434,6 @@ func normalizeMIME(mimeType string) string {
 	return strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
 }
 
-// marshalContentMetadata is the single shared site that turns a
-// ProcessResult into the JSON blob persisted in the file.content_metadata
-// JSONB column. The four cases (per Decision 9):
-//
-//   - both dims non-nil → {"imageWidth": N, "imageHeight": N}
-//   - non-image MIME → {} (never write a sentinel for non-images)
-//   - image MIME, Measured=false → {} (no decoder available, e.g. !vips
-//     stub; lazy-backfill or a future vips run can retry)
-//   - image MIME, Measured=true, nil dims → {"_decodeFailed": true}
-//     (decoder ran and confirmed bytes are unreadable; permanent until an
-//     operator clears the row manually)
-func marshalContentMetadata(result port.ProcessResult) []byte {
-	if result.ImageWidth != nil && result.ImageHeight != nil {
-		return marshalDimsOnly(result.ImageWidth, result.ImageHeight)
-	}
-	if !strings.HasPrefix(result.MimeType, "image/") {
-		return []byte("{}")
-	}
-	if !result.Measured {
-		return []byte("{}")
-	}
-	return []byte(`{"_decodeFailed":true}`)
-}
-
-// marshalDimsOnly writes the standard {"imageWidth":N,"imageHeight":N}
-// shape. Caller must guarantee both dims are non-nil; otherwise it returns
-// {} so the caller doesn't have to type-check first.
-//
-// Uses fmt.Sprintf rather than a struct + json.Marshal to avoid declaring
-// a named/anonymous Go type that the openapi generator would otherwise
-// pick up as a candidate response schema.
-func marshalDimsOnly(w, h *int) []byte {
-	if w == nil || h == nil {
-		return []byte("{}")
-	}
-	return []byte(fmt.Sprintf(`{"imageWidth":%d,"imageHeight":%d}`, *w, *h))
-}
-
 // BackfillIfNeeded is the public entry point for handlers that read a
 // document and want lazy-backfill applied before rendering. Wraps the
 // internal helper so the PATCH handler doesn't have to duplicate the
@@ -451,18 +444,20 @@ func (s *FileService) BackfillIfNeeded(ctx context.Context, doc *model.Document)
 
 // backfillIfNeeded is the lazy-backfill helper for legacy image rows whose
 // content_metadata is empty. Called from the Create dedup-hit branch (and
-// in Phase 7, from Copy + PATCH paths). Best-effort: never returns an
-// error — backfill failures don't fail the underlying request.
+// from Copy + PATCH paths). Best-effort: never returns an error — backfill
+// failures don't fail the underlying request.
 //
 // Decision tree:
 //   - non-image MIME → return doc unchanged (no metadata work for non-images)
-//   - dims already populated on doc → already measured, return unchanged
+//   - ContentMetadata.Populated=true → already decided (measured OR
+//     {_decodeFailed:true} sentinel); return unchanged so persisted decode-
+//     failure rows short-circuit instead of looping decode attempts
 //   - Storage.Read fails → log warn, return unchanged (transient retry next read)
-//   - MeasureDims returns dims → marshal {imageWidth,imageHeight}, persist via
-//     BackfillContentMetadata, populate doc.ImageWidth/Height; on persist error
-//     log warn AND still populate doc so the response carries the just-measured
-//     dims (FR-020 case c)
-//   - MeasureDims returns err → marshal {_decodeFailed:true}, best-effort persist;
+//   - MeasureDims returns dims → persist via BackfillContentMetadata
+//     (compare-and-set on externalID), populate doc.ImageWidth/Height; on
+//     persist error or race-lost log debug AND still populate doc so the
+//     response carries the just-measured dims (FR-020 case c)
+//   - MeasureDims returns err → persist {_decodeFailed:true} best-effort;
 //     leave doc unchanged (response omits dims, FR-019)
 //   - MeasureDims returns (nil, nil, nil) (no decoder available, !vips stub) →
 //     skip persist, leave doc unchanged so a future vips run retries
@@ -473,7 +468,10 @@ func (s *FileService) backfillIfNeeded(ctx context.Context, doc *model.Document)
 	if !strings.HasPrefix(doc.MimeType, "image/") {
 		return doc
 	}
-	if doc.ImageWidth != nil && doc.ImageHeight != nil {
+	if doc.ContentMetadata.Populated {
+		// Either dims already measured or {_decodeFailed:true} persisted —
+		// nothing to do. Persisted sentinels short-circuit here instead of
+		// re-running the decoder on every metadata-returning request.
 		return doc
 	}
 
@@ -490,18 +488,21 @@ func (s *FileService) backfillIfNeeded(ctx context.Context, doc *model.Document)
 		// Decoder ran and failed → write the {_decodeFailed: true} sentinel.
 		// Persist best-effort. Doc stays without dims; the response simply
 		// omits imageWidth/imageHeight.
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, []byte(`{"_decodeFailed":true}`)); persistErr != nil {
+		sentinel := model.ContentMetadata{Populated: true, DecodeFailed: true}
+		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, sentinel); persistErr != nil {
 			s.Logger.Warn("backfill: persist of _decodeFailed sentinel failed",
 				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
 		}
 		return doc
 	case w != nil && h != nil:
-		payload := marshalDimsOnly(w, h)
+		measured := model.ContentMetadata{Populated: true, ImageWidth: w, ImageHeight: h}
 		// Always populate the doc with the just-computed dims, even if
-		// persistence fails (FR-020 case c).
+		// persistence fails or the compare-and-set lost a race (FR-020
+		// case c). The dims are accurate for the bytes the request decoded.
 		doc.ImageWidth = w
 		doc.ImageHeight = h
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, payload); persistErr != nil {
+		doc.ContentMetadata = measured
+		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, measured); persistErr != nil {
 			s.Logger.Warn("backfill: persist of measured dims failed; response still carries dims",
 				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
 		}

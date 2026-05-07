@@ -1913,7 +1913,8 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 	}
 
 	// Wire up the dedup hit for the second request: mockRepo.findDoc
-	// returning a row with the same externalID + bucket.
+	// returning a row with the same externalID + bucket. ContentMetadata
+	// Populated=true so the lazy-backfill skips it (already measured).
 	repo.findDoc = &model.Document{
 		ID:              uuid.MustParse(resp1.ID),
 		ExternalID:      resp1.ExternalID,
@@ -1921,6 +1922,7 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 		Size:            resp1.Size,
 		StorageBucketID: bucket,
 		AuthorizationID: uuid.New(),
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: intp(512), ImageHeight: intp(1024)},
 		ImageWidth:      intp(512),
 		ImageHeight:     intp(1024),
 	}
@@ -2042,8 +2044,9 @@ func TestDocumentHandler_Copy_LegacyImageRow_LazyBackfillsBoth(t *testing.T) {
 		t.Errorf("backfill calls = %d, want >= 1 (source row)", repo.backfillCalls)
 	}
 	// Persisted payload should be the dims, not the sentinel.
-	if !bytes.Contains(repo.lastBackfillPayload, []byte("imageWidth")) {
-		t.Errorf("backfill payload = %s, expected dims JSON", repo.lastBackfillPayload)
+	got := repo.lastBackfillPayload
+	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
+		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
 	}
 }
 
@@ -2065,8 +2068,9 @@ func TestDocumentHandler_Patch_LegacyImageRow_LazyBackfills(t *testing.T) {
 	if repo.backfillCalls < 1 {
 		t.Errorf("backfill calls = %d, want >= 1", repo.backfillCalls)
 	}
-	if !bytes.Contains(repo.lastBackfillPayload, []byte("imageWidth")) {
-		t.Errorf("backfill payload = %s, expected dims JSON", repo.lastBackfillPayload)
+	got := repo.lastBackfillPayload
+	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
+		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
 	}
 }
 
@@ -2087,8 +2091,9 @@ func TestDocumentHandler_Patch_DecodeFailure_PersistsSentinel(t *testing.T) {
 	if repo.backfillCalls < 1 {
 		t.Errorf("backfill not called; sentinel must be persisted")
 	}
-	if !bytes.Contains(repo.lastBackfillPayload, []byte("_decodeFailed")) {
-		t.Errorf("backfill payload = %s, expected {_decodeFailed:true}", repo.lastBackfillPayload)
+	got := repo.lastBackfillPayload
+	if !got.Populated || !got.DecodeFailed {
+		t.Errorf("backfill payload = %+v, expected Populated=true with DecodeFailed=true", got)
 	}
 }
 

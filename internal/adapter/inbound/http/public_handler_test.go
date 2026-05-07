@@ -33,14 +33,15 @@ type mockDocRepo struct {
 	lastUpdateVersion     int
 
 	// Captured args from Create / UpdateFile content_metadata params (US1+).
-	lastCreateContentMetadata     []byte
-	lastUpdateFileContentMetadata []byte
+	lastCreateContentMetadata     model.ContentMetadata
+	lastUpdateFileContentMetadata model.ContentMetadata
 
 	// Lazy-backfill capture (US1).
-	backfillCalls       int
-	lastBackfillID      uuid.UUID
-	lastBackfillPayload []byte
-	backfillErr         error
+	backfillCalls          int
+	lastBackfillID         uuid.UUID
+	lastBackfillExternalID string
+	lastBackfillPayload    model.ContentMetadata
+	backfillErr            error
 }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -56,17 +57,18 @@ func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ u
 	// Default to "not found" so CreateDocument proceeds to insert.
 	return model.Document{}, model.ErrDocumentNotFound
 }
-func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata []byte) (uuid.UUID, error) {
+func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.lastCreateContentMetadata = contentMetadata
 	return doc.ID, m.createErr
 }
-func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata []byte) error {
+func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
-func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, metadata []byte) error {
+func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) error {
 	m.backfillCalls++
 	m.lastBackfillID = id
+	m.lastBackfillExternalID = expectedExternalID
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }

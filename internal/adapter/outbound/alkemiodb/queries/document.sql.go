@@ -11,25 +11,30 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const backfillContentMetadata = `-- name: BackfillContentMetadata :exec
+const backfillContentMetadata = `-- name: BackfillContentMetadata :execrows
 UPDATE file
 SET content_metadata = $2
 WHERE id = $1
+  AND "externalID" = $3
+  AND content_metadata = '{}'::jsonb
 `
 
 type BackfillContentMetadataParams struct {
 	ID              pgtype.UUID `json:"id"`
 	ContentMetadata []byte      `json:"content_metadata"`
+	ExternalID      string      `json:"externalID"`
 }
 
-// Persists computed image dims (or _decodeFailed sentinel) on a row. Updates
-// only the content_metadata column; does NOT bump version. This avoids
-// racing with optimistic-locked PATCH (UpdateDocumentMetadata) — the two
-// queries write disjoint columns. Used by the lazy-backfill helper for
-// legacy rows whose content_metadata is empty (FR-018).
-func (q *Queries) BackfillContentMetadata(ctx context.Context, arg BackfillContentMetadataParams) error {
-	_, err := q.db.Exec(ctx, backfillContentMetadata, arg.ID, arg.ContentMetadata)
-	return err
+// Compare-and-set: only writes when content_metadata is still empty AND
+// the row's externalID is the one we measured against. Protects against
+// the lazy-backfill overwriting freshly-replaced content's metadata.
+// Updates only content_metadata; does NOT bump version (FR-018).
+func (q *Queries) BackfillContentMetadata(ctx context.Context, arg BackfillContentMetadataParams) (int64, error) {
+	result, err := q.db.Exec(ctx, backfillContentMetadata, arg.ID, arg.ContentMetadata, arg.ExternalID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const countDocumentsByExternalID = `-- name: CountDocumentsByExternalID :one

@@ -121,7 +121,7 @@ func TestCreateAndDelete(t *testing.T) {
 		UpdatedDate:       now,
 	}
 
-	createdID, err := a.Create(context.Background(), doc, []byte("{}"))
+	createdID, err := a.Create(context.Background(), doc, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -172,14 +172,14 @@ func TestUpdateFile(t *testing.T) {
 	docID := uuid.UUID(id)
 
 	newExtID := "updated-" + uuid.New().String()[:8]
-	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99, []byte("{}"))
+	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
 	// Restore original values
 	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize), []byte("{}"))
+		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize), model.ContentMetadata{})
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -193,7 +193,7 @@ func TestUpdateFile_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, []byte("{}"))
+	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -291,8 +291,11 @@ func TestDelete_NotFound(t *testing.T) {
 
 // createTestRow creates a real `file` row (with valid FKs) so the test
 // can exercise BackfillContentMetadata against a row that actually
-// exists. Returns the row's ID and a teardown function.
-func createTestRow(t *testing.T, pool *pgxpool.Pool, contentMetadata []byte) (uuid.UUID, func()) {
+// exists. Returns the row's ID, the row's externalID (needed for the
+// compare-and-set backfill), and a teardown function. rawContentMetadata
+// is injected verbatim into the JSONB column so tests can seed forward-
+// fit shapes the typed Create path would not produce.
+func createTestRow(t *testing.T, pool *pgxpool.Pool, rawContentMetadata []byte) (uuid.UUID, string, func()) {
 	t.Helper()
 	a := New(pool)
 
@@ -314,10 +317,11 @@ func createTestRow(t *testing.T, pool *pgxpool.Pool, contentMetadata []byte) (uu
 	}
 
 	docID, _ := uuid.NewV7()
+	externalID := "backfill-test-" + docID.String()[:8]
 	now := time.Now()
 	doc := model.Document{
 		ID:                docID,
-		ExternalID:        "backfill-test-" + docID.String()[:8],
+		ExternalID:        externalID,
 		MimeType:          "image/png",
 		Size:              123,
 		DisplayName:       "backfill-test.png",
@@ -327,11 +331,24 @@ func createTestRow(t *testing.T, pool *pgxpool.Pool, contentMetadata []byte) (uu
 		CreatedDate:       now,
 		UpdatedDate:       now,
 	}
-	if _, err := a.Create(context.Background(), doc, contentMetadata); err != nil {
+	if _, err := a.Create(context.Background(), doc, model.ContentMetadata{}); err != nil {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
 		t.Fatalf("Create test row: %v", err)
 	}
-	return docID, func() {
+	// Inject the requested raw content_metadata verbatim. Bypass Create's
+	// typed marshaller so callers can seed forward-fit shapes (e.g. with
+	// unknown keys for FR-017 coverage).
+	if len(rawContentMetadata) > 0 && string(rawContentMetadata) != `{}` {
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE file SET content_metadata = $1 WHERE id = $2`,
+			rawContentMetadata, docID,
+		); err != nil {
+			_, _ = a.Delete(context.Background(), docID)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
+			t.Fatalf("seed content_metadata: %v", err)
+		}
+	}
+	return docID, externalID, func() {
 		_, _ = a.Delete(context.Background(), docID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
 	}
@@ -344,7 +361,7 @@ func TestAdapter_BackfillContentMetadata_DoesNotBumpVersion(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	docID, cleanup := createTestRow(t, pool, []byte(`{}`))
+	docID, externalID, cleanup := createTestRow(t, pool, []byte(`{}`))
 	defer cleanup()
 
 	// Read initial version.
@@ -355,7 +372,11 @@ func TestAdapter_BackfillContentMetadata_DoesNotBumpVersion(t *testing.T) {
 		t.Fatalf("read version before: %v", err)
 	}
 
-	if err := a.BackfillContentMetadata(context.Background(), docID, []byte(`{"imageWidth":100,"imageHeight":50}`)); err != nil {
+	w, h := 100, 50
+	if err := a.BackfillContentMetadata(
+		context.Background(), docID, externalID,
+		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
+	); err != nil {
 		t.Fatalf("BackfillContentMetadata: %v", err)
 	}
 
@@ -381,14 +402,18 @@ func TestAdapter_BackfillContentMetadata_IsIdempotent(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	docID, cleanup := createTestRow(t, pool, []byte(`{}`))
+	docID, externalID, cleanup := createTestRow(t, pool, []byte(`{}`))
 	defer cleanup()
 
-	payload := []byte(`{"imageWidth":200,"imageHeight":75}`)
-	if err := a.BackfillContentMetadata(context.Background(), docID, payload); err != nil {
+	w, h := 200, 75
+	payload := model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h}
+	// First call wins the compare-and-set; second is a 0-rows-affected no-op
+	// (content_metadata is no longer empty), which the adapter treats as
+	// success — i.e. the helper is safe to call repeatedly.
+	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
 		t.Fatalf("first BackfillContentMetadata: %v", err)
 	}
-	if err := a.BackfillContentMetadata(context.Background(), docID, payload); err != nil {
+	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
 		t.Fatalf("second BackfillContentMetadata: %v", err)
 	}
 
@@ -403,6 +428,48 @@ func TestAdapter_BackfillContentMetadata_IsIdempotent(t *testing.T) {
 	}
 }
 
+// SC-011 (race protection): BackfillContentMetadata is a compare-and-set on
+// (id, externalID, empty content_metadata). When the row's externalID has
+// changed (Replace ran between measure and persist), the write is skipped
+// and the existing fresh metadata is preserved.
+func TestAdapter_BackfillContentMetadata_RaceLost_DoesNotOverwrite(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	a := New(pool)
+
+	docID, externalID, cleanup := createTestRow(t, pool, []byte(`{}`))
+	defer cleanup()
+
+	// Simulate "Replace ran" by changing the row's externalID after the
+	// lazy-backfill measured against the original.
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE file SET "externalID" = $1 WHERE id = $2`,
+		externalID+"-replaced", docID,
+	); err != nil {
+		t.Fatalf("simulate replace: %v", err)
+	}
+
+	w, h := 100, 50
+	if err := a.BackfillContentMetadata(
+		context.Background(), docID, externalID, // expectedExternalID = pre-replace
+		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
+	); err != nil {
+		t.Fatalf("BackfillContentMetadata returned err on race-lost (should be nil): %v", err)
+	}
+
+	var meta []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT "content_metadata" FROM file WHERE id = $1`, docID,
+	).Scan(&meta); err != nil {
+		t.Fatalf("read after backfill: %v", err)
+	}
+	// Compare-and-set rejected the write because externalID didn't match —
+	// the column is still the seeded empty value.
+	if string(meta) != `{}` {
+		t.Errorf("content_metadata overwrote despite externalID mismatch: %s", meta)
+	}
+}
+
 // FR-017 / COV-2: GetByID must tolerate unknown JSON keys in
 // content_metadata and still extract imageWidth/imageHeight.
 func TestAdapter_GetByID_TolerantOfUnknownContentMetadataKeys(t *testing.T) {
@@ -411,7 +478,7 @@ func TestAdapter_GetByID_TolerantOfUnknownContentMetadataKeys(t *testing.T) {
 	a := New(pool)
 
 	forwardFit := []byte(`{"imageWidth":100,"imageHeight":50,"_futureField":"x","videoDuration":1.5}`)
-	docID, cleanup := createTestRow(t, pool, forwardFit)
+	docID, _, cleanup := createTestRow(t, pool, forwardFit)
 	defer cleanup()
 
 	doc, err := a.GetByID(context.Background(), docID)
