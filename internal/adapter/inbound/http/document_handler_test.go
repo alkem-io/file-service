@@ -47,11 +47,15 @@ func newDocHandlerWithProcessor() (*DocumentHandler, *mockDocRepo, *mockStorage,
 func intp(v int) *int { return &v }
 
 type stubProcessor struct {
-	// Per-test overrides for Process result dims. Default Measured=true so
-	// image-MIME uploads exercise the marshaling-failed-decode branch
-	// unless the test pins dims via processDimsW/H.
-	processDimsW *int
-	processDimsH *int
+	// Per-test overrides for Process result dims. Measured is derived from
+	// whether dims are set: tests that pin dims model the "decoder ran and
+	// produced dims" path; tests that leave them nil model the "no decoder
+	// available" path (Measured=false). Tests that need to exercise the
+	// "decoder ran but failed" path (Measured=true with nil dims, writing
+	// the _decodeFailed sentinel) must opt in via processMeasured.
+	processDimsW    *int
+	processDimsH    *int
+	processMeasured bool // when true, forces Measured=true regardless of dims
 
 	// MeasureDims override (lazy-backfill tests).
 	measureDimsW   *int
@@ -71,12 +75,13 @@ func (p *stubProcessor) DetectMIME(_ []byte) string {
 	return "application/octet-stream"
 }
 func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
+	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
 	return port.ProcessResult{
 		Content:     content,
 		MimeType:    mimeType,
 		ImageWidth:  p.processDimsW,
 		ImageHeight: p.processDimsH,
-		Measured:    true,
+		Measured:    measured,
 	}, nil
 }
 func (p *stubProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {

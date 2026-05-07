@@ -159,12 +159,20 @@ func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, exp
 // in the file.content_metadata column. Empty Populated → "{}". DecodeFailed
 // → {"_decodeFailed": true}. Both dims set → {"imageWidth": N, "imageHeight":
 // M}. Other shapes (e.g. non-image rows where Populated=true) default to "{}".
+//
+// Rejects half-populated dims (exactly one of ImageWidth / ImageHeight set):
+// silently serializing those as "{}" would round-trip the row as
+// "unmeasured" and trigger lazy-backfill on every read — masking what is
+// almost certainly a caller bug.
 func marshalContentMetadata(meta model.ContentMetadata) ([]byte, error) {
 	if !meta.Populated {
 		return []byte(`{}`), nil
 	}
 	if meta.DecodeFailed {
 		return []byte(`{"_decodeFailed":true}`), nil
+	}
+	if (meta.ImageWidth == nil) != (meta.ImageHeight == nil) {
+		return nil, errors.New("content metadata: ImageWidth and ImageHeight must both be set or both nil")
 	}
 	if meta.ImageWidth != nil && meta.ImageHeight != nil {
 		return json.Marshal(struct {
