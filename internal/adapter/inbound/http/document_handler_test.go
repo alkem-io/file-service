@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -75,6 +76,11 @@ func (p *stubProcessor) DetectMIME(_ []byte) string {
 	return "application/octet-stream"
 }
 func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
+	// Mirror the marshalContentMetadata invariant: dims must be both set or both nil.
+	// Fail fast at the source so test setup bugs surface immediately.
+	if (p.processDimsW == nil) != (p.processDimsH == nil) {
+		return port.ProcessResult{}, fmt.Errorf("stubProcessor: inconsistent dims: width=%v height=%v", p.processDimsW, p.processDimsH)
+	}
 	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
 	return port.ProcessResult{
 		Content:     content,
@@ -1945,6 +1951,13 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 	}
 	if resp2.ExternalID != resp1.ExternalID {
 		t.Errorf("externalID mismatch on dedup: first=%q, second=%q", resp1.ExternalID, resp2.ExternalID)
+	}
+	// FR-004: every metadata-returning response carries dims, including the dedup-hit branch.
+	if resp2.ImageWidth == nil || *resp2.ImageWidth != 512 {
+		t.Errorf("dedup-hit response imageWidth = %v, want 512", resp2.ImageWidth)
+	}
+	if resp2.ImageHeight == nil || *resp2.ImageHeight != 1024 {
+		t.Errorf("dedup-hit response imageHeight = %v, want 1024", resp2.ImageHeight)
 	}
 }
 

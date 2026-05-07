@@ -145,6 +145,14 @@ func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, exp
 	if err != nil {
 		return err
 	}
+	// Defensive: writing "{}" would leave the row matching the lazy-backfill
+	// predicate (content_metadata = '{}'::jsonb), re-arming the helper to
+	// retry on every subsequent metadata read. Service layer never reaches
+	// here with an empty-equivalent value, but skip explicitly to keep the
+	// backfill loop closed even if a future caller misuses this method.
+	if string(raw) == `{}` {
+		return nil
+	}
 	_, err = a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
 		ID:              uuidToPgx(id),
 		ContentMetadata: raw,
