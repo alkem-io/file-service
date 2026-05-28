@@ -1,5 +1,11 @@
 # Alkemio File Service (Go)
 
+> **Workspace context.** This repo is part of the Alkemio polyrepo at
+> [alkem-io/alkemio-workspace](https://github.com/alkem-io/alkemio-workspace).
+> Cross-repo (vertical) feature specs live there under `specs/NNN-*/`. When
+> working on a `feat/NNN-...` branch in this repo, the matching workspace
+> spec is the single source of truth.
+
 Go microservice replacing the existing TypeScript file-service. Serves
 as the universal file I/O gateway for the Alkemio platform — handles
 file read, write, delete, and existence checks with pluggable storage
