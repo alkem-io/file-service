@@ -16,7 +16,7 @@ jobs:
       - name: Prepare
         id: prep
         run: |
-          DOCKER_IMAGE=alkemio/file-service-go
+          DOCKER_IMAGE=alkemio/file-service
           [[ $GITHUB_REF == refs/tags/* ]] || { echo "Expected tag ref, got $GITHUB_REF" >&2; exit 1; }
           VERSION=${GITHUB_REF#refs/tags/}
           TAGS="${DOCKER_IMAGE}:${VERSION}"

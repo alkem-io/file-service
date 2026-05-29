@@ -1,4 +1,4 @@
-module github.com/alkem-io/file-service-go
+module github.com/alkem-io/file-service
 
 go 1.26.1
 

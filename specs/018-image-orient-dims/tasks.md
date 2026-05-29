@@ -17,7 +17,7 @@ description: "Tasks for image orientation canonicalization + dim reporting + laz
 - **[P]**: Different file, no in-flight dependencies → can run in parallel.
   - **Note**: Same-file additions (multiple test functions in one `_test.go`) are NOT marked [P] even when their content is independent. The strict rule is "different files" so that automated tooling can apply concurrent edits safely. Group same-file additions into a single task whose description lists every test name.
 - **[Story]**: US1 / US2 / US3 (only on user-story-phase tasks). Foundational, Phase 6, Phase 7, Polish phases have NO story label.
-- All paths are absolute from repo root: `/Users/antst/work/alkemio/file-service-go/`
+- All paths are absolute from repo root: `/Users/antst/work/alkemio/file-service/`
 
 ## Path Conventions
 

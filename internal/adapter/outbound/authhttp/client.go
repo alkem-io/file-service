@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
 type evaluateRequest struct {

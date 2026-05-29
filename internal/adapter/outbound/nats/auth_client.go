@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
 type evaluateRequest struct {

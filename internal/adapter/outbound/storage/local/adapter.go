@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
-	"github.com/alkem-io/file-service-go/internal/domain/service"
+	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 // Adapter implements port.StoragePort using the local filesystem.

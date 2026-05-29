@@ -8,7 +8,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	"github.com/alkem-io/file-service-go/internal/config"
+	"github.com/alkem-io/file-service/internal/config"
 )
 
 // ConnectNATS establishes a NATS connection with exponential backoff reconnect.
