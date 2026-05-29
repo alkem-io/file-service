@@ -19,7 +19,7 @@ jobs:
 
       - name: Build & push image
         run: |
-          IMAGE="${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service-go"
+          IMAGE="${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service"
           docker build -f Dockerfile . -t ${IMAGE}:${{ github.sha }} -t ${IMAGE}:latest
           docker push ${IMAGE}:${{ github.sha }}
 
@@ -43,7 +43,7 @@ jobs:
 
       - name: Create image pull secret
         run: |
-          kubectl create secret docker-registry file-service-go-registry \
+          kubectl create secret docker-registry file-service-registry \
             --docker-server=${{ secrets.REGISTRY_LOGIN_SERVER }} \
             --docker-username=${{ secrets.REGISTRY_USERNAME }} \
             --docker-password=${{ secrets.REGISTRY_PASSWORD }} \
@@ -52,9 +52,9 @@ jobs:
       - name: Attach image pull secret to deployment
         run: |
           kubectl patch deployment alkemio-file-service-deployment -p \
-            '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"file-service-go-registry"}]}}}}'
+            '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"file-service-registry"}]}}}}'
 
       - name: Update deployment image
         run: |
           kubectl set image deployment/alkemio-file-service-deployment \
-            alkemio-file-service=${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service-go:${{ github.sha }}
+            alkemio-file-service=${{ secrets.REGISTRY_LOGIN_SERVER }}/alkemio-file-service:${{ github.sha }}

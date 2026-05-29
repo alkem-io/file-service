@@ -14,17 +14,17 @@ import (
 
 	gobreaker "github.com/sony/gobreaker/v2"
 
-	httpAdapter "github.com/alkem-io/file-service-go/internal/adapter/inbound/http"
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb"
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/authhttp"
-	natsAdapter "github.com/alkem-io/file-service-go/internal/adapter/outbound/nats"
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/storage/local"
-	"github.com/alkem-io/file-service-go/internal/config"
-	"github.com/alkem-io/file-service-go/internal/domain/model"
-	"github.com/alkem-io/file-service-go/internal/domain/port"
-	"github.com/alkem-io/file-service-go/internal/domain/service"
-	"github.com/alkem-io/file-service-go/internal/imaging"
-	"github.com/alkem-io/file-service-go/internal/resilience"
+	httpAdapter "github.com/alkem-io/file-service/internal/adapter/inbound/http"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/authhttp"
+	natsAdapter "github.com/alkem-io/file-service/internal/adapter/outbound/nats"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
+	"github.com/alkem-io/file-service/internal/config"
+	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/service"
+	"github.com/alkem-io/file-service/internal/imaging"
+	"github.com/alkem-io/file-service/internal/resilience"
 )
 
 func connectDatabase(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, error) {

@@ -13,7 +13,7 @@ build-stub:
 	$(GO) build -o bin/$(BINARY) ./cmd/server/
 
 docker:
-	docker build -t alkemio/file-service-go:latest .
+	docker build -t alkemio/file-service:latest .
 
 test:
 	$(GO) test $(GOFLAGS) -coverprofile=coverage.out ./...

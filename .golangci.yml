@@ -54,7 +54,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/alkem-io/file-service-go
+        - github.com/alkem-io/file-service
 
 issues:
   max-issues-per-linter: 0
