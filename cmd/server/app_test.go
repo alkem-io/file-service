@@ -11,7 +11,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"go.uber.org/zap"
 
-	"github.com/alkem-io/file-service-go/internal/config"
+	"github.com/alkem-io/file-service/internal/config"
 )
 
 func TestConnectDatabase_Success(t *testing.T) {

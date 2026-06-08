@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
-	"github.com/alkem-io/file-service-go/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // PublicHandler handles the authenticated public file serving endpoint.

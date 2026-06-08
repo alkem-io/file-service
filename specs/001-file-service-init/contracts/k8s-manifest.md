@@ -25,7 +25,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: alkemio-file-service
-          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service-go:latest
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:latest
           ports:
             - containerPort: 4003
           env:
@@ -68,7 +68,7 @@ spec:
 
 | Aspect | TS file-service | Go file-service |
 |--------|----------------|-----------------|
-| Image | `alkemio-file-service:latest` | `alkemio-file-service-go:latest` |
+| Image | `alkemio-file-service:latest` | `alkemio-file-service:latest` |
 | Port | 4003 | 4003 (same) |
 | Volume mount | read-only | **read-write** (file-service handles writes now) |
 | RabbitMQ env | `RABBITMQ_*` secrets | Not needed (uses NATS from `alkemio-config`) |
