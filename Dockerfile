@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG GO_VERSION=1.26
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.24
 
 # Build Stage — native build per target platform (CGO needs target-arch vips-dev)
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
