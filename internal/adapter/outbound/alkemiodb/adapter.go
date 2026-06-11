@@ -213,3 +213,41 @@ func (a *Adapter) CountByExternalID(ctx context.Context, externalID string) (int
 	}
 	return int(count), nil
 }
+
+// ListByMimeTypes returns documents whose stored MIME type is one of the
+// given values (spec 019 repair-job scan). Partial rows: only identity and
+// content-summary fields are populated.
+func (a *Adapter) ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error) {
+	rows, err := a.queries.ListDocumentsByMimeTypes(ctx, mimeTypes)
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]model.Document, 0, len(rows))
+	for _, r := range rows {
+		docs = append(docs, model.Document{
+			ID:          pgxToUUID(r.ID),
+			ExternalID:  r.ExternalID,
+			MimeType:    r.MimeType,
+			Size:        int(r.Size),
+			DisplayName: r.DisplayName,
+		})
+	}
+	return docs, nil
+}
+
+// UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
+// relabel).
+func (a *Adapter) UpdateMimeType(ctx context.Context, id uuid.UUID, mimeType string) error {
+	rows, err := a.queries.UpdateDocumentMimeType(ctx, queries.UpdateDocumentMimeTypeParams{
+		ID:          uuidToPgx(id),
+		MimeType:    mimeType,
+		UpdatedDate: timeToPgxNow(),
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return model.ErrDocumentNotFound
+	}
+	return nil
+}

@@ -63,3 +63,22 @@ RETURNING "externalID", "authorizationId", "tagsetId";
 
 -- name: CountDocumentsByExternalID :one
 SELECT COUNT(*) FROM file WHERE "externalID" = $1;
+
+-- name: ListDocumentsByMimeTypes :many
+-- Repair-job scan (spec 019): rows whose stored type is one of the given
+-- (generic) MIME types. Office-extension filtering happens in the domain
+-- layer, which owns the office vocabulary.
+SELECT id, "externalID", "mimeType", size, "displayName"
+FROM file
+WHERE "mimeType" = ANY($1::text[])
+ORDER BY "createdDate" ASC;
+
+-- name: UpdateDocumentMimeType :execrows
+-- Repair-job relabel (spec 019): corrects only the stored MIME type.
+-- Deliberately narrow — content fields change exclusively via
+-- UpdateDocumentFile.
+UPDATE file
+SET "mimeType"    = $2,
+    "updatedDate" = $3,
+    version       = version + 1
+WHERE id = $1;

@@ -30,6 +30,12 @@ func IsGenericMIME(mimeType string) bool {
 	return ok
 }
 
+// GenericMIMEList returns the generic MIME types as a slice (stable order),
+// for SQL ANY() parameters and similar list-shaped consumers.
+func GenericMIMEList() []string {
+	return []string{"application/zip", "application/octet-stream", "text/plain"}
+}
+
 // OfficeExtToMIME maps office-document filename extensions to their
 // canonical MIME types — the formats stored by the Collabora editing flow.
 var OfficeExtToMIME = map[string]string{
