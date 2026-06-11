@@ -35,6 +35,7 @@ proven it in production use.
 - Q: What default upload cap ships, and what ceiling must the feature be validated at? → A: Default stays 32 MiB (no rollout behavior change; raising it later is config-only per environment, paired with the matching ingress bump as an infra-ops chore). The streaming pipeline is validated up to 1 GiB.
 - Q: What timeout policy governs streaming uploads (the server currently enforces a global 30 s read timeout)? → A: Progress-based idle timeout: an upload stays alive while bytes keep arriving and is aborted after ~30 s without progress; total duration is implicitly bounded by cap ÷ minimum rate. Non-upload endpoints keep today's strict timeouts. A stalled/slowloris connection is killed quickly; a slow-but-moving large upload is never penalized.
 - Q: The image library fork decodes the full frame to RAM (by design, for early source release) — does the transcode path need an explicit decode guard? → A: Yes, two-track: (1) this feature ships a configurable pixel-dimension budget, checked from the stream header before any decode — images above it are rejected; (2) in parallel, the govips fork gains sequential-streaming and disk-backed-decode modes (separate fork workstream, prompt handed off), after which the budget can be relaxed. The fork enhancement is NOT a dependency of this feature.
+- Q: The fork workstream landed (TranscodeStream with sequential fast path + disc-backed materialization, threshold/scratch knobs, backpressure-safe chunked output) — does that change our requirements? → A: The fork is sufficient; no further fork changes needed. Three codec realities adjust this spec's framing: (1) HEIC decodes whole-frame inside the codec regardless of access mode, so the FR-010 pixel budget remains permanently load-bearing for such formats (not merely transitional) — it is the only guard on codec-internal decode memory, and also defends CPU and scratch disk; (2) interlaced/progressive JPEG cannot stream — whether the service keeps its current (interlaced) export params for byte-identity or switches to non-interlaced for true output streaming is a plan decision; (3) the library's pipe read limit, disc threshold, and scratch directory become service configuration, and scratch disk becomes a deployment sizing concern.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -196,11 +197,11 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 - **FR-010**: Images entering the transcode path MUST pass a configurable
   pixel-dimension budget, evaluated from the stream header before any
   decoding begins; images exceeding it are rejected with an explicit error
-  (counted and logged per FR-008). This bounds the decode working set —
-  the one memory component FR-001 excludes — deterministically. The budget
-  becomes relaxable once the image library gains streaming/disk-backed
-  decode modes (parallel fork workstream; not a dependency of this
-  feature).
+  (counted and logged per FR-008). With the image library's disc-backed
+  decode landed, RAM for most formats is bounded by the configured
+  threshold; the pixel budget remains permanently load-bearing for formats
+  whose codecs decode whole-frame internally (HEIC), and defends CPU time
+  and scratch-disk space for all formats.
 
 ### Key Entities
 
@@ -234,14 +235,20 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 ## Assumptions
 
-- Streaming decode/encode for image conversion is provided by the
-  project's image-processing library fork (antst/govips#2: reader-fed load,
-  writer-fed save, bounded header buffering). The service consumes the fork
-  until the change is accepted upstream; upstreaming happens after this
-  feature has hardened it (explicitly out of scope here).
-- Decoded pixel data during image conversion inherently occupies memory; the
-  budget guarantee for transcoded images is "no whole compressed copies",
-  not "no decode working set".
+- Streaming decode/encode for image conversion is provided by the project's
+  image-processing library fork (antst/govips#2: reader-fed load, writer-fed
+  save, one-shot reader→writer transcode with automatic path selection,
+  sequential fast path, disc-backed materialization with configurable
+  threshold and scratch directory, bounded header buffering). The service
+  consumes the fork until the change is accepted upstream; upstreaming
+  happens after this feature has hardened it (explicitly out of scope here).
+- Decode memory for most formats is bounded by the library's configured
+  disc threshold (frames above it materialize to scratch disk); formats
+  whose codecs decode whole-frame internally (HEIC) and interlaced inputs
+  are instead bounded by the FR-010 pixel budget and the library's pipe
+  read limit. The library's threshold, scratch directory, and pipe read
+  limit are service configuration; scratch disk capacity is a deployment
+  concern.
 - Content-addressed storage naming (hash as identity) is unchanged; computing
   the identity at end-of-stream and committing a staged object is an
   acceptable storage-layer strategy. The staging/commit contract MUST be
@@ -262,9 +269,10 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 - Upstreaming the image-library streaming support (follow-up after this
   feature stabilizes).
-- The image-library fork's sequential-streaming / disk-backed-decode modes
-  (parallel fork workstream; once landed, the pixel-dimension budget of
-  FR-010 may be relaxed in a follow-up).
+- Further image-library fork changes — the sequential-streaming /
+  disc-backed-decode workstream has landed on antst/govips#2 and is
+  sufficient; streaming HEIC decode would require upstream libheif work and
+  is explicitly not pursued (FR-010 covers it).
 - Changing the public/internal API shapes, dedup semantics, or bucket
   policy semantics.
 - Download/serving path changes (already streams from storage; not part of
