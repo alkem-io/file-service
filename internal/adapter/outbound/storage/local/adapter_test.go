@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alkem-io/file-service-go/internal/domain/service"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 func TestSave_StoresFile(t *testing.T) {

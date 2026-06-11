@@ -8,7 +8,7 @@ import (
 	"github.com/davidbyttow/govips/v2/vips"
 	"github.com/gabriel-vasile/mimetype"
 
-	"github.com/alkem-io/file-service-go/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // Processor implements port.ImageProcessor using govips and mimetype.

@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
-	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
+	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
 // parseContentMetadata produces the typed view of a content_metadata JSONB

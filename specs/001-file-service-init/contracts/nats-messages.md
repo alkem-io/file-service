@@ -6,7 +6,7 @@ File-service-go is a **client** of the authorization-evaluation-service via NATS
 
 `auth.evaluate` (configurable via `NATS_SUBJECT` env var)
 
-## Request (sent by file-service-go)
+## Request (sent by file-service)
 
 ```json
 {

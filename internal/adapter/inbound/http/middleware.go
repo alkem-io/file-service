@@ -45,6 +45,32 @@ func GetActorID(ctx context.Context) string {
 	return ""
 }
 
+// HeaderActorID is the header carrying the gateway-resolved actor identity.
+const HeaderActorID = "X-Alkemio-Actor-Id"
+
+// ActorHeaderExtractor reads the actor id from the `X-Alkemio-Actor-Id`
+// header stamped by Traefik's `alkemio-resolve` forwardAuth middleware
+// (alkemio-server's /api/auth/resolve endpoint). The gateway is responsible
+// for validating the request's credentials (cookie session OR Hydra-issued
+// bearer) before stamping the header. The chain `strip-client-alkemio-headers`
+// → `alkemio-resolve` ensures client-supplied X-Alkemio-* are blanked before
+// resolve runs, so the header file-service receives is server-trusted.
+//
+// The gateway ALWAYS stamps the header: anonymous callers get the nil-UUID
+// sentinel, which auth-evaluation-service resolves to GLOBAL_ANONYMOUS.
+// 401 if the header is missing — the gateway didn't run for this request.
+func ActorHeaderExtractor(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actorID := r.Header.Get(HeaderActorID)
+		if actorID == "" {
+			writeJSONError(w, http.StatusUnauthorized, "missing actor identity")
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxKeyActorID, actorID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // JWTExtractor extracts the alkemio_actor_id claim from the Oathkeeper-injected JWT.
 // Oathkeeper has already validated the token; we just decode the payload.
 //
@@ -56,6 +82,10 @@ func GetActorID(ctx context.Context) string {
 // public-bucket visuals to non-authenticated users — those documents'
 // authorization policies grant `read` to the `global-anonymous` credential
 // that every caller implicitly carries.
+//
+// DEPRECATED post-Oathkeeper-removal: use `ActorHeaderExtractor` once the
+// `alkemio-resolve` gateway forwardAuth is in place. Kept for backwards-compat
+// during the migration window.
 func JWTExtractor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actorID := extractActorID(r.Header.Get("Authorization"))

@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
 // AuthPort abstracts the authorization check against the auth-evaluation-service.

@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/alkemiodb/queries"
-	"github.com/alkem-io/file-service-go/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
+	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
 // Adapter implements port.DocumentRepo using pgx/sqlc.

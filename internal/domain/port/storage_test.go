@@ -3,8 +3,8 @@ package port_test
 import (
 	"testing"
 
-	"github.com/alkem-io/file-service-go/internal/adapter/outbound/storage/local"
-	"github.com/alkem-io/file-service-go/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
+	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // StoragePortContractTest exercises any StoragePort implementation.

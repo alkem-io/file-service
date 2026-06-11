@@ -5,7 +5,7 @@ package imaging
 import (
 	"net/http"
 
-	"github.com/alkem-io/file-service-go/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // Processor is a stub implementation when libvips is not available.

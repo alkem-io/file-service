@@ -1,6 +1,6 @@
 package port
 
-import "github.com/alkem-io/file-service-go/internal/domain/model"
+import "github.com/alkem-io/file-service/internal/domain/model"
 
 // StoragePort abstracts the file storage backend (local filesystem, S3, etc.).
 type StoragePort interface {

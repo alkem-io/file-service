@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/alkem-io/file-service-go/internal/domain/model"
-	"github.com/alkem-io/file-service-go/internal/domain/service"
+	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 func testRouter() http.Handler {
@@ -114,21 +114,37 @@ func TestRouter_DebugVars(t *testing.T) {
 	}
 }
 
-// Anonymous reach-through: the public route does NOT 401 on a missing JWT.
-// JWTExtractor is permissive; the auth-evaluation-service decides whether
-// anonymous reads are allowed against the document's policy.
+// Anonymous reach-through: the gateway ALWAYS stamps X-Alkemio-Actor-Id —
+// anonymous callers get the nil-UUID sentinel, which auth-evaluation-service
+// resolves to GLOBAL_ANONYMOUS. The public route must serve such requests
+// (policy decides), but 401 when the header is absent entirely — that means
+// the gateway never ran and the request bypassed the trust chain.
 // testRouter() seeds a doc and a permissive mockAuth, so anonymous → 200.
 func TestRouter_PublicDocument_AcceptsAnonymous(t *testing.T) {
-	r := testRouter()
+	t.Run("GatewayStampedAnonymous", func(t *testing.T) {
+		r := testRouter()
 
-	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
-	// No Authorization header — anonymous
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
+		req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+		req.Header.Set(HeaderActorID, uuid.Nil.String())
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("GET /rest/storage/document/:id without JWT = %d, want 200 (auth-eval allows anonymous via testRouter mock)", rr.Code)
-	}
+		if rr.Code != http.StatusOK {
+			t.Errorf("GET /rest/storage/document/:id with nil-UUID actor header = %d, want 200 (auth-eval allows anonymous via testRouter mock)", rr.Code)
+		}
+	})
+
+	t.Run("MissingHeader_401", func(t *testing.T) {
+		r := testRouter()
+
+		req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+uuid.New().String(), nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("GET /rest/storage/document/:id without actor header = %d, want 401 (gateway didn't stamp identity)", rr.Code)
+		}
+	})
 }
 
 func TestRouter_InternalGetMeta(t *testing.T) {

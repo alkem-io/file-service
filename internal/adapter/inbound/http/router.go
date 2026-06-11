@@ -51,9 +51,12 @@ func NewRouter(deps Deps) *chi.Mux {
 	// Readiness (K8s readinessProbe): checks DB (and NATS if configured).
 	r.Method("GET", "/health", deps.HealthHandler)
 
-	// Public endpoints (Oathkeeper strips /api/private, arrives as /rest/storage/...)
+	// Public endpoints. Traefik's `alkemio-resolve` forwardAuth establishes
+	// identity at the gateway and stamps `X-Alkemio-Actor-Id`; we trust that
+	// header. Strip-prefix in Traefik turns `/api/private/rest/storage/...`
+	// into `/rest/storage/...` before it arrives here.
 	r.Route("/rest/storage", func(r chi.Router) {
-		r.Use(JWTExtractor)
+		r.Use(ActorHeaderExtractor)
 		r.Get("/document/{id}", deps.PublicHandler.ServeDocument) // backward compat alias
 		r.Get("/file/{id}", deps.PublicHandler.ServeDocument)
 	})
