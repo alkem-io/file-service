@@ -31,6 +31,16 @@ policy check. The two paths are inconsistent. On the acceptance environment ther
 currently ~10 corrupted records (6 stored as `application/zip`, 4 zero-byte stored as
 `text/plain`), all office documents that were edited or newly created.
 
+## Clarifications
+
+### Session 2026-06-11
+
+- Q: What should content-replace do when replacement content is unambiguously a different concrete type than the stored type? → A: Reject the replacement with an explicit error; stored content and type stay unchanged.
+- Q: What should happen when a 0-byte (empty) replacement is received for a document that already has content (e.g., a failed editor save)? → A: Reject it with an explicit error; existing content and type are preserved. A valid office file is never 0 bytes, so an empty body always signals a failed save.
+- Q: Could the zero-content files be results of failed writes (not just never-saved placeholders)? → A: Yes. New documents are created as 0-byte placeholders with the *correct* canonical MIME; the four corrupted rows are `text/plain`, which only occurs when the replace path actually accepted and re-sniffed an empty body. They are the residue of empty/failed writes being accepted. Consequences: replacement must be atomic (no partial/empty content persisted on failure), and remediation must first check whether prior content survives in content-addressed storage before declaring it unrecoverable.
+- Q: How is the corrupted-row remediation delivered? → A: Shipped with the service and run automatically in every environment (the bug is labeled `production`, so acceptance is unlikely to be the only damaged environment; counts are re-verified at run time).
+- Q: Shipped how — the `file` table's schema migrations are owned by the server repo; does this become a multi-repo fix? → A: No. Remediation is delivered as an idempotent self-repair job inside this service (which already owns runtime writes to the stored type — that is the bug). It is a data repair, not a schema change, so server-side migration ownership is not violated and the fix stays single-repo.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Edited office document stays openable (Priority: P1)
@@ -81,31 +91,29 @@ real save through content replacement, and verify the type stays the office type
    editor save writes real content, **Then** the stored type remains the canonical
    office type and never becomes `text/plain`.
 2. **Given** a document with an office type, **When** an empty (0-byte) replacement is
-   received (e.g., a failed save), **Then** the document's existing type is preserved
-   (or the replacement is rejected) — never relabeled `text/plain`.
+   received (e.g., a failed save), **Then** the replacement is rejected and the
+   document's existing content and type are preserved — never relabeled `text/plain`.
 
 ---
 
-### User Story 3 - Genuinely different content is reconciled, not silently relabeled (Priority: P3)
+### User Story 3 - Genuinely different content is rejected, not silently relabeled (Priority: P3)
 
 Replacement content that is unambiguously a different document type (e.g., a word
-processing document pushed into a presentation slot) is reconciled against the
-document's known type and the destination bucket's allowed types — rejected or handled
-explicitly, never silently relabeled.
+processing document pushed into a presentation slot) is rejected with an explicit
+error — the stored content and type stay unchanged; never silently relabeled.
 
 **Why this priority**: A real type change must not be a silent side effect of a content
 save. This protects type integrity but occurs far less often than the corruption above.
 
 **Independent Test**: Push a valid .docx body into an existing .pptx document and
-verify the operation is rejected (or explicitly reconciled per bucket policy) rather
-than the stored type being silently switched.
+verify the operation is rejected and the stored content and type are unchanged.
 
 **Acceptance Scenarios**:
 
 1. **Given** an existing presentation document, **When** replacement content is
-   unambiguously detected as a different concrete type, **Then** the system reconciles
-   against the document's known type and the bucket's allowed types and does not
-   silently relabel the document.
+   unambiguously detected as a different concrete type, **Then** the replacement is
+   rejected with a clear error and the document's stored content and type are
+   unchanged.
 2. **Given** a bucket whose policy disallows the detected replacement type, **When**
    such content is pushed, **Then** the replacement is rejected with a clear error.
 
@@ -116,13 +124,16 @@ than the stored type being silently switched.
 - Replacement content detected only as a generic/ambiguous type (`application/zip`,
   `application/octet-stream`, `text/plain`): the document's existing type is
   authoritative.
-- 0-byte replacement content: existing type preserved (or replacement rejected); never
-  re-detected from empty bytes.
+- 0-byte replacement content: rejected with an explicit error; existing content and
+  type preserved; never re-detected from empty bytes.
 - Replacement of a non-office document (e.g., an image) follows the same reconciliation
   rules without regression to current behavior.
 - Already-corrupted records (generic type stored for an office document): remediation
-  relabels recoverable records; zero-byte placeholders with no recoverable content are
-  identified and reported rather than silently relabeled.
+  relabels recoverable records; zero-byte records are checked for a surviving prior
+  content version in storage, restored where possible, and otherwise identified and
+  reported rather than silently relabeled.
+- A write failure mid-replacement (e.g., interrupted upload to object storage): the
+  document's previously stored content and type remain intact (atomic replacement).
 
 ## Requirements *(mandatory)*
 
@@ -133,18 +144,31 @@ than the stored type being silently switched.
 - **FR-002**: On content replacement, the stored type MUST never be downgraded to a
   generic/ambiguous value (`application/zip`, `application/octet-stream`, `text/plain`)
   on the basis of content detection.
-- **FR-003**: When content detection is ambiguous, or the replacement content is empty,
-  the document's existing/known type MUST be treated as authoritative.
-- **FR-004**: Replacement content that is unambiguously a different concrete type MUST
-  be reconciled against the document's known type and the destination bucket's allowed
-  types — rejected or handled explicitly, never silently relabeled.
+- **FR-003**: When content detection yields only a generic/ambiguous result, the
+  document's existing/known type MUST be treated as authoritative and the replacement
+  accepted under that type.
+- **FR-003a**: An empty (0-byte) replacement MUST be rejected with an explicit error;
+  the document's existing content and type are preserved. Empty content is never
+  written over existing content and never re-detected as a type.
+- **FR-004**: Replacement content that is unambiguously a different concrete type than
+  the document's stored type MUST be rejected with an explicit error; the stored
+  content and type remain unchanged. The stored type is never silently relabeled.
 - **FR-005**: The creation path and the content-replacement path MUST behave
   consistently in how they determine and validate the stored type, including enforcing
   the bucket's allowed-type policy on replacement.
-- **FR-006**: Existing corrupted records MUST be remediated: documents stored as
-  `application/zip` with intact office content are relabeled to their correct office
-  type; zero-byte `text/plain` placeholders are identified and reported as
-  unrecoverable (their content was never written).
+- **FR-006**: Existing corrupted records MUST be remediated by an idempotent
+  self-repair job that ships with the service and runs automatically in every
+  environment on deploy: documents stored as `application/zip` with intact office
+  content are relabeled to their correct office type. For zero-byte `text/plain`
+  records (the residue of accepted empty/failed writes), remediation MUST first check
+  whether a prior content version still exists in content-addressed storage and
+  restore it if found; only records with no recoverable prior content are reported as
+  unrecoverable. The job re-verifies affected records at run time rather than relying
+  on counts observed at spec time.
+- **FR-007**: Content replacement MUST be atomic: if a replacement fails at any point
+  (validation rejection or write failure), the previously stored content and type
+  MUST remain intact and retrievable. Partial or empty content is never persisted as
+  a side effect of a failed save.
 
 ### Key Entities
 
@@ -163,13 +187,15 @@ than the stored type being silently switched.
   reopens successfully 100% of the time, across any number of edit/save cycles.
 - **SC-002**: After the fix, zero office-named documents are stored with
   `application/zip`, `application/octet-stream`, or `text/plain` types.
-- **SC-003**: The 6 known corrupted `application/zip` documents on the acceptance
-  environment are relabeled to their correct office types and reopen in the editor.
-- **SC-004**: The 4 known zero-byte `text/plain` placeholders are identified and
-  reported as unrecoverable, with no new occurrences after the fix.
+- **SC-003**: Corrupted `application/zip` office documents are relabeled to their
+  correct office types and reopen in the editor, in every environment (6 known on
+  acceptance at spec time; production to be verified by the repair job).
+- **SC-004**: The 4 known zero-byte `text/plain` records are checked for a surviving
+  prior content version and restored where one exists; the rest are reported as
+  unrecoverable. No new zero-byte office records occur after the fix.
 - **SC-005**: Replacing a document's content with a genuinely different document type
-  results in an explicit rejection or reconciliation outcome — never a silent type
-  change.
+  is rejected with an explicit error — never a silent type change, never a silent
+  content swap.
 
 ## Assumptions
 
@@ -177,9 +203,12 @@ than the stored type being silently switched.
   reconciles declared type, content, and bucket policy).
 - Content detection remains in use as a *guard* ("does this look like what it claims?")
   but is no longer the *source of truth* for a document's type on replacement.
-- Remediation of corrupted records is a one-off data correction within this service's
-  own data; the 4 zero-byte placeholders have no recoverable content and would need to
-  be re-created by users.
+- Remediation is a data repair within this service's own data, shipped as an
+  idempotent self-repair job — not a schema migration (schema migrations for this
+  table are owned elsewhere; this service already owns runtime writes to the stored
+  type). The 4 known zero-byte records resulted from accepted empty/failed writes;
+  their content is recoverable only if a prior version still exists in
+  content-addressed storage — otherwise those documents need re-creating by users.
 - No changes are required in any other service or client: the editor-URL/extension
   fallback in the WOPI service is optional defense-in-depth and out of scope; the
   original bug report against the web client is mis-filed — no client change is needed.
