@@ -45,6 +45,9 @@ func GetActorID(ctx context.Context) string {
 	return ""
 }
 
+// HeaderActorID is the header carrying the gateway-resolved actor identity.
+const HeaderActorID = "X-Alkemio-Actor-Id"
+
 // ActorHeaderExtractor reads the actor id from the `X-Alkemio-Actor-Id`
 // header stamped by Traefik's `alkemio-resolve` forwardAuth middleware
 // (alkemio-server's /api/auth/resolve endpoint). The gateway is responsible
@@ -53,9 +56,9 @@ func GetActorID(ctx context.Context) string {
 // → `alkemio-resolve` ensures client-supplied X-Alkemio-* are blanked before
 // resolve runs, so the header file-service receives is server-trusted.
 //
-// 401 if the header is missing — the gateway didn't authenticate the request.
-const HeaderActorID = "X-Alkemio-Actor-Id"
-
+// The gateway ALWAYS stamps the header: anonymous callers get the nil-UUID
+// sentinel, which auth-evaluation-service resolves to GLOBAL_ANONYMOUS.
+// 401 if the header is missing — the gateway didn't run for this request.
 func ActorHeaderExtractor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actorID := r.Header.Get(HeaderActorID)
