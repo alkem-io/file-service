@@ -37,6 +37,10 @@ type mockRepo struct {
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
+	// Replace-path capture (spec 019): persisted MIME and call count.
+	updateFileCalls    int
+	lastUpdateFileMime string
+
 	// Lazy-backfill capture (US1).
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
@@ -71,7 +75,9 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata
 	}
 	return doc.ID, m.createErr
 }
-func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
+func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, mimeType string, _ int, contentMetadata model.ContentMetadata) error {
+	m.updateFileCalls++
+	m.lastUpdateFileMime = mimeType
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
@@ -138,9 +144,18 @@ type mockProcessor struct {
 	measureDimsW   *int
 	measureDimsH   *int
 	measureDimsErr error
+
+	// detectMIME override — when non-empty, replaces the default
+	// application/octet-stream (replace-path reconciliation tests).
+	detectMIME string
 }
 
-func (m *mockProcessor) DetectMIME(_ []byte) string { return "application/octet-stream" }
+func (m *mockProcessor) DetectMIME(_ []byte) string {
+	if m.detectMIME != "" {
+		return m.detectMIME
+	}
+	return "application/octet-stream"
+}
 func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
 	if m.processErr != nil {
 		return port.ProcessResult{}, m.processErr

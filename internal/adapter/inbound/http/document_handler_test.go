@@ -2189,3 +2189,92 @@ func TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims(t *testing.T) {
 		t.Errorf("imageHeight = %v, want 480", resp.ImageHeight)
 	}
 }
+
+// --- Spec 019: replace-path MIME protection ---
+
+const testPptxMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+const testDocxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+// US1/T010: a generic sniff over an office document returns 200 and the
+// response reports the unchanged stored type.
+func TestDocumentHandler_ReplaceContent_KeepsStoredTypeOnGenericSniff(t *testing.T) {
+	h, repo, _, processor := newDocHandlerWithProcessor()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: testPptxMime}
+	processor.detectMIME = "application/zip"
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("collabora save-back bytes"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp ReplaceContentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.MimeType != testPptxMime {
+		t.Errorf("mimeType = %q, want %q (stored type must survive a generic sniff)", resp.MimeType, testPptxMime)
+	}
+}
+
+// US2/T014: empty body → 422 EMPTY_CONTENT, row untouched.
+func TestDocumentHandler_ReplaceContent_EmptyBody422(t *testing.T) {
+	h, repo, storage, _ := newDocHandlerWithProcessor()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: testPptxMime}
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader(""))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp RejectedContentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "EMPTY_CONTENT" {
+		t.Errorf("code = %q, want EMPTY_CONTENT", resp.Code)
+	}
+	if storage.saved != nil {
+		t.Error("blob written for rejected empty body")
+	}
+}
+
+// US3/T017: concrete mismatch → 422 MIME_MISMATCH with the MIME pair.
+func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
+	h, repo, storage, processor := newDocHandlerWithProcessor()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: testPptxMime}
+	processor.detectMIME = testDocxMime
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("a docx body"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp RejectedContentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "MIME_MISMATCH" {
+		t.Errorf("code = %q, want MIME_MISMATCH", resp.Code)
+	}
+	if resp.Detail == nil || resp.Detail.KnownMime != testPptxMime || resp.Detail.DetectedMime != testDocxMime {
+		t.Errorf("detail = %+v, want known=%q detected=%q", resp.Detail, testPptxMime, testDocxMime)
+	}
+	if storage.saved != nil {
+		t.Error("blob written for rejected mismatched content")
+	}
+}

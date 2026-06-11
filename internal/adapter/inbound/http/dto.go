@@ -81,6 +81,27 @@ func (r ReplaceContentResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
+// MimeMismatchDetail carries the MIME pair behind a MIME_MISMATCH rejection.
+type MimeMismatchDetail struct {
+	KnownMime    string `json:"knownMime"`
+	DetectedMime string `json:"detectedMime"`
+}
+
+// RejectedContentResponse is the 422 body for content-replace rejections
+// (spec 019). Code is machine-readable and stable: EMPTY_CONTENT or
+// MIME_MISMATCH. Detail is present only for MIME_MISMATCH.
+type RejectedContentResponse struct {
+	Code   string              `json:"code"`
+	Error  string              `json:"error"`
+	Detail *MimeMismatchDetail `json:"detail,omitempty"`
+}
+
+func (r RejectedContentResponse) Render(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_ = json.NewEncoder(w).Encode(r)
+}
+
 // DocumentMetaResponse is returned by GET /internal/document/:id/meta.
 type DocumentMetaResponse struct {
 	ID                string    `json:"id"`

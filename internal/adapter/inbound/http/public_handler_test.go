@@ -120,9 +120,11 @@ type mockStorage struct {
 	data    []byte
 	err     error
 	saveErr error
+	saved   []byte // captures the last Save payload (replace-path rejection tests)
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
+	m.saved = content
 	if m.saveErr != nil {
 		return model.StoredFile{}, m.saveErr
 	}

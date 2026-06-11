@@ -511,9 +511,23 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 	// not touch externalID, so it cannot trigger this.
 	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
 	if err != nil {
+		var mismatch *service.MimeMismatchError
 		switch {
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "document not found")
+		case errors.Is(err, service.ErrEmptyContent):
+			ReplaceOutcomes.Add(service.ReplaceOutcomeRejectedEmpty, 1)
+			RejectedContentResponse{Code: "EMPTY_CONTENT", Error: err.Error()}.Render(w)
+		case errors.As(err, &mismatch):
+			ReplaceOutcomes.Add(service.ReplaceOutcomeRejectedMismatch, 1)
+			RejectedContentResponse{
+				Code:  "MIME_MISMATCH",
+				Error: err.Error(),
+				Detail: &MimeMismatchDetail{
+					KnownMime:    mismatch.Known,
+					DetectedMime: mismatch.Detected,
+				},
+			}.Render(w)
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, service.ErrConflict):
@@ -523,6 +537,9 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
 		return
+	}
+	if result.ReplaceOutcome != "" {
+		ReplaceOutcomes.Add(result.ReplaceOutcome, 1)
 	}
 
 	ReplaceContentResponse{
