@@ -36,5 +36,10 @@ type DocumentRepo interface {
 	ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error)
 	// UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
 	// relabel). Content fields change exclusively via UpdateFile.
-	UpdateMimeType(ctx context.Context, id uuid.UUID, mimeType string) error
+	// Compare-and-set: the relabel applies only while the row's externalID
+	// still equals expectedExternalID — the content the caller sniffed. A
+	// false return (no error) means the guard failed: a concurrent Replace
+	// changed the content (and already wrote the correct MIME type) or the
+	// row was deleted; the caller must not treat the row as relabeled.
+	UpdateMimeType(ctx context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error)
 }

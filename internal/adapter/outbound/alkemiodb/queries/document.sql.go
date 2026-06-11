@@ -337,19 +337,29 @@ SET "mimeType"    = $2,
     "updatedDate" = $3,
     version       = version + 1
 WHERE id = $1
+  AND "externalID" = $4
 `
 
 type UpdateDocumentMimeTypeParams struct {
 	ID          pgtype.UUID        `json:"id"`
 	MimeType    string             `json:"mimeType"`
 	UpdatedDate pgtype.Timestamptz `json:"updatedDate"`
+	ExternalID  string             `json:"externalID"`
 }
 
 // Repair-job relabel (spec 019): corrects only the stored MIME type.
 // Deliberately narrow — content fields change exclusively via
-// UpdateDocumentFile.
+// UpdateDocumentFile. Compare-and-set on externalID: the relabel applies
+// only if the content is still the one the repair job sniffed, protecting
+// against a concurrent Replace (which already set the correct MIME type)
+// landing between the suspect scan and this write.
 func (q *Queries) UpdateDocumentMimeType(ctx context.Context, arg UpdateDocumentMimeTypeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateDocumentMimeType, arg.ID, arg.MimeType, arg.UpdatedDate)
+	result, err := q.db.Exec(ctx, updateDocumentMimeType,
+		arg.ID,
+		arg.MimeType,
+		arg.UpdatedDate,
+		arg.ExternalID,
+	)
 	if err != nil {
 		return 0, err
 	}

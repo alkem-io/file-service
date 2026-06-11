@@ -286,6 +286,6 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
 	return nil, nil
 }
-func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _ string) error {
-	return nil
+func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
 }

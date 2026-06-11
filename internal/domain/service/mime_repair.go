@@ -67,11 +67,22 @@ func (s *FileService) RunMimeRepair(ctx context.Context) MimeRepairSummary {
 				zap.String("mimeType", doc.MimeType),
 				zap.String("reason", "content was never stored or was overwritten by an accepted empty save"))
 		case bytes.HasPrefix(content, zipMagic):
-			if err := s.Repo.UpdateMimeType(ctx, doc.ID, canonical); err != nil {
+			// Compare-and-set on the scanned externalID: a Replace landing
+			// between the scan and this write already set the correct MIME
+			// type for the new content — never overwrite it with a type
+			// sniffed from the stale blob.
+			relabeled, err := s.Repo.UpdateMimeType(ctx, doc.ID, doc.ExternalID, canonical)
+			if err != nil {
 				sum.Errors++
 				s.Logger.Error("mime-repair: relabel failed",
 					zap.String("documentID", doc.ID.String()),
 					zap.Error(err))
+				continue
+			}
+			if !relabeled {
+				s.Logger.Info("mime-repair: row changed concurrently; skipping relabel",
+					zap.String("documentID", doc.ID.String()),
+					zap.String("scannedExternalID", doc.ExternalID))
 				continue
 			}
 			sum.Relabeled++

@@ -236,18 +236,18 @@ func (a *Adapter) ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]mo
 }
 
 // UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
-// relabel).
-func (a *Adapter) UpdateMimeType(ctx context.Context, id uuid.UUID, mimeType string) error {
+// relabel). Compare-and-set on externalID: 0 rows affected means the row's
+// content changed concurrently (or the row is gone) — reported as
+// (false, nil) so the caller skips instead of overwriting a fresher value.
+func (a *Adapter) UpdateMimeType(ctx context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error) {
 	rows, err := a.queries.UpdateDocumentMimeType(ctx, queries.UpdateDocumentMimeTypeParams{
 		ID:          uuidToPgx(id),
 		MimeType:    mimeType,
 		UpdatedDate: timeToPgxNow(),
+		ExternalID:  expectedExternalID,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	if rows == 0 {
-		return model.ErrDocumentNotFound
-	}
-	return nil
+	return rows > 0, nil
 }

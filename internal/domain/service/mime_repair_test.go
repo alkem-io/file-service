@@ -33,6 +33,36 @@ func TestRunMimeRepair_RelabelsVerifiedOfficeZip(t *testing.T) {
 	if got := repo.lastListMimeTypes; len(got) != 3 {
 		t.Errorf("suspect scan used %v, want the 3 generic MIME types", got)
 	}
+	if got := repo.relabelExternalIDs[docID]; got != "zipdoc" {
+		t.Errorf("relabel guarded on externalID %q, want the scanned %q", got, "zipdoc")
+	}
+}
+
+func TestRunMimeRepair_ConcurrentReplaceLosesGuardSkipsRelabel(t *testing.T) {
+	// A Replace landing between the suspect scan and the relabel changes the
+	// row's externalID (and already wrote the correct MIME type). The
+	// compare-and-set guard fails — the repair must skip, not overwrite,
+	// and must not count the row as relabeled or as an error.
+	docID := uuid.New()
+	repo := &mockRepo{
+		suspects: []model.Document{
+			{ID: docID, ExternalID: "stale-hash", MimeType: "application/zip", DisplayName: "Deck.pptx"},
+		},
+		updateMimeLostRace: true,
+	}
+	storage := &mockStorage{dataByID: map[string][]byte{
+		"stale-hash": append([]byte("PK\x03\x04"), make([]byte, 16)...),
+	}}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage}
+
+	sum := svc.RunMimeRepair(context.Background())
+
+	if sum != (MimeRepairSummary{}) {
+		t.Fatalf("summary = %+v, want all zeros (lost race is a silent skip)", sum)
+	}
+	if len(repo.relabeled) != 0 {
+		t.Error("lost-race row was relabeled; guard must prevent overwriting the fresher MIME type")
+	}
 }
 
 func TestRunMimeRepair_ZeroByteIsUnrecoverable(t *testing.T) {

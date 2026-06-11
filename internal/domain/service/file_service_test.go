@@ -42,11 +42,13 @@ type mockRepo struct {
 	lastUpdateFileMime string
 
 	// MIME-repair capture (spec 019).
-	suspects          []model.Document
-	listErr           error
-	lastListMimeTypes []string
-	relabeled         map[uuid.UUID]string
-	updateMimeErr     error
+	suspects           []model.Document
+	listErr            error
+	lastListMimeTypes  []string
+	relabeled          map[uuid.UUID]string
+	relabelExternalIDs map[uuid.UUID]string
+	updateMimeErr      error
+	updateMimeLostRace bool
 
 	// Lazy-backfill capture (US1).
 	backfillCalls          int
@@ -108,15 +110,22 @@ func (m *mockRepo) ListByMimeTypes(_ context.Context, mimeTypes []string) ([]mod
 	m.lastListMimeTypes = mimeTypes
 	return m.suspects, m.listErr
 }
-func (m *mockRepo) UpdateMimeType(_ context.Context, id uuid.UUID, mimeType string) error {
+func (m *mockRepo) UpdateMimeType(_ context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error) {
 	if m.updateMimeErr != nil {
-		return m.updateMimeErr
+		return false, m.updateMimeErr
+	}
+	if m.relabelExternalIDs == nil {
+		m.relabelExternalIDs = map[uuid.UUID]string{}
+	}
+	m.relabelExternalIDs[id] = expectedExternalID
+	if m.updateMimeLostRace {
+		return false, nil
 	}
 	if m.relabeled == nil {
 		m.relabeled = map[uuid.UUID]string{}
 	}
 	m.relabeled[id] = mimeType
-	return nil
+	return true, nil
 }
 
 type mockAuth struct {
@@ -564,8 +573,8 @@ func (m *mockRepoRace) CountByExternalID(_ context.Context, _ string) (int, erro
 func (m *mockRepoRace) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
 	return nil, nil
 }
-func (m *mockRepoRace) UpdateMimeType(_ context.Context, _ uuid.UUID, _ string) error {
-	return nil
+func (m *mockRepoRace) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
 }
 
 func TestCreateDocument_TooLarge(t *testing.T) {
@@ -904,8 +913,8 @@ func (m *copyRaceRepo) CountByExternalID(_ context.Context, _ string) (int, erro
 func (m *copyRaceRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
 	return nil, nil
 }
-func (m *copyRaceRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _ string) error {
-	return nil
+func (m *copyRaceRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
 }
 
 func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
