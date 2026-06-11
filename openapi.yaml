@@ -103,6 +103,28 @@ components:
       required:
         - status
       type: object
+    http.MimeMismatchDetail:
+      properties:
+        detectedMime:
+          type: string
+        knownMime:
+          type: string
+      required:
+        - knownMime
+        - detectedMime
+      type: object
+    http.RejectedContentResponse:
+      properties:
+        code:
+          type: string
+        detail:
+          $ref: '#/components/schemas/http.MimeMismatchDetail'
+        error:
+          type: string
+      required:
+        - code
+        - error
+      type: object
     http.ReplaceContentResponse:
       properties:
         externalID:
@@ -439,7 +461,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/http.errorResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/http.errorResponse'
+                  - $ref: '#/components/schemas/http.RejectedContentResponse'
           description: Bad Request
         "404":
           content:
@@ -459,9 +483,7 @@ paths:
           description: Request Entity Too Large
         "422":
           content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
+            application/json: {}
           description: Unprocessable Entity
         "500":
           content:

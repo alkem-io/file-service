@@ -15,14 +15,14 @@ its own phase (no story label per format rules).
 
 ## Phase 1: Setup
 
-- [ ] T001 Baseline: `make test && make lint` pass clean on branch `019-preserve-mime-on-edit` before any change (records the pre-fix green state)
+- [X] T001 Baseline: `make test && make lint` pass clean on branch `019-preserve-mime-on-edit` before any change (records the pre-fix green state)
 
 ## Phase 2: Foundational (blocking prerequisites for all stories)
 
-- [ ] T002 [P] Failing tests for the MIME vocabulary: generic-set membership (`application/zip`, `application/octet-stream`, `text/plain`, case/parameter variants via `normalizeMIME`) and office extension→canonical-MIME lookups (`.docx/.xlsx/.pptx/.odt/.ods/.odp`) in `internal/domain/model/mime_test.go`
-- [ ] T003 Implement MIME vocabulary: `GenericMIMEs` set + `IsGenericMIME()`, `OfficeExtToMIME` map + `OfficeMIMEForName(displayName)` in `internal/domain/model/mime.go` (single source of truth, constitution VIII)
-- [ ] T004 [P] Add expvar maps `ReplaceOutcomes` (`content_replace_outcomes_total`) and `MimeRepairOps` (`mime_repair_total`) to `internal/adapter/inbound/http/metrics.go`, initialized in `InitMetrics()`
-- [ ] T005 [P] Add sentinel errors `ErrEmptyContent`, `ErrMimeMismatch` (with known/detected fields via a typed error) in `internal/domain/service/file_service.go`; add named `ErrorResponse{code, error, detail}` struct with `Render()` in `internal/adapter/inbound/http/dto.go` (anti-pattern #11 — no `map[string]any`)
+- [X] T002 [P] Failing tests for the MIME vocabulary: generic-set membership (`application/zip`, `application/octet-stream`, `text/plain`, case/parameter variants via `normalizeMIME`) and office extension→canonical-MIME lookups (`.docx/.xlsx/.pptx/.odt/.ods/.odp`) in `internal/domain/model/mime_test.go`
+- [X] T003 Implement MIME vocabulary: `GenericMIMEs` set + `IsGenericMIME()`, `OfficeExtToMIME` map + `OfficeMIMEForName(displayName)` in `internal/domain/model/mime.go` (single source of truth, constitution VIII)
+- [X] T004 [P] Add expvar maps `ReplaceOutcomes` (`content_replace_outcomes_total`) and `MimeRepairOps` (`mime_repair_total`) to `internal/adapter/inbound/http/metrics.go`, initialized in `InitMetrics()`
+- [X] T005 [P] Add sentinel errors `ErrEmptyContent`, `ErrMimeMismatch` (with known/detected fields via a typed error) in `internal/domain/service/file_service.go`; add named `ErrorResponse{code, error, detail}` struct with `Render()` in `internal/adapter/inbound/http/dto.go` (anti-pattern #11 — no `map[string]any`)
 
 **Checkpoint**: vocabulary + plumbing exist; nothing behavioral changed yet.
 
@@ -34,12 +34,12 @@ stored office type; the document reopens forever (FR-001/002/003, SC-001/002).
 **Independent test**: `PUT /internal/file/{id}/content` with a reordered-zip .pptx →
 200, stored `mimeType` unchanged, `fallback_generic_sniff` counter incremented.
 
-- [ ] T006 [US1] Failing tests for the replace path in `internal/domain/service/file_service_test.go` — two scopes in one file: **unit matrix for `reconcileReplaceMIME`**: (a) reordered-OOXML fixture (build a zip with `[Content_Types].xml` not first — helper in test file) sniffs generic → returns known pptx MIME; (b) sniff == known → known; (c) octet-stream/text-plain sniffs over docx/xlsx → known; include a non-office control (PNG over PNG → accepted); **and `StoreAndLink`-level guards** (these exercise the full replace pipeline and stay red until T008): (d) FR-007 mid-write atomicity — mock repo `UpdateFile` fails after a successful `Storage.Save` → stored row (content + type) unchanged, no old-blob cleanup runs; (e) FR-005 invariant property — across every accept outcome, the persisted `mimeType` always equals the pre-existing stored type
-- [ ] T007 [US1] Implement `reconcileReplaceMIME(knownMIME string, content []byte)` accept branches (generic-fallback, equal) in `internal/domain/service/file_service.go`
-- [ ] T008 [US1] Rewire `StoreAndLink` (`internal/domain/service/file_service.go:344`): call `reconcileReplaceMIME(doc.MimeType, content)` **before** `Storage.Save`; persist the reconciled (known) type in `UpdateFile`; never persist the raw sniff. Existing failure-ordering (old row intact, orphan blob GC-able) untouched — FR-007 accept-path
-- [ ] T009 [US1] Structured zap logs + `ReplaceOutcomes` counters for `accepted` and `fallback_generic_sniff` (fields: documentID, knownMime, detectedMime, outcome) in `internal/domain/service/file_service.go` (FR-008)
-- [ ] T010 [US1] Handler-level test in `internal/adapter/inbound/http/document_handler_test.go`: reordered-pptx PUT → 200, response `mimeType` equals pre-existing stored type (contract: response reports unchanged type)
-- [ ] T011 [US1] Checkpoint: `make test && make lint` green; run quickstart step 2 manually against local stack
+- [X] T006 [US1] Failing tests for the replace path in `internal/domain/service/file_service_test.go` — two scopes in one file: **unit matrix for `reconcileReplaceMIME`**: (a) reordered-OOXML fixture (build a zip with `[Content_Types].xml` not first — helper in test file) sniffs generic → returns known pptx MIME; (b) sniff == known → known; (c) octet-stream/text-plain sniffs over docx/xlsx → known; include a non-office control (PNG over PNG → accepted); **and `StoreAndLink`-level guards** (these exercise the full replace pipeline and stay red until T008): (d) FR-007 mid-write atomicity — mock repo `UpdateFile` fails after a successful `Storage.Save` → stored row (content + type) unchanged, no old-blob cleanup runs; (e) FR-005 invariant property — across every accept outcome, the persisted `mimeType` always equals the pre-existing stored type
+- [X] T007 [US1] Implement `reconcileReplaceMIME(knownMIME string, content []byte)` accept branches (generic-fallback, equal) in `internal/domain/service/file_service.go`
+- [X] T008 [US1] Rewire `StoreAndLink` (`internal/domain/service/file_service.go:344`): call `reconcileReplaceMIME(doc.MimeType, content)` **before** `Storage.Save`; persist the reconciled (known) type in `UpdateFile`; never persist the raw sniff. Existing failure-ordering (old row intact, orphan blob GC-able) untouched — FR-007 accept-path
+- [X] T009 [US1] Structured zap logs + `ReplaceOutcomes` counters for `accepted` and `fallback_generic_sniff` (fields: documentID, knownMime, detectedMime, outcome) in `internal/domain/service/file_service.go` (FR-008)
+- [X] T010 [US1] Handler-level test in `internal/adapter/inbound/http/document_handler_test.go`: reordered-pptx PUT → 200, response `mimeType` equals pre-existing stored type (contract: response reports unchanged type)
+- [X] T011 [US1] Checkpoint: `make test && make lint` green; run quickstart step 2 manually against local stack
 
 **Checkpoint**: US1 alone is a shippable MVP — it kills the entire `application/zip`
 corruption class (the #9849 cause).
@@ -52,9 +52,9 @@ placeholders can never be relabeled `text/plain` (FR-003a, FR-007, FR-009).
 **Independent test**: `PUT …/content` with empty body → 422 `EMPTY_CONTENT`; row and
 blob untouched; `rejected_empty` counter incremented.
 
-- [ ] T012 [US2] Failing tests in `internal/domain/service/file_service_test.go`: empty content → `ErrEmptyContent`; assert **zero side effects** (mock `StoragePort` records no `Save`, repo records no `UpdateFile`)
-- [ ] T013 [US2] Implement empty-body branch (first check, before sniff) in `reconcileReplaceMIME`; log + count `rejected_empty` in `internal/domain/service/file_service.go`
-- [ ] T014 [US2] Map `ErrEmptyContent` → 422 `ErrorResponse{code:"EMPTY_CONTENT"}` in `ReplaceContent` (`internal/adapter/inbound/http/document_handler.go`); handler test asserts status, body code, and that a subsequent GET returns the original content
+- [X] T012 [US2] Failing tests in `internal/domain/service/file_service_test.go`: empty content → `ErrEmptyContent`; assert **zero side effects** (mock `StoragePort` records no `Save`, repo records no `UpdateFile`)
+- [X] T013 [US2] Implement empty-body branch (first check, before sniff) in `reconcileReplaceMIME`; log + count `rejected_empty` in `internal/domain/service/file_service.go`
+- [X] T014 [US2] Map `ErrEmptyContent` → 422 `ErrorResponse{code:"EMPTY_CONTENT"}` in `ReplaceContent` (`internal/adapter/inbound/http/document_handler.go`); handler test asserts status, body code, and that a subsequent GET returns the original content
 
 **Checkpoint**: empty saves now fail loudly (Collabora shows native save-failed —
 verified no wopi-service change needed, research R4).
@@ -67,9 +67,9 @@ rejected; stored content and type unchanged (FR-004, FR-005-by-invariant, SC-005
 **Independent test**: `PUT …/content` with a valid .docx body on a .pptx document →
 422 `MIME_MISMATCH` with `{knownMime, detectedMime}`; row untouched.
 
-- [ ] T015 [US3] Failing tests in `internal/domain/service/file_service_test.go`: well-formed docx fixture (with `[Content_Types].xml` first, so it sniffs concretely) into pptx-typed doc → `ErrMimeMismatch` carrying known+detected; concrete image mismatch (JPEG into PNG doc) also rejects; zero side effects asserted
-- [ ] T016 [US3] Implement concrete-mismatch branch in `reconcileReplaceMIME`; log + count `rejected_mismatch` in `internal/domain/service/file_service.go`; re-run the FR-005 invariant property test (T006e) — it must now also hold across reject outcomes (type unchanged on every path)
-- [ ] T017 [US3] Map `ErrMimeMismatch` → 422 `ErrorResponse{code:"MIME_MISMATCH", detail:{knownMime, detectedMime}}` in `internal/adapter/inbound/http/document_handler.go`; handler test asserts status, codes, detail fields
+- [X] T015 [US3] Failing tests in `internal/domain/service/file_service_test.go`: well-formed docx fixture (with `[Content_Types].xml` first, so it sniffs concretely) into pptx-typed doc → `ErrMimeMismatch` carrying known+detected; concrete image mismatch (JPEG into PNG doc) also rejects; zero side effects asserted
+- [X] T016 [US3] Implement concrete-mismatch branch in `reconcileReplaceMIME`; log + count `rejected_mismatch` in `internal/domain/service/file_service.go`; re-run the FR-005 invariant property test (T006e) — it must now also hold across reject outcomes (type unchanged on every path)
+- [X] T017 [US3] Map `ErrMimeMismatch` → 422 `ErrorResponse{code:"MIME_MISMATCH", detail:{knownMime, detectedMime}}` in `internal/adapter/inbound/http/document_handler.go`; handler test asserts status, codes, detail fields
 
 **Checkpoint**: all three replace-path behaviors live; `mimeType` is now immutable
 post-creation on every request path.
@@ -79,20 +79,20 @@ post-creation on every request path.
 **Goal**: Idempotent boot-time job relabels content-verified corrupted office rows and
 reports zero-byte rows as unrecoverable, in every environment.
 
-- [ ] T018 [P] Add sqlc queries `ListSuspectMimeRows` (mimeType ∈ generic set AND `lower("displayName")` matches office-extension suffix) and `UpdateMimeType` (single-column + `updatedDate`) to `db/queries/document.sql`; run `sqlc generate -f db/sqlc.yaml`
-- [ ] T019 Add `ListSuspectMimeRows`/`UpdateMimeType` to `internal/domain/port/document_repo.go` and implement in `internal/adapter/outbound/alkemiodb/document_repo.go` using the generated queries
-- [ ] T020 Failing tests in `internal/domain/service/mime_repair_test.go`: (a) suspect row with non-empty `PK`-magic blob → relabeled to `OfficeExtToMIME[ext]`; (b) zero-byte blob → `unrecoverable`, row untouched; (c) non-zip content named `.pptx` → `skipped_not_office`, row untouched; (d) second run touches nothing (idempotency); (e) storage read error → `errors` counted, job continues
-- [ ] T021 Implement `RunMimeRepair(ctx)` in `internal/domain/service/mime_repair.go`: list suspects → `StoragePort.Read` → verify non-empty + zip magic → `UpdateMimeType`; per-row structured log (documentID, oldMime, newMime|reason) + `MimeRepairOps` counters (FR-008)
-- [ ] T022 Wire repair job in `cmd/server/app.go`: goroutine launched after DB connect, before/independent of HTTP serving; completion summary log (relabeled/unrecoverable/skipped/errors counts)
+- [X] T018 [P] Add sqlc queries `ListSuspectMimeRows` (mimeType ∈ generic set AND `lower("displayName")` matches office-extension suffix) and `UpdateMimeType` (single-column + `updatedDate`) to `db/queries/document.sql`; run `sqlc generate -f db/sqlc.yaml`
+- [X] T019 Add `ListSuspectMimeRows`/`UpdateMimeType` to `internal/domain/port/document_repo.go` and implement in `internal/adapter/outbound/alkemiodb/document_repo.go` using the generated queries
+- [X] T020 Failing tests in `internal/domain/service/mime_repair_test.go`: (a) suspect row with non-empty `PK`-magic blob → relabeled to `OfficeExtToMIME[ext]`; (b) zero-byte blob → `unrecoverable`, row untouched; (c) non-zip content named `.pptx` → `skipped_not_office`, row untouched; (d) second run touches nothing (idempotency); (e) storage read error → `errors` counted, job continues
+- [X] T021 Implement `RunMimeRepair(ctx)` in `internal/domain/service/mime_repair.go`: list suspects → `StoragePort.Read` → verify non-empty + zip magic → `UpdateMimeType`; per-row structured log (documentID, oldMime, newMime|reason) + `MimeRepairOps` counters (FR-008)
+- [X] T022 Wire repair job in `cmd/server/app.go`: goroutine launched after DB connect, before/independent of HTTP serving; completion summary log (relabeled/unrecoverable/skipped/errors counts)
 
 **Checkpoint**: deploy to a seeded dev DB → corrupted rows fixed on boot, re-boot is a
 no-op (quickstart "Verify the repair job").
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T023 [P] Update `openapi.yaml`: 422 responses with `ErrorResponse` schema (codes `EMPTY_CONTENT`, `MIME_MISMATCH`) on `PUT /internal/file/{id}/content`, per `contracts/openapi-delta.md`
-- [ ] T024 [P] Coverage gate: ≥95% unit coverage on `internal/domain/service` and touched adapter packages; `make lint` clean (constitution IX, XII)
-- [ ] T025 End-to-end acceptance per `quickstart.md` against the local Collabora stack: ≥3 edit/save/close/reopen cycles on a .pptx (SC-001); DB assert `mimeType` stable throughout; empty-save and smuggle curls return the new 422s; `/debug/vars` shows all four replace outcomes and repair counters (SC-002, SC-005, SC-006, FR-008). **Post-deploy follow-through (record in the PR body — completes SC-003/SC-004)**: after the acceptance-environment deploy, verify `mime_repair_total` shows the 6 known rows relabeled (and they reopen in Collabora) + 4 reported unrecoverable; repeat the check after the production deploy
+- [X] T023 [P] Update `openapi.yaml`: 422 responses with `ErrorResponse` schema (codes `EMPTY_CONTENT`, `MIME_MISMATCH`) on `PUT /internal/file/{id}/content`, per `contracts/openapi-delta.md`
+- [X] T024 [P] Coverage gate: ≥95% unit coverage on `internal/domain/service` and touched adapter packages; `make lint` clean (constitution IX, XII)
+- [ ] T025 (REMAINING: needs running Collabora stack + acc/prod deploys) End-to-end acceptance per `quickstart.md` against the local Collabora stack: ≥3 edit/save/close/reopen cycles on a .pptx (SC-001); DB assert `mimeType` stable throughout; empty-save and smuggle curls return the new 422s; `/debug/vars` shows all four replace outcomes and repair counters (SC-002, SC-005, SC-006, FR-008). **Post-deploy follow-through (record in the PR body — completes SC-003/SC-004)**: after the acceptance-environment deploy, verify `mime_repair_total` shows the 6 known rows relabeled (and they reopen in Collabora) + 4 reported unrecoverable; repeat the check after the production deploy
 
 ## Dependencies
 

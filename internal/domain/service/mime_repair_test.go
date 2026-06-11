@@ -140,3 +140,19 @@ func TestRunMimeRepair_ScanFailureReported(t *testing.T) {
 		t.Fatalf("summary = %+v, want 1 error", sum)
 	}
 }
+
+func TestRunMimeRepair_RelabelFailureCountedJobContinues(t *testing.T) {
+	repo := &mockRepo{
+		suspects: []model.Document{
+			{ID: uuid.New(), ExternalID: "zipdoc", MimeType: "application/zip", DisplayName: "Deck.pptx"},
+		},
+		updateMimeErr: errors.New("db write failed"),
+	}
+	storage := &mockStorage{dataByID: map[string][]byte{"zipdoc": append([]byte("PK\x03\x04"), make([]byte, 16)...)}}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage}
+
+	sum := svc.RunMimeRepair(context.Background())
+	if sum.Errors != 1 || sum.Relabeled != 0 {
+		t.Fatalf("summary = %+v, want 1 error, 0 relabeled", sum)
+	}
+}

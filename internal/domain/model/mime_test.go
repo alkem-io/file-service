@@ -62,3 +62,15 @@ func TestOfficeMIMEForName(t *testing.T) {
 		}
 	}
 }
+
+func TestGenericMIMEList_MatchesSet(t *testing.T) {
+	list := GenericMIMEList()
+	if len(list) != 3 {
+		t.Fatalf("len = %d, want 3", len(list))
+	}
+	for _, m := range list {
+		if !IsGenericMIME(m) {
+			t.Errorf("GenericMIMEList contains %q which IsGenericMIME rejects", m)
+		}
+	}
+}
