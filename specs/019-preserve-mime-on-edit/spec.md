@@ -239,3 +239,7 @@ verify the operation is rejected and the stored content and type are unchanged.
   defense-in-depth).
 - Any web-client change.
 - Changes to how document types are established at creation time.
+- The monitoring **alert rule** itself. This service exposes the alertable signal
+  (FR-008: `content_replace_outcomes_total` rejected counters); configuring the alert
+  on it lives in `infrastructure-operations` and is a follow-up chore to be recorded
+  on the delivery board / in the implementation PR body.

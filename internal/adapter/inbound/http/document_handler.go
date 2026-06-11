@@ -485,7 +485,7 @@ func validateDisplayName(name string) error {
 	return nil
 }
 
-// ReplaceContent handles PUT /internal/document/{id}/content (store-and-link)
+// ReplaceContent handles PUT /internal/file/{id}/content (store-and-link)
 func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {

@@ -3,6 +3,11 @@
 **No schema changes.** The feature operates entirely on the existing `file` table
 (see `db/schema/document.sql`) and content-addressed blob storage.
 
+> **Terminology**: the PostgreSQL table is named `file`; the domain model and HTTP
+> surface call the same record a **Document** (`model.Document`,
+> `/internal/file/{id}`). Pre-existing repo convention — both names refer to one
+> entity throughout these artifacts.
+
 ## Entities
 
 ### Document (existing — `file` table)

@@ -34,7 +34,7 @@ stored office type; the document reopens forever (FR-001/002/003, SC-001/002).
 **Independent test**: `PUT /internal/file/{id}/content` with a reordered-zip .pptx →
 200, stored `mimeType` unchanged, `fallback_generic_sniff` counter incremented.
 
-- [ ] T006 [US1] Failing table-driven tests for `reconcileReplaceMIME` accept paths in `internal/domain/service/file_service_test.go`: (a) reordered-OOXML fixture (build a zip with `[Content_Types].xml` not first — helper in test file) sniffs generic → returns known pptx MIME; (b) sniff == known → known; (c) octet-stream/text-plain sniffs over docx/xlsx → known; include a non-office control (PNG over PNG → accepted)
+- [ ] T006 [US1] Failing table-driven tests for `reconcileReplaceMIME` accept paths in `internal/domain/service/file_service_test.go`: (a) reordered-OOXML fixture (build a zip with `[Content_Types].xml` not first — helper in test file) sniffs generic → returns known pptx MIME; (b) sniff == known → known; (c) octet-stream/text-plain sniffs over docx/xlsx → known; include a non-office control (PNG over PNG → accepted). Plus two cross-cutting guards: (d) FR-007 mid-write atomicity — mock repo `UpdateFile` fails after a successful `Storage.Save` → stored row (content + type) unchanged, no old-blob cleanup runs; (e) FR-005 invariant property — across every accept outcome of the matrix, the persisted `mimeType` always equals the pre-existing stored type
 - [ ] T007 [US1] Implement `reconcileReplaceMIME(knownMIME string, content []byte)` accept branches (generic-fallback, equal) in `internal/domain/service/file_service.go`
 - [ ] T008 [US1] Rewire `StoreAndLink` (`internal/domain/service/file_service.go:344`): call `reconcileReplaceMIME(doc.MimeType, content)` **before** `Storage.Save`; persist the reconciled (known) type in `UpdateFile`; never persist the raw sniff. Existing failure-ordering (old row intact, orphan blob GC-able) untouched — FR-007 accept-path
 - [ ] T009 [US1] Structured zap logs + `ReplaceOutcomes` counters for `accepted` and `fallback_generic_sniff` (fields: documentID, knownMime, detectedMime, outcome) in `internal/domain/service/file_service.go` (FR-008)
@@ -68,7 +68,7 @@ rejected; stored content and type unchanged (FR-004, FR-005-by-invariant, SC-005
 422 `MIME_MISMATCH` with `{knownMime, detectedMime}`; row untouched.
 
 - [ ] T015 [US3] Failing tests in `internal/domain/service/file_service_test.go`: well-formed docx fixture (with `[Content_Types].xml` first, so it sniffs concretely) into pptx-typed doc → `ErrMimeMismatch` carrying known+detected; concrete image mismatch (JPEG into PNG doc) also rejects; zero side effects asserted
-- [ ] T016 [US3] Implement concrete-mismatch branch in `reconcileReplaceMIME`; log + count `rejected_mismatch` in `internal/domain/service/file_service.go`
+- [ ] T016 [US3] Implement concrete-mismatch branch in `reconcileReplaceMIME`; log + count `rejected_mismatch` in `internal/domain/service/file_service.go`; re-run the FR-005 invariant property test (T006e) — it must now also hold across reject outcomes (type unchanged on every path)
 - [ ] T017 [US3] Map `ErrMimeMismatch` → 422 `ErrorResponse{code:"MIME_MISMATCH", detail:{knownMime, detectedMime}}` in `internal/adapter/inbound/http/document_handler.go`; handler test asserts status, codes, detail fields
 
 **Checkpoint**: all three replace-path behaviors live; `mimeType` is now immutable
@@ -92,7 +92,7 @@ no-op (quickstart "Verify the repair job").
 
 - [ ] T023 [P] Update `openapi.yaml`: 422 responses with `ErrorResponse` schema (codes `EMPTY_CONTENT`, `MIME_MISMATCH`) on `PUT /internal/file/{id}/content`, per `contracts/openapi-delta.md`
 - [ ] T024 [P] Coverage gate: ≥95% unit coverage on `internal/domain/service` and touched adapter packages; `make lint` clean (constitution IX, XII)
-- [ ] T025 End-to-end acceptance per `quickstart.md` against the local Collabora stack: ≥3 edit/save/close/reopen cycles on a .pptx (SC-001); DB assert `mimeType` stable throughout; empty-save and smuggle curls return the new 422s; `/debug/vars` shows all four replace outcomes and repair counters (SC-002, SC-005, SC-006, FR-008)
+- [ ] T025 End-to-end acceptance per `quickstart.md` against the local Collabora stack: ≥3 edit/save/close/reopen cycles on a .pptx (SC-001); DB assert `mimeType` stable throughout; empty-save and smuggle curls return the new 422s; `/debug/vars` shows all four replace outcomes and repair counters (SC-002, SC-005, SC-006, FR-008). **Post-deploy follow-through (record in the PR body — completes SC-003/SC-004)**: after the acceptance-environment deploy, verify `mime_repair_total` shows the 6 known rows relabeled (and they reopen in Collabora) + 4 reported unrecoverable; repeat the check after the production deploy
 
 ## Dependencies
 
