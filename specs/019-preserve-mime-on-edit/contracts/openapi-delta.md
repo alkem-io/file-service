@@ -33,8 +33,9 @@ Content-Type: application/octet-stream   (raw bytes, max 32 MiB)
 > schemas on different statuses. The schemas themselves are emitted
 > correctly; only the status attribution in the generated file is wrong.
 > **This document is authoritative for the rejection contract** (both
-> rejection codes are HTTP 422 — verified by handler tests). Follow-up: fix
-> attribution in the `apispec` repo, then regenerate.
+> rejection codes are HTTP 422 — verified by handler tests). Follow-up:
+> [antst/go-apispec#30](https://github.com/antst/go-apispec/issues/30) —
+> once fixed, regenerate with `make openapi`.
 
 ## Behavioral contract changes
 
