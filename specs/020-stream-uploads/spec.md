@@ -27,6 +27,15 @@ and streaming encode to a writer — exists in the project's image-processing
 library fork (antst/govips#2) and will be upstreamed once this feature has
 proven it in production use.
 
+## Clarifications
+
+### Session 2026-06-12
+
+- Q: How should US3 (replace-path streaming) be sequenced against feature 019, which also reworks the replace path and is open on PR #29? → A: Implement against the 019 branch now: this feature's branch is rebased onto `019-preserve-mime-on-edit` and developed as a stacked branch, with US3 built directly on the final 019 code. The PR stacks on PR #29 (retargeted to `develop` once #29 merges).
+- Q: What default upload cap ships, and what ceiling must the feature be validated at? → A: Default stays 32 MiB (no rollout behavior change; raising it later is config-only per environment, paired with the matching ingress bump as an infra-ops chore). The streaming pipeline is validated up to 1 GiB.
+- Q: What timeout policy governs streaming uploads (the server currently enforces a global 30 s read timeout)? → A: Progress-based idle timeout: an upload stays alive while bytes keep arriving and is aborted after ~30 s without progress; total duration is implicitly bounded by cap ÷ minimum rate. Non-upload endpoints keep today's strict timeouts. A stalled/slowloris connection is killed quickly; a slow-but-moving large upload is never penalized.
+- Q: The image library fork decodes the full frame to RAM (by design, for early source release) — does the transcode path need an explicit decode guard? → A: Yes, two-track: (1) this feature ships a configurable pixel-dimension budget, checked from the stream header before any decode — images above it are rejected; (2) in parallel, the govips fork gains sequential-streaming and disk-backed-decode modes (separate fork workstream, prompt handed off), after which the budget can be relaxed. The fork enhancement is NOT a dependency of this feature.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Large non-image upload streams with constant memory (Priority: P1)
@@ -125,6 +134,10 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 - Client aborts mid-upload: the partially received bytes never become a
   permanent object; any staging artifact is cleaned up.
+- Stalled upload (no bytes arriving): aborted by the idle timeout (~30 s of
+  no progress), counted distinctly from client aborts; same cleanup
+  guarantee. A slow-but-progressing upload is never killed for duration
+  alone.
 - Storage failure mid-write: same guarantee — no partial permanent object, no
   document row referencing one.
 - Hash collision/dedup: the content hash is only final at end-of-stream;
@@ -133,6 +146,8 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   after bytes were staged.
 - Type sniffing requires only the head of the stream; the sniff must not
   force buffering beyond a small fixed prefix.
+- Pixel bomb (tiny compressed image declaring enormous dimensions): rejected
+  by the pixel-dimension budget before any decode; never OOMs the service.
 - Zero-byte and tiny files: behave exactly as today (019 rules unchanged).
 - Concurrent identical uploads: both stream; content-addressed storage must
   end with one blob and correct rows, as today.
@@ -156,8 +171,11 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   conversion.
 - **FR-005**: Size limits MUST be enforced incrementally during streaming;
   exceeding a limit aborts the upload promptly without consuming the
-  remainder of the body. The maximum upload size MUST become configurable
-  beyond the current fixed request cap, safely (memory cost stays fixed).
+  remainder of the body. The maximum upload size MUST become a configuration
+  value, defaulting to the current 32 MiB (no rollout behavior change) and
+  supported — validated — up to 1 GiB; memory cost stays fixed at any
+  setting. Raising the cap in an environment is a config-only operation
+  (paired with the matching ingress limit, an infra-ops concern).
 - **FR-006**: Ingestion MUST be atomic with respect to permanent storage: an
   upload that fails or is aborted at any point leaves no partial permanent
   object and no document row referencing one; staging artifacts are cleaned
@@ -167,8 +185,22 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   EMPTY_CONTENT / MIME_MISMATCH rejections, rejection-before-side-effects,
   observability counters).
 - **FR-008**: Streaming ingestion MUST be observable: per-outcome counters
-  and structured logs for aborted, over-limit, and failed-mid-stream uploads,
-  sufficient to distinguish client aborts from service-side failures.
+  and structured logs for aborted, over-limit, stalled (idle-timeout), and
+  failed-mid-stream uploads, sufficient to distinguish client aborts from
+  service-side failures.
+- **FR-009**: Upload requests MUST be governed by a progress-based idle
+  timeout: the upload remains alive while bytes keep arriving and is aborted
+  after a bounded period (~30 s) without progress. Non-upload endpoints
+  retain the existing strict request timeouts. An aborted-for-stall upload
+  follows the same atomicity guarantee as any failed upload (FR-006).
+- **FR-010**: Images entering the transcode path MUST pass a configurable
+  pixel-dimension budget, evaluated from the stream header before any
+  decoding begins; images exceeding it are rejected with an explicit error
+  (counted and logged per FR-008). This bounds the decode working set —
+  the one memory component FR-001 excludes — deterministically. The budget
+  becomes relaxable once the image library gains streaming/disk-backed
+  decode modes (parallel fork workstream; not a dependency of this
+  feature).
 
 ### Key Entities
 
@@ -185,7 +217,8 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 ### Measurable Outcomes
 
 - **SC-001**: Peak per-request memory during a non-image upload is constant
-  (fixed budget) for files from 1 MiB to at least 10× the current 32 MiB cap.
+  (fixed budget) for files from 1 MiB up to 1 GiB (the validated ceiling of
+  the configurable cap).
 - **SC-002**: For every input in the regression corpus (non-images, canonical
   images, transcodable images), stored bytes, content hash, stored MIME type,
   and dimensions metadata are identical to the pre-change implementation.
@@ -214,11 +247,17 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   acceptable storage-layer strategy.
 - The multipart upload framing of the existing API is unchanged — only the
   internal handling of the file part streams.
+- This feature is developed as a stacked branch on `019-preserve-mime-on-edit`
+  (PR #29): US3 builds on the final 019 replace-path code, and this PR merges
+  after #29 does.
 
 ## Out of Scope
 
 - Upstreaming the image-library streaming support (follow-up after this
   feature stabilizes).
+- The image-library fork's sequential-streaming / disk-backed-decode modes
+  (parallel fork workstream; once landed, the pixel-dimension budget of
+  FR-010 may be relaxed in a follow-up).
 - Changing the public/internal API shapes, dedup semantics, or bucket
   policy semantics.
 - Download/serving path changes (already streams from storage; not part of
