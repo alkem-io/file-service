@@ -40,6 +40,8 @@ currently ~10 corrupted records (6 stored as `application/zip`, 4 zero-byte stor
 - Q: Could the zero-content files be results of failed writes (not just never-saved placeholders)? → A: Yes. New documents are created as 0-byte placeholders with the *correct* canonical MIME; the four corrupted rows are `text/plain`, which only occurs when the replace path actually accepted and re-sniffed an empty body. They are the residue of empty/failed writes being accepted. Consequences: replacement must be atomic (no partial/empty content persisted on failure), and remediation must first check whether prior content survives in content-addressed storage before declaring it unrecoverable.
 - Q: How is the corrupted-row remediation delivered? → A: Shipped with the service and run automatically in every environment (the bug is labeled `production`, so acceptance is unlikely to be the only damaged environment; counts are re-verified at run time).
 - Q: Shipped how — the `file` table's schema migrations are owned by the server repo; does this become a multi-repo fix? → A: No. Remediation is delivered as an idempotent self-repair job inside this service (which already owns runtime writes to the stored type — that is the bug). It is a data repair, not a schema change, so server-side migration ownership is not violated and the fix stays single-repo.
+- Q: What observability is required for the new protective behaviors (sniff fallbacks, rejected saves, repair actions)? → A: Every fallback, rejection, and repair action emits a structured log with document identity and reason; per-outcome metrics are exposed; rejected saves produce an alertable signal (a spike means an editor integration broke). The original corruption went unnoticed for months precisely because it was silent.
+- Q: What does the end user in the editor experience when a save is rejected? → A: The rejection propagates as a proper error so the editor shows its native "save failed" notification; the editing session stays open with the user's changes intact, allowing retry or export. Explicit failure beats silent data corruption — and silent-discard is explicitly ruled out.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -169,6 +171,17 @@ verify the operation is rejected and the stored content and type are unchanged.
   (validation rejection or write failure), the previously stored content and type
   MUST remain intact and retrievable. Partial or empty content is never persisted as
   a side effect of a failed save.
+- **FR-008**: The protective behaviors MUST be observable: every generic-sniff
+  fallback to the known type, every rejected replacement (type mismatch, empty body,
+  bucket policy), and every self-repair action MUST emit a structured log carrying
+  the document identity and reason, and MUST be counted in per-outcome metrics.
+  Rejected saves MUST produce an alertable signal, since a spike indicates a broken
+  editor integration rather than user error.
+- **FR-009**: A rejected replacement MUST surface to the caller as an explicit error
+  so the editor can show its native save-failure notification; the user's editing
+  session remains open with their changes intact (retry and export remain possible).
+  Reporting a rejected save as successful while discarding its content is explicitly
+  forbidden.
 
 ### Key Entities
 
@@ -196,6 +209,9 @@ verify the operation is rejected and the stored content and type are unchanged.
 - **SC-005**: Replacing a document's content with a genuinely different document type
   is rejected with an explicit error — never a silent type change, never a silent
   content swap.
+- **SC-006**: When a save is rejected, the user sees a save-failure notification in
+  the editor and their editing session remains usable (changes still on screen,
+  retry/export possible); rejected saves are visible in service metrics.
 
 ## Assumptions
 
