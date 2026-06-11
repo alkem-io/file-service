@@ -2,6 +2,7 @@ package model
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -31,9 +32,15 @@ func IsGenericMIME(mimeType string) bool {
 }
 
 // GenericMIMEList returns the generic MIME types as a slice (stable order),
-// for SQL ANY() parameters and similar list-shaped consumers.
+// for SQL ANY() parameters and similar list-shaped consumers. Derived from
+// the genericMIMEs set so the two can never drift.
 func GenericMIMEList() []string {
-	return []string{"application/zip", "application/octet-stream", "text/plain"}
+	result := make([]string, 0, len(genericMIMEs))
+	for mime := range genericMIMEs {
+		result = append(result, mime)
+	}
+	slices.Sort(result)
+	return result
 }
 
 // OfficeExtToMIME maps office-document filename extensions to their

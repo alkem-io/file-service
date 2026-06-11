@@ -438,6 +438,13 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
+	// Persist result.MimeType, not the reconciled mimeType: Process may
+	// canonicalize the encoding (HEIC/WebP → JPEG) and then result.Content —
+	// the bytes actually stored — IS that new format. The two values are
+	// identical on every other path (office and non-image types pass
+	// through), and stored types are always post-canonicalization, so the
+	// type-stability invariant (FR-001/FR-005) is preserved: a stored type
+	// can never regress to a generic or mismatched value here.
 	contentMetadata := processResultToContentMetadata(result, result.MimeType)
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, result.MimeType, stored.Size, contentMetadata)
 	if err != nil {
