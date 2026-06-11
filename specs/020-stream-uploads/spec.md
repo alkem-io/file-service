@@ -243,8 +243,15 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   budget guarantee for transcoded images is "no whole compressed copies",
   not "no decode working set".
 - Content-addressed storage naming (hash as identity) is unchanged; computing
-  the identity at end-of-stream and committing/renaming a staged object is an
-  acceptable storage-layer strategy.
+  the identity at end-of-stream and committing a staged object is an
+  acceptable storage-layer strategy. The staging/commit contract MUST be
+  expressible per backend and MUST NOT assume an atomic rename primitive:
+  a filesystem backend may commit via rename, while an object store (S3 —
+  a planned backend) commits via complete-multipart-upload plus server-side
+  copy to the content-addressed key (with abort-multipart as the free
+  no-partial-object guarantee). The fixed memory budget (FR-001) is a
+  per-backend constant (e.g. part-buffer × concurrency for multipart
+  object stores), never a function of file size.
 - The multipart upload framing of the existing API is unchanged — only the
   internal handling of the file part streams.
 - This feature is developed as a stacked branch on `019-preserve-mime-on-edit`
