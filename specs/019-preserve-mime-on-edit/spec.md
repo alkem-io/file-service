@@ -42,6 +42,7 @@ currently ~10 corrupted records (6 stored as `application/zip`, 4 zero-byte stor
 - Q: Shipped how — the `file` table's schema migrations are owned by the server repo; does this become a multi-repo fix? → A: No. Remediation is delivered as an idempotent self-repair job inside this service (which already owns runtime writes to the stored type — that is the bug). It is a data repair, not a schema change, so server-side migration ownership is not violated and the fix stays single-repo.
 - Q: What observability is required for the new protective behaviors (sniff fallbacks, rejected saves, repair actions)? → A: Every fallback, rejection, and repair action emits a structured log with document identity and reason; per-outcome metrics are exposed; rejected saves produce an alertable signal (a spike means an editor integration broke). The original corruption went unnoticed for months precisely because it was silent.
 - Q: What does the end user in the editor experience when a save is rejected? → A: The rejection propagates as a proper error so the editor shows its native "save failed" notification; the editing session stays open with the user's changes intact, allowing retry or export. Explicit failure beats silent data corruption — and silent-discard is explicitly ruled out.
+- Q: How are new (blank) documents actually created — recheck against server and WOPI-service code? → A: Verified: the server stages a 0-byte buffer with the canonical office MIME and proper filename extension; this service's create path trusts the declared MIME for empty content and validates it against the bucket allow-list, so fresh placeholders are stored correctly. Two corrections from the recheck: (1) the replace path deletes the previous content blob once unreferenced, so recovery of prior content during remediation is only possible where the old blob is still referenced by another document; (2) the WOPI service never selects the "editnew" editor action (only edit/view by extension) — the auto-generate-blank mechanism described in server comments is not actually wired, which is the plausible source of the empty first saves. With empty saves now rejected, that gap surfaces as a visible save failure instead of silent corruption; fixing blank-create end-to-end needs a companion WOPI-service change tracked separately.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -165,8 +166,10 @@ verify the operation is rejected and the stored content and type are unchanged.
   records (the residue of accepted empty/failed writes), remediation MUST first check
   whether a prior content version still exists in content-addressed storage and
   restore it if found; only records with no recoverable prior content are reported as
-  unrecoverable. The job re-verifies affected records at run time rather than relying
-  on counts observed at spec time.
+  unrecoverable. (Expectation: recovery will rarely succeed — the replace path
+  deletes the previous blob once unreferenced — but the check is cheap and a shared
+  blob may survive via another document row.) The job re-verifies affected records at
+  run time rather than relying on counts observed at spec time.
 - **FR-007**: Content replacement MUST be atomic: if a replacement fails at any point
   (validation rejection or write failure), the previously stored content and type
   MUST remain intact and retrievable. Partial or empty content is never persisted as
@@ -233,5 +236,9 @@ verify the operation is rejected and the stored content and type are unchanged.
 
 - Editor-URL/extension fallback in the WOPI service (separate, optional
   defense-in-depth).
+- Wiring the WOPI "editnew" action for 0-byte documents in the WOPI service —
+  required for robust blank-document creation end-to-end, but a separate service and
+  a separate story. This fix guarantees an empty first save fails *visibly* instead
+  of corrupting the document.
 - Any web-client change.
 - Changes to how document types are established at creation time.
