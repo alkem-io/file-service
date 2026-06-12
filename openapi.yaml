@@ -201,42 +201,6 @@ paths:
   /internal/file:
     post:
       operationId: DocumentHandler.Create
-      parameters:
-        - in: path
-          name: tagsetId
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: createdBy
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: temporaryLocation
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: skipDedup
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: allowedMimeTypes
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: maxFileSize
-          required: true
-          schema:
-            type: string
-        - in: path
-          name: displayName
-          required: true
-          schema:
-            type: string
       responses:
         "201":
           content:

@@ -56,6 +56,26 @@ func bufferedEquivalent(t *testing.T, content []byte, mimeType string) []byte {
 	return buf.Bytes()
 }
 
+// heicSupported reports whether this libvips/libheif build can decode the
+// HEVC-coded HEIC fixtures (distro libheif builds often strip the HEVC
+// codec for patent reasons — e.g. Ubuntu CI runners; macOS/homebrew has it).
+func heicSupported(t *testing.T) bool {
+	t.Helper()
+	img, err := vips.NewImageFromBuffer(fixture(t, "heic-24bit.heic"))
+	if err != nil {
+		return false
+	}
+	img.Close()
+	return true
+}
+
+func requireHEIC(t *testing.T) {
+	t.Helper()
+	if !heicSupported(t) {
+		t.Skip("libheif on this runner cannot decode HEVC; HEIC streaming covered where the codec exists")
+	}
+}
+
 func setBudget(t *testing.T, n int64) {
 	t.Helper()
 	prev := PixelBudget()
@@ -73,6 +93,7 @@ func runTranscode(t *testing.T, content []byte, mimeType string) ([]byte, port.T
 // (a) HEIC: whole-frame codec + format conversion → baseline JPEG,
 // byte-identical to the buffered equivalent, dims recorded.
 func TestTranscodeStream_HEICToJPEG(t *testing.T) {
+	requireHEIC(t)
 	setBudget(t, 100_000_000)
 	content := fixture(t, "heic-24bit.heic")
 
@@ -195,6 +216,7 @@ func TestTranscodeStream_CanonicalJPEGRecompressed(t *testing.T) {
 
 // (c2) Rotated HEIC: whole-frame codec + rotation in one input.
 func TestTranscodeStream_RotatedHEIC(t *testing.T) {
+	requireHEIC(t)
 	setBudget(t, 100_000_000)
 	content := fixture(t, "heic-orientation-6.heic")
 

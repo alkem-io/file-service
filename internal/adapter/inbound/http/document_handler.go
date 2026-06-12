@@ -89,27 +89,64 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// buildCreateInput validates the collected metadata fields (spec 020: the
-// fields trail the file part in the multipart body, so they are parsed
-// after the upload has been staged — research R4).
-func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
-	displayName := fields["displayName"]
-	if err := validateDisplayName(displayName); err != nil {
+// createFields collects the multipart metadata fields by name (spec 020:
+// the fields trail the file part — research R4). Typed struct rather than a
+// map: direct field reads keep generated API docs clean (map-index string
+// literals are misinferred as path parameters by the spec generator).
+type createFields struct {
+	displayName       string
+	storageBucketID   string
+	authorizationID   string
+	tagsetID          string
+	createdBy         string
+	temporaryLocation string
+	skipDedup         string
+	allowedMimeTypes  string
+	maxFileSize       string
+}
+
+func (f *createFields) set(name, value string) {
+	switch name {
+	case "displayName":
+		f.displayName = value
+	case "storageBucketId":
+		f.storageBucketID = value
+	case "authorizationId":
+		f.authorizationID = value
+	case "tagsetId":
+		f.tagsetID = value
+	case "createdBy":
+		f.createdBy = value
+	case "temporaryLocation":
+		f.temporaryLocation = value
+	case "skipDedup":
+		f.skipDedup = value
+	case "allowedMimeTypes":
+		f.allowedMimeTypes = value
+	case "maxFileSize":
+		f.maxFileSize = value
+	}
+}
+
+// buildCreateInput validates the collected metadata fields after the upload
+// has been staged (research R4).
+func buildCreateInput(fields createFields) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
+	if err := validateDisplayName(fields.displayName); err != nil {
 		return input, nil, 0, err
 	}
 
-	storageBucketID, err := uuid.Parse(fields["storageBucketId"])
+	storageBucketID, err := uuid.Parse(fields.storageBucketID)
 	if err != nil {
 		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(fields["authorizationId"])
+	authorizationID, err := uuid.Parse(fields.authorizationID)
 	if err != nil {
 		return input, nil, 0, fmt.Errorf("invalid authorizationId")
 	}
 
 	var tagsetID *uuid.UUID
-	if v := fields["tagsetId"]; v != "" {
+	if v := fields.tagsetID; v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
 			return input, nil, 0, fmt.Errorf("invalid tagsetId")
@@ -118,7 +155,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 	}
 
 	var createdBy *uuid.UUID
-	if v := fields["createdBy"]; v != "" {
+	if v := fields.createdBy; v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
 			return input, nil, 0, fmt.Errorf("invalid createdBy")
@@ -127,7 +164,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 	}
 
 	temporaryLocation := false
-	if v := fields["temporaryLocation"]; v != "" {
+	if v := fields.temporaryLocation; v != "" {
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
 			return input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
@@ -136,7 +173,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 	}
 
 	skipDedup := false
-	if v := fields["skipDedup"]; v != "" {
+	if v := fields.skipDedup; v != "" {
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
 			return input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
@@ -144,7 +181,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 		skipDedup = parsed
 	}
 
-	if v := fields["allowedMimeTypes"]; v != "" {
+	if v := fields.allowedMimeTypes; v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
 			if trimmed := strings.TrimSpace(p); trimmed != "" {
@@ -153,7 +190,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 		}
 	}
 
-	if v := fields["maxFileSize"]; v != "" {
+	if v := fields.maxFileSize; v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil || parsed < 0 {
 			return input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
@@ -162,7 +199,7 @@ func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput
 	}
 
 	input = model.CreateDocumentInput{
-		DisplayName:       displayName,
+		DisplayName:       fields.displayName,
 		CreatedBy:         createdBy,
 		TemporaryLocation: temporaryLocation,
 		StorageBucketID:   storageBucketID,
@@ -217,7 +254,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fields := map[string]string{}
+	var fields createFields
 	var staged *service.StagedUpload
 	defer func() {
 		// Any non-success exit path discards the stage (FR-006); Discard
@@ -252,7 +289,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				h.writeIngestTransportError(w, rerr)
 				return
 			}
-			fields[part.FormName()] = string(b)
+			fields.set(part.FormName(), string(b))
 		}
 		_ = part.Close()
 	}
