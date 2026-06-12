@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strconv"
@@ -134,6 +135,33 @@ func (f *createFields) set(name, value string) {
 	}
 }
 
+// parseOptionalUUID parses an optional UUID form field: empty means absent
+// (nil, nil). The error names the field so it can serve directly as a 400
+// body.
+func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s", field)
+	}
+	return &parsed, nil
+}
+
+// parseOptionalBool parses an optional boolean form field: empty means
+// false. The error names the field so it can serve directly as a 400 body.
+func parseOptionalBool(value, field string) (bool, error) {
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: must be true or false", field)
+	}
+	return parsed, nil
+}
+
 // buildCreateInput validates the collected metadata fields after the upload
 // has been staged (research R4).
 func buildCreateInput(fields createFields) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
@@ -151,40 +179,24 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, fmt.Errorf("invalid authorizationId")
 	}
 
-	var tagsetID *uuid.UUID
-	if v := fields.tagsetID; v != "" {
-		parsed, err := uuid.Parse(v)
-		if err != nil {
-			return input, nil, 0, fmt.Errorf("invalid tagsetId")
-		}
-		tagsetID = &parsed
+	tagsetID, err := parseOptionalUUID(fields.tagsetID, "tagsetId")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	var createdBy *uuid.UUID
-	if v := fields.createdBy; v != "" {
-		parsed, err := uuid.Parse(v)
-		if err != nil {
-			return input, nil, 0, fmt.Errorf("invalid createdBy")
-		}
-		createdBy = &parsed
+	createdBy, err := parseOptionalUUID(fields.createdBy, "createdBy")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	temporaryLocation := false
-	if v := fields.temporaryLocation; v != "" {
-		parsed, err := strconv.ParseBool(v)
-		if err != nil {
-			return input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
-		}
-		temporaryLocation = parsed
+	temporaryLocation, err := parseOptionalBool(fields.temporaryLocation, "temporaryLocation")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	skipDedup := false
-	if v := fields.skipDedup; v != "" {
-		parsed, err := strconv.ParseBool(v)
-		if err != nil {
-			return input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
-		}
-		skipDedup = parsed
+	skipDedup, err := parseOptionalBool(fields.skipDedup, "skipDedup")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
 	if v := fields.allowedMimeTypes; v != "" {
@@ -292,23 +304,8 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				h.writeStageError(w, err)
 				return
 			}
-		} else {
-			// 16 KiB is ample for every metadata field (the largest legit
-			// value, a long allowedMimeTypes list, is ~2.5 KiB) and bounds
-			// per-request abuse surface. Read one byte past the cap so an
-			// oversized field is REJECTED rather than silently truncated
-			// into a different request.
-			const maxCreateFieldBytes = 16 << 10
-			b, rerr := io.ReadAll(io.LimitReader(part, maxCreateFieldBytes+1))
-			if rerr != nil {
-				h.writeIngestTransportError(w, rerr)
-				return
-			}
-			if len(b) > maxCreateFieldBytes {
-				writeJSONError(w, http.StatusBadRequest, part.FormName()+" exceeds the 16 KiB field limit")
-				return
-			}
-			fields.set(part.FormName(), string(b))
+		} else if !h.readMetadataField(w, &fields, part) {
+			return
 		}
 		_ = part.Close()
 	}
@@ -326,20 +323,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.CompleteUpload(r.Context(), staged, input, allowedMimeTypes, maxFileSize)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrPayloadTooLarge):
-			IngestOutcomes.Add("rejected_bucket_policy", 1)
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
-		case errors.Is(err, service.ErrUnsupportedMediaType):
-			IngestOutcomes.Add("rejected_bucket_policy", 1)
-			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
-		case errors.Is(err, service.ErrConflict):
-			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
-		default:
-			IngestOutcomes.Add("failed_mid_stream", 1)
-			h.Logger.Error("failed to create document", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		h.writeCompleteUploadError(w, err)
 		return
 	}
 
@@ -353,6 +337,49 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ImageWidth:  doc.ImageWidth,
 		ImageHeight: doc.ImageHeight,
 	}.Render(w)
+}
+
+// readMetadataField reads one trailing (non-file) multipart part into
+// fields, enforcing the per-field size cap. 16 KiB is ample for every
+// metadata field (the largest legit value, a long allowedMimeTypes list, is
+// ~2.5 KiB) and bounds per-request abuse surface. It reads one byte past
+// the cap so an oversized field is REJECTED rather than silently truncated
+// into a different request. Reports false after writing the error response
+// itself.
+func (h *DocumentHandler) readMetadataField(w http.ResponseWriter, fields *createFields, part *multipart.Part) bool {
+	const maxCreateFieldBytes = 16 << 10
+	b, err := io.ReadAll(io.LimitReader(part, maxCreateFieldBytes+1))
+	if err != nil {
+		h.writeIngestTransportError(w, err)
+		return false
+	}
+	if len(b) > maxCreateFieldBytes {
+		writeJSONError(w, http.StatusBadRequest, part.FormName()+" exceeds the 16 KiB field limit")
+		return false
+	}
+	fields.set(part.FormName(), string(b))
+	return true
+}
+
+// writeCompleteUploadError maps a CompleteUpload failure to its HTTP
+// response and outcome counter (spec 020 FR-008): bucket-policy rejections
+// (size, MIME) are 413/415, a SkipDedup content collision is 409, anything
+// else is a logged 500.
+func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrPayloadTooLarge):
+		IngestOutcomes.Add("rejected_bucket_policy", 1)
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
+	case errors.Is(err, service.ErrUnsupportedMediaType):
+		IngestOutcomes.Add("rejected_bucket_policy", 1)
+		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
+	case errors.Is(err, service.ErrConflict):
+		writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
+	default:
+		IngestOutcomes.Add("failed_mid_stream", 1)
+		h.Logger.Error("failed to create document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 // writeStageError maps a StageUpload failure to its HTTP response and
@@ -542,7 +569,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
+	if !hasUpdateFields(body) {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
@@ -567,23 +594,14 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	bucketID := doc.StorageBucketID
 	if body.StorageBucketID != nil {
-		parsed, err := uuid.Parse(*body.StorageBucketID)
-		if err != nil {
+		parsed, perr := uuid.Parse(*body.StorageBucketID)
+		if perr != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid storageBucketId")
 			return
 		}
 		bucketID = parsed
 	}
-
-	tempLoc := doc.TemporaryLocation
-	if body.TemporaryLocation != nil {
-		tempLoc = *body.TemporaryLocation
-	}
-
-	displayName := doc.DisplayName
-	if body.DisplayName != nil {
-		displayName = *body.DisplayName
-	}
+	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
 	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
 	if err != nil {
@@ -712,6 +730,28 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 
 func parseDocID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "id"))
+}
+
+// hasUpdateFields reports whether the PATCH body carries at least one
+// updatable field — an empty body is a 400, not a no-op success.
+func hasUpdateFields(body UpdateDocumentRequest) bool {
+	return body.StorageBucketID != nil || body.TemporaryLocation != nil || body.DisplayName != nil
+}
+
+// mergeUpdateFallbacks merges the validation-free PATCH fields over the
+// row's current values: fields present in the body win, omitted fields keep
+// what the document already has. storageBucketId is merged in the handler
+// instead because it needs UUID validation first.
+func mergeUpdateFallbacks(doc model.Document, body UpdateDocumentRequest) (tempLoc bool, displayName string) {
+	tempLoc = doc.TemporaryLocation
+	if body.TemporaryLocation != nil {
+		tempLoc = *body.TemporaryLocation
+	}
+	displayName = doc.DisplayName
+	if body.DisplayName != nil {
+		displayName = *body.DisplayName
+	}
+	return tempLoc, displayName
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {

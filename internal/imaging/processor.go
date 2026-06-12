@@ -294,6 +294,36 @@ func canonicalizeRaster(content []byte, mimeType string) (port.ProcessResult, er
 // and orientation discovery (spec 020 FR-010). Part of the fixed budget.
 const streamHeadPeek = 64 << 10
 
+// checkPixelBudget rejects header-declared dimensions whose product exceeds
+// the configured pixel budget (spec 020 FR-010). Unknown (non-positive)
+// dimensions and an unset budget pass.
+func checkPixelBudget(w, h int) error {
+	if budget := PixelBudget(); budget > 0 && w > 0 && h > 0 && int64(w)*int64(h) > budget {
+		return fmt.Errorf("%w: %dx%d", port.ErrPixelBudgetExceeded, w, h)
+	}
+	return nil
+}
+
+// probeStreamHead parses the buffered head (≤64 KiB) without consuming the
+// stream: it returns the EXIF orientation and enforces the pixel budget
+// before any pixel decode. Orientation -1 means the header could not be
+// parsed from the peeked bytes (header beyond the peek window); that path
+// skips the pre-decode budget check — decoded-frame RAM remains bounded by
+// the disc threshold on the materialized load, and the caller re-checks the
+// budget once the real header is parsed.
+func probeStreamHead(br *bufio.Reader) (int, error) {
+	head, _ := br.Peek(streamHeadPeek)
+	probe, err := vips.NewImageFromBuffer(head)
+	if err != nil {
+		return -1, nil
+	}
+	defer probe.Close()
+	if err := checkPixelBudget(probe.Width(), probe.Height()); err != nil {
+		return probe.Orientation(), err
+	}
+	return probe.Orientation(), nil
+}
+
 // TranscodeStream canonicalizes an image pulled from r and writes encoded
 // chunks to w as produced (spec 020 FR-004). Strategy per the fork's
 // streaming model:
@@ -305,25 +335,15 @@ const streamHeadPeek = 64 << 10
 //     AccessSequential, pixels flow reader→writer once, RAM bounded by
 //     line caches. Orientation ≥ 3: default load, which materializes to
 //     memory or scratch disc by SetStreamDiscThreshold.
-//  3. RemoveMetadata (drops EXIF/IPTC/XMP, preserves ICC — Decision 2 of
-//     018) → AutoRotate → SaveToWriter with streaming-capable params
-//     (JPEG baseline Q82 — spec 020 R7).
+//  3. RemoveMetadata (drops EXIF/IPTC/XMP, preserves ICC — spec 018
+//     Decision 2) → AutoRotate → SaveToWriter with streaming-capable
+//     params (JPEG baseline Q82 — spec 020 R7).
 func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
 	br := bufio.NewReaderSize(r, streamHeadPeek)
-	head, _ := br.Peek(streamHeadPeek)
-
-	orient := -1
-	if probe, err := vips.NewImageFromBuffer(head); err == nil {
-		pw, ph := probe.Width(), probe.Height()
-		orient = probe.Orientation()
-		probe.Close()
-		if budget := PixelBudget(); budget > 0 && pw > 0 && ph > 0 && int64(pw)*int64(ph) > budget {
-			return port.TranscodeResult{}, fmt.Errorf("%w: %dx%d", port.ErrPixelBudgetExceeded, pw, ph)
-		}
+	orient, err := probeStreamHead(br)
+	if err != nil {
+		return port.TranscodeResult{}, err
 	}
-	// Probe failure (header beyond the peek window) skips the pre-decode
-	// budget check; decoded-frame RAM remains bounded by the disc
-	// threshold on the materialized path below.
 
 	params := vips.NewImportParams()
 	if orient >= 0 && orient <= 2 {
@@ -339,11 +359,11 @@ func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (
 	}
 	defer img.Close()
 
-	if budget := PixelBudget(); budget > 0 && orient < 0 {
+	if orient < 0 {
 		// Probe failed earlier; the real header is now parsed — enforce
 		// the budget before any pixel pass.
-		if iw, ih := img.Width(), img.Height(); iw > 0 && ih > 0 && int64(iw)*int64(ih) > budget {
-			return port.TranscodeResult{}, fmt.Errorf("%w: %dx%d", port.ErrPixelBudgetExceeded, iw, ih)
+		if err := checkPixelBudget(img.Width(), img.Height()); err != nil {
+			return port.TranscodeResult{}, err
 		}
 	}
 
