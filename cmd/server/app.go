@@ -67,11 +67,20 @@ func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port
 }
 
 func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) *service.FileService {
+	// imaging.New runs vips.Startup (vips build); the streaming knobs must
+	// be applied to an initialized libvips, so configure AFTER New.
+	processor := imaging.New()
+	imaging.ConfigureStreaming(imaging.StreamingConfig{
+		DiscThreshold: cfg.Ingest.VipsDiscThreshold,
+		ScratchDir:    cfg.Ingest.VipsScratchDir,
+		PipeReadLimit: cfg.Ingest.VipsPipeReadLimit,
+		PixelBudget:   cfg.Ingest.PixelBudget,
+	})
 	return &service.FileService{
 		Repo:      alkemiodb.New(pool),
 		Auth:      auth,
 		Storage:   local.New(cfg.StoragePath),
-		Processor: imaging.New(),
+		Processor: processor,
 		Logger:    logger,
 	}
 }
@@ -90,9 +99,11 @@ func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc 
 			Logger:  logger,
 		},
 		DocumentHandler: &httpAdapter.DocumentHandler{
-			Service: fileSvc,
-			MaxAge:  maxAge,
-			Logger:  logger,
+			Service:       fileSvc,
+			MaxAge:        maxAge,
+			Logger:        logger,
+			MaxUploadSize: cfg.Ingest.MaxUploadSize,
+			IdleTimeout:   cfg.Ingest.IdleTimeout,
 		},
 		HealthHandler: newHealthHandler(pool, nc),
 		Logger:        logger,
@@ -113,12 +124,17 @@ func newHTTPServer(port int, handler http.Handler) *http.Server {
 		IdleTimeout:          120 * time.Second,
 	}
 	return &http.Server{
-		Addr:           fmt.Sprintf(":%d", port),
-		Handler:        h2c.NewHandler(handler, h2s),
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   60 * time.Second,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1MB
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: h2c.NewHandler(handler, h2s),
+		// Spec 020 (FR-009): the global ReadTimeout is replaced by a header
+		// deadline + per-request read deadlines. Upload handlers extend the
+		// deadline on progress (progressReader); every other route gets a
+		// fixed 30 s read deadline from the router middleware, preserving
+		// the pre-020 behavior.
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 }
 

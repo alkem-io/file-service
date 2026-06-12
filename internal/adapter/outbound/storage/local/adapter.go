@@ -1,11 +1,13 @@
 package local
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
@@ -18,51 +20,23 @@ func New(basePath string) *Adapter {
 	return &Adapter{basePath: basePath}
 }
 
+// Save stores a complete buffer. Implemented on top of the streaming stage
+// (spec 020) so there is exactly one write/publish code path per backend.
 func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
-	externalID := service.ComputeHash(content)
-	filePath := a.filePath(externalID)
-
-	// Content-addressable dedup: skip if file already exists
-	if _, err := os.Stat(filePath); err == nil {
-		return model.StoredFile{
-			ExternalID: externalID,
-			Size:       len(content),
-			Created:    false,
-		}, nil
-	}
-
-	// Atomic write: temp file + rename
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return model.StoredFile{}, fmt.Errorf("create storage dir: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	st, err := a.OpenStage(context.Background())
 	if err != nil {
-		return model.StoredFile{}, fmt.Errorf("create temp file: %w", err)
+		return model.StoredFile{}, err
 	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return model.StoredFile{}, fmt.Errorf("write temp file: %w", err)
+	if _, err := st.Write(content); err != nil {
+		_ = st.Abort()
+		return model.StoredFile{}, err
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return model.StoredFile{}, fmt.Errorf("close temp file: %w", err)
+	stored, err := st.Commit()
+	if err != nil {
+		_ = st.Abort()
+		return model.StoredFile{}, err
 	}
-
-	if err := os.Rename(tmpName, filePath); err != nil {
-		_ = os.Remove(tmpName)
-		return model.StoredFile{}, fmt.Errorf("rename to final path: %w", err)
-	}
-
-	return model.StoredFile{
-		ExternalID: externalID,
-		Size:       len(content),
-		Created:    true,
-	}, nil
+	return stored, nil
 }
 
 func (a *Adapter) Read(externalID string) ([]byte, error) {
@@ -128,4 +102,87 @@ func isValidExternalID(id string) bool {
 		}
 	}
 	return true
+}
+
+// stage is the filesystem StageWriter: a temp file in the blob directory,
+// hashed while written, published by rename on Commit (spec 020).
+type stage struct {
+	a         *Adapter
+	tmp       *os.File
+	tmpName   string
+	hasher    *service.Hasher
+	size      int
+	committed bool
+	aborted   bool
+}
+
+// OpenStage implements port.StoragePort (spec 020).
+func (a *Adapter) OpenStage(_ context.Context) (port.StageWriter, error) {
+	if err := os.MkdirAll(a.basePath, 0o750); err != nil {
+		return nil, fmt.Errorf("create storage dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(a.basePath, ".stage-*")
+	if err != nil {
+		return nil, fmt.Errorf("create staging file: %w", err)
+	}
+	return &stage{a: a, tmp: tmp, tmpName: tmp.Name(), hasher: service.NewHasher()}, nil
+}
+
+func (s *stage) Write(p []byte) (int, error) {
+	if s.committed || s.aborted {
+		return 0, fmt.Errorf("stage: write after commit/abort")
+	}
+	n, err := s.tmp.Write(p)
+	if n > 0 {
+		_, _ = s.hasher.Write(p[:n])
+		s.size += n
+	}
+	if err != nil {
+		return n, fmt.Errorf("write staging file: %w", err)
+	}
+	return n, nil
+}
+
+func (s *stage) Commit() (model.StoredFile, error) {
+	if s.committed {
+		return model.StoredFile{}, fmt.Errorf("stage: double commit")
+	}
+	if s.aborted {
+		return model.StoredFile{}, fmt.Errorf("stage: commit after abort")
+	}
+	if err := s.tmp.Close(); err != nil {
+		return model.StoredFile{}, fmt.Errorf("close staging file: %w", err)
+	}
+
+	externalID := s.hasher.Sum()
+	finalPath := s.a.filePath(externalID)
+
+	// Content-addressable dedup: blob already published → discard staging.
+	if _, err := os.Stat(finalPath); err == nil {
+		if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			// The blob is safe (finalPath exists) but the staging artifact
+			// leaked — surface it rather than accumulate orphans.
+			return model.StoredFile{}, fmt.Errorf("remove staging file on dedup: %w", rmErr)
+		}
+		s.committed = true
+		return model.StoredFile{ExternalID: externalID, Size: s.size, Created: false}, nil
+	}
+
+	if err := os.Rename(s.tmpName, finalPath); err != nil {
+		return model.StoredFile{}, fmt.Errorf("publish staged file: %w", err)
+	}
+	s.committed = true
+	return model.StoredFile{ExternalID: externalID, Size: s.size, Created: true}, nil
+}
+
+func (s *stage) Abort() error {
+	if s.aborted || s.committed {
+		return nil
+	}
+	s.aborted = true
+	_ = s.tmp.Close()
+	if err := os.Remove(s.tmpName); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove staging file: %w", err)
+	}
+	return nil
 }

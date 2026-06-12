@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -2276,5 +2277,77 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 	}
 	if storage.saved != nil {
 		t.Error("blob written for rejected mismatched content")
+	}
+}
+
+// TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
+// detectMIME override or the input type.
+func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
+	return port.TranscodeResult{MimeType: mimeType, ImageWidth: p.processDimsW, ImageHeight: p.processDimsH, Measured: measured}, nil
+}
+
+// US3/T022: replace path enforces the streaming cap (413 + counter path).
+func TestDocumentHandler_ReplaceContent_OverLimit413(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	h.MaxUploadSize = 1024
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: "application/pdf"}
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", bytes.NewReader(bytes.Repeat([]byte("z"), 8192)))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413, body: %s", rr.Code, rr.Body.String())
+	}
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after over-limit replace")
+		}
+	}
+}
+
+// Round-2 CR catch: oversized metadata fields must be rejected, not
+// silently truncated into a different request.
+func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
+	h, _, storage := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "f.bin")
+	_, _ = part.Write([]byte("content"))
+	_ = writer.WriteField("displayName", strings.Repeat("x", (16<<10)+5))
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "16 KiB") {
+		t.Errorf("body should name the field limit: %s", rr.Body.String())
+	}
+	// The file part precedes the oversized field, so a stage was already
+	// open — the real invariant (FR-006) is that the early return aborted it.
+	if len(storage.stages) == 0 {
+		t.Fatal("expected a stage to be opened before the oversized field was rejected")
+	}
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after oversized-field rejection")
+		}
 	}
 }

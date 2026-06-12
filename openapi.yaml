@@ -201,52 +201,6 @@ paths:
   /internal/file:
     post:
       operationId: DocumentHandler.Create
-      parameters:
-        - in: form
-          name: file
-          schema:
-            format: binary
-            type: string
-        - in: form
-          name: displayName
-          schema:
-            type: string
-        - in: form
-          name: storageBucketId
-          schema:
-            format: uuid
-            type: string
-        - in: form
-          name: authorizationId
-          schema:
-            format: uuid
-            type: string
-        - in: form
-          name: tagsetId
-          schema:
-            format: uuid
-            type: string
-        - in: form
-          name: createdBy
-          schema:
-            format: uuid
-            type: string
-        - in: form
-          name: temporaryLocation
-          schema:
-            type: boolean
-        - in: form
-          name: skipDedup
-          schema:
-            type: boolean
-        - in: form
-          name: allowedMimeTypes
-          schema:
-            type: string
-        - in: form
-          name: maxFileSize
-          schema:
-            type: integer
       responses:
         "201":
           content:
@@ -260,6 +214,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
+        "408":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Timeout
         "409":
           content:
             application/json:
@@ -282,7 +242,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/http.errorResponse'
+                $ref: '#/components/schemas/http.RejectedContentResponse'
           description: Unprocessable Entity
         "500":
           content:
@@ -473,6 +433,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
+        "408":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Timeout
         "409":
           content:
             application/json:

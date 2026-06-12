@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/google/uuid"
@@ -148,6 +150,14 @@ type mockStorage struct {
 	// dataByID serves per-externalID content (MIME-repair tests). When nil,
 	// Read falls back to the flat data/readErr pair.
 	dataByID map[string][]byte
+
+	// Streaming-stage controls (spec 020).
+	openStageErr   error
+	stageWriteErr  error
+	stageCommitErr error
+	stageDedupHit  bool
+	stageDiscard   bool // count writes without buffering (allocation tests)
+	stages         []*mockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -190,6 +200,11 @@ type mockProcessor struct {
 	// detectMIME override — when non-empty, replaces the default
 	// application/octet-stream (replace-path reconciliation tests).
 	detectMIME string
+
+	// Streaming-transcode overrides (spec 020).
+	transcodeErr   error
+	transcodeMIME  string
+	transcodeCalls int
 }
 
 func (m *mockProcessor) DetectMIME(_ []byte) string {
@@ -1129,9 +1144,11 @@ func TestStoreAndLink_StorageFails(t *testing.T) {
 
 func TestCreateDocument_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{},
-		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		Repo:    &mockRepo{},
+		Storage: &mockStorage{},
+		// spec 020: only transcodable images touch the processor, so the
+		// failure test must sniff as an image to exercise the route.
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/png"},
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
@@ -1143,9 +1160,11 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 
 func TestStoreAndLink_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
+		// spec 020: only transcodable images route through the processor on
+		// replace; the stored type must be an image so the failure path runs.
+		Repo:      &mockRepo{doc: model.Document{ID: uuid.New(), MimeType: "image/jpeg"}},
 		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/jpeg"},
 	}
 
 	_, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("content"))
@@ -1671,4 +1690,83 @@ func TestProcessResultToContentMetadata_AllBranches(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Spec 020: streaming stage mock ---
+
+type mockStage struct {
+	parent    *mockStorage
+	buf       bytes.Buffer
+	n         int64
+	writeErr  error
+	commitErr error
+	committed bool
+	aborted   bool
+}
+
+func (s *mockStage) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	s.n += int64(len(p))
+	if s.parent.stageDiscard {
+		return len(p), nil
+	}
+	return s.buf.Write(p)
+}
+
+func (s *mockStage) Commit() (model.StoredFile, error) {
+	if s.commitErr != nil {
+		return model.StoredFile{}, s.commitErr
+	}
+	s.committed = true
+	content := s.buf.Bytes()
+	s.parent.saved = content
+	return model.StoredFile{
+		ExternalID: ComputeHash(content),
+		Size:       len(content),
+		Created:    !s.parent.stageDedupHit,
+	}, nil
+}
+
+func (s *mockStage) Abort() error {
+	s.aborted = true
+	return nil
+}
+
+func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	if m.openStageErr != nil {
+		return nil, m.openStageErr
+	}
+	commitErr := m.stageCommitErr
+	if commitErr == nil {
+		commitErr = m.saveErr
+	}
+	st := &mockStage{parent: m, writeErr: m.stageWriteErr, commitErr: commitErr}
+	m.stages = append(m.stages, st)
+	return st, nil
+}
+
+// TranscodeStream (mock): pass-through copy; honors transcodeErr and reports
+// transcodeMIME/dims overrides for ingest-path tests.
+func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	m.transcodeCalls++
+	if m.transcodeErr != nil {
+		return port.TranscodeResult{}, m.transcodeErr
+	}
+	if m.processErr != nil {
+		return port.TranscodeResult{}, m.processErr
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	out := mimeType
+	if m.transcodeMIME != "" {
+		out = m.transcodeMIME
+	}
+	return port.TranscodeResult{MimeType: out, ImageWidth: m.processDimsW, ImageHeight: m.processDimsH, Measured: m.processDimsW != nil}, nil
+}
+
+func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
 }

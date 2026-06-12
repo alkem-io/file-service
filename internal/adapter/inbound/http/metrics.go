@@ -24,6 +24,13 @@ var (
 	// MimeRepairOps counts startup MIME-repair actions:
 	// relabeled | unrecoverable | skipped_not_office | errors.
 	MimeRepairOps = expvar.NewMap("mime_repair_total")
+
+	// IngestOutcomes counts streaming-upload results by outcome (spec 020
+	// FR-008): accepted | rejected_over_limit | rejected_pixel_budget |
+	// rejected_bucket_policy | stalled | client_abort | failed_mid_stream.
+	// stalled/client_abort/failed_mid_stream distinguish who broke the
+	// stream; the rejected_* keys are policy enforcement.
+	IngestOutcomes = expvar.NewMap("ingest_outcomes_total")
 )
 
 // InitMetrics ensures metrics are initialized (idempotent).
@@ -34,5 +41,6 @@ func InitMetrics() {
 		DocumentOps.Init()
 		ReplaceOutcomes.Init()
 		MimeRepairOps.Init()
+		IngestOutcomes.Init()
 	})
 }

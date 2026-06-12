@@ -3,7 +3,9 @@
 package imaging
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 
 	"github.com/davidbyttow/govips/v2/vips"
 	"github.com/gabriel-vasile/mimetype"
@@ -275,4 +277,90 @@ func canonicalizeRaster(content []byte, mimeType string) (port.ProcessResult, er
 
 	w, h := extractDims(img)
 	return port.ProcessResult{Content: out, MimeType: mimeType, ImageWidth: w, ImageHeight: h, Measured: true}, nil
+}
+
+// streamHeadPeek bounds the input-header probe used for the pixel budget
+// and orientation discovery (spec 020 FR-010). Part of the fixed budget.
+const streamHeadPeek = 64 << 10
+
+// TranscodeStream canonicalizes an image pulled from r and writes encoded
+// chunks to w as produced (spec 020 FR-004). Strategy per the fork's
+// streaming model:
+//
+//  1. Probe the buffered head (≤64 KiB) for dimensions + orientation
+//     without consuming the stream: enforces the pixel budget before any
+//     pixel decode and picks the access mode.
+//  2. Orientation ≤ 2 (none / horizontal flip — sequential-safe):
+//     AccessSequential, pixels flow reader→writer once, RAM bounded by
+//     line caches. Orientation ≥ 3: default load, which materializes to
+//     memory or scratch disc by SetStreamDiscThreshold.
+//  3. RemoveMetadata (drops EXIF/IPTC/XMP, preserves ICC — Decision 2 of
+//     018) → AutoRotate → SaveToWriter with streaming-capable params
+//     (JPEG baseline Q82 — spec 020 R7).
+func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	br := bufio.NewReaderSize(r, streamHeadPeek)
+	head, _ := br.Peek(streamHeadPeek)
+
+	orient := -1
+	if probe, err := vips.NewImageFromBuffer(head); err == nil {
+		pw, ph := probe.Width(), probe.Height()
+		orient = probe.Orientation()
+		probe.Close()
+		if budget := PixelBudget(); budget > 0 && pw > 0 && ph > 0 && int64(pw)*int64(ph) > budget {
+			return port.TranscodeResult{}, fmt.Errorf("%w: %dx%d", port.ErrPixelBudgetExceeded, pw, ph)
+		}
+	}
+	// Probe failure (header beyond the peek window) skips the pre-decode
+	// budget check; decoded-frame RAM remains bounded by the disc
+	// threshold on the materialized path below.
+
+	params := vips.NewImportParams()
+	if orient >= 0 && orient <= 2 {
+		// Sequential fast path: rotation not needed (flip is
+		// sequential-safe). Unknown orientation (probe failed) takes the
+		// materialized path, which tolerates everything.
+		params.Access.Set(vips.AccessSequential)
+	}
+
+	img, err := vips.LoadImageFromReader(br, params)
+	if err != nil {
+		return port.TranscodeResult{}, fmt.Errorf("streaming load: %w", err)
+	}
+	defer img.Close()
+
+	if budget := PixelBudget(); budget > 0 && orient < 0 {
+		// Probe failed earlier; the real header is now parsed — enforce
+		// the budget before any pixel pass.
+		if iw, ih := img.Width(), img.Height(); iw > 0 && ih > 0 && int64(iw)*int64(ih) > budget {
+			return port.TranscodeResult{}, fmt.Errorf("%w: %dx%d", port.ErrPixelBudgetExceeded, iw, ih)
+		}
+	}
+
+	if err := img.AutoRotate(); err != nil {
+		return port.TranscodeResult{}, fmt.Errorf("auto-rotate: %w", err)
+	}
+	if err := img.RemoveMetadata(); err != nil {
+		return port.TranscodeResult{}, fmt.Errorf("strip metadata: %w", err)
+	}
+
+	width, height := img.Width(), img.Height()
+
+	outMIME := "image/jpeg"
+	format := vips.ImageTypeJPEG
+	ep := &vips.ExportParams{Quality: 82, Interlaced: false} // baseline: streaming-capable (R7)
+	if mimeType == "image/png" {
+		outMIME = "image/png"
+		format = vips.ImageTypePNG
+		ep = &vips.ExportParams{Compression: 6}
+	}
+
+	if err := img.SaveToWriter(w, format, ep); err != nil {
+		return port.TranscodeResult{}, fmt.Errorf("streaming save: %w", err)
+	}
+
+	res := port.TranscodeResult{MimeType: outMIME, Measured: true}
+	if width > 0 && height > 0 {
+		res.ImageWidth, res.ImageHeight = &width, &height
+	}
+	return res, nil
 }

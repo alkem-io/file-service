@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 type mockDocRepo struct {
@@ -120,7 +123,8 @@ type mockStorage struct {
 	data    []byte
 	err     error
 	saveErr error
-	saved   []byte // captures the last Save payload (replace-path rejection tests)
+	saved   []byte // captures the last Save/stage payload (replace-path rejection tests)
+	stages  []*httpMockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -288,4 +292,28 @@ func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Do
 }
 func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
 	return true, nil
+}
+
+// httpMockStage backs mockStorage.OpenStage for handler-level tests (spec 020).
+type httpMockStage struct {
+	parent  *mockStorage
+	buf     bytes.Buffer
+	aborted bool
+}
+
+func (s *httpMockStage) Write(p []byte) (int, error) { return s.buf.Write(p) }
+func (s *httpMockStage) Commit() (model.StoredFile, error) {
+	if s.parent.saveErr != nil {
+		return model.StoredFile{}, s.parent.saveErr
+	}
+	content := s.buf.Bytes()
+	s.parent.saved = content
+	return model.StoredFile{ExternalID: service.ComputeHash(content), Size: len(content), Created: true}, nil
+}
+func (s *httpMockStage) Abort() error { s.aborted = true; return nil }
+
+func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	st := &httpMockStage{parent: m}
+	m.stages = append(m.stages, st)
+	return st, nil
 }

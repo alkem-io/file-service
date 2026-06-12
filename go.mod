@@ -36,3 +36,5 @@ require (
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+replace github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e

@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,4 +260,130 @@ func TestIsValidExternalID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Spec 020 T006: StageWriter contract ---
+
+func TestStage_CommitPublishesWithCorrectIdentity(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	content := []byte("streaming stage content")
+
+	st, err := a.OpenStage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// nothing observable as a permanent object pre-commit (FR-006)
+	if entries := publishedBlobs(t, dir); len(entries) != 0 {
+		t.Fatalf("blob visible before Commit: %v", entries)
+	}
+	if _, err := st.Write(content[:7]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Write(content[7:]); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := st.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := service.ComputeHash(content); stored.ExternalID != want {
+		t.Errorf("externalID = %s, want %s", stored.ExternalID, want)
+	}
+	if stored.Size != len(content) || !stored.Created {
+		t.Errorf("stored = %+v, want size=%d created=true", stored, len(content))
+	}
+	got, err := a.Read(stored.ExternalID)
+	if err != nil || string(got) != string(content) {
+		t.Errorf("published content mismatch: %q err=%v", got, err)
+	}
+	if entries := stagingArtifacts(t, dir); len(entries) != 0 {
+		t.Errorf("staging artifact left after Commit: %v", entries)
+	}
+}
+
+func TestStage_CommitDedupHit(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	content := []byte("dedup me")
+	if _, err := a.Save(content); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _ := a.OpenStage(context.Background())
+	_, _ = st.Write(content)
+	stored, err := st.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Created {
+		t.Error("Created = true on dedup hit, want false")
+	}
+	if entries := stagingArtifacts(t, dir); len(entries) != 0 {
+		t.Errorf("staging artifact left after dedup commit: %v", entries)
+	}
+}
+
+func TestStage_AbortRemovesArtifactAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	st, _ := a.OpenStage(context.Background())
+	_, _ = st.Write([]byte("doomed"))
+	if err := st.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Abort(); err != nil {
+		t.Errorf("second Abort: %v", err)
+	}
+	if entries := stagingArtifacts(t, dir); len(entries) != 0 {
+		t.Errorf("staging artifact survived Abort: %v", entries)
+	}
+	if entries := publishedBlobs(t, dir); len(entries) != 0 {
+		t.Errorf("aborted stage published a blob: %v", entries)
+	}
+	if _, err := st.Commit(); err == nil {
+		t.Error("Commit after Abort should fail")
+	}
+}
+
+func TestStage_AbortAfterCommitIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	st, _ := a.OpenStage(context.Background())
+	_, _ = st.Write([]byte("keep me"))
+	stored, err := st.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Abort(); err != nil {
+		t.Errorf("Abort after Commit: %v", err)
+	}
+	if _, err := a.Read(stored.ExternalID); err != nil {
+		t.Errorf("published blob destroyed by post-commit Abort: %v", err)
+	}
+}
+
+func publishedBlobs(t *testing.T, dir string) []string {
+	t.Helper()
+	return globNames(t, dir, func(name string) bool { return name[0] != '.' })
+}
+
+func stagingArtifacts(t *testing.T, dir string) []string {
+	t.Helper()
+	return globNames(t, dir, func(name string) bool { return len(name) > 6 && name[:6] == ".stage" })
+}
+
+func globNames(t *testing.T, dir string, keep func(string) bool) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if keep(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out
 }

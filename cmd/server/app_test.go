@@ -128,8 +128,13 @@ func TestNewHTTPServer(t *testing.T) {
 	if srv == nil {
 		t.Fatal("nil server")
 	}
-	if srv.ReadTimeout != 30*time.Second {
-		t.Errorf("ReadTimeout = %v", srv.ReadTimeout)
+	// Spec 020 FR-009: no global ReadTimeout — uploads use progress-based
+	// read deadlines (progressReader); only the header read has a fixed cap.
+	if srv.ReadTimeout != 0 {
+		t.Errorf("ReadTimeout = %v, want 0 (replaced by per-request deadlines)", srv.ReadTimeout)
+	}
+	if srv.ReadHeaderTimeout != 10*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want 10s", srv.ReadHeaderTimeout)
 	}
 	if srv.WriteTimeout != 60*time.Second {
 		t.Errorf("WriteTimeout = %v", srv.WriteTimeout)
