@@ -185,3 +185,18 @@ compiling: its `TranscodeStream` is a pass-through copy.
 **Ops note (for the deploy/PR body)**: scratch dir needs an emptyDir mount
 sized for `concurrent transcodes × disc-threshold-exceeding frames`;
 defaults (os.TempDir, 100 MB threshold) are safe for current traffic.
+
+## Post-review deltas (backfilled 2026-06-12 after PR #31 merged)
+
+1. **R4 addendum — metadata field cap.** Each non-file multipart field is
+   capped at 16 KiB and *rejected* (400, field named) when exceeded — read
+   cap+1 then check, never truncate: a silently-truncated `displayName` or
+   `allowedMimeTypes` would parse as a different request. The already-staged
+   file part is aborted on this path (FR-006); the regression test also
+   asserts the abort.
+2. **FR-005 enforcement.** `MAX_UPLOAD_SIZE` is not merely validated to
+   1 GiB — configuration above the ceiling is rejected at startup, so the
+   knob cannot silently enter unproven territory.
+3. **vips knob ordering.** `imaging.ConfigureStreaming` runs *after*
+   `imaging.New()` (which performs `vips.Startup`); stream knobs set on an
+   uninitialized libvips would be ignored.

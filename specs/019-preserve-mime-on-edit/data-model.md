@@ -61,8 +61,8 @@ Relabeled rows leave the suspect set ⇒ the job is idempotent across boots.
 
 | Method | Query | Notes |
 |---|---|---|
-| `ListSuspectMimeRows(ctx)` | `SELECT id, "displayName", "mimeType", size, "externalID" FROM file WHERE "mimeType" = ANY($generics) AND lower("displayName") ~ '\.(docx|xlsx|pptx|odt|ods|odp)$'` | sqlc-generated |
-| `UpdateMimeType(ctx, id, mimeType)` | single-column `UPDATE … SET "mimeType" = $2, "updatedDate" = now() WHERE id = $1` | narrow on purpose (research R6) |
+| `ListByMimeTypes(ctx, mimeTypes)` | `SELECT id, "externalID", "mimeType", size, "displayName" FROM file WHERE "mimeType" = ANY($1::text[])` | sqlc-generated; office-extension filtering happens in the domain via `OfficeMIMEForName` so the office vocabulary stays single-sourced (shipped delta vs the original SQL-regex design) |
+| `UpdateMimeType(ctx, id, expectedExternalID, mimeType) (bool, error)` | compare-and-set: `UPDATE file SET "mimeType" = $2, "updatedDate" = $3, version = version + 1 WHERE id = $1 AND "externalID" = $4` — the adapter supplies `$3 = now()`, so the port carries three logical args | CAS guard added in review (PR #29): a Replace landing between the repair scan and the relabel already wrote the correct type for the *new* content — the stale-blob relabel must lose that race silently (false return = skip, not error) |
 
 ## Validation rules (from FRs)
 

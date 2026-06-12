@@ -17,6 +17,12 @@
   dimensions exceed `IMAGE_PIXEL_BUDGET`.
 - Stalled uploads (no bytes for `UPLOAD_IDLE_TIMEOUT_MS`) are aborted; the
   client observes a connection error, the service counts `stalled`.
+- **Metadata field limit** (added in review, PR #31): each non-file
+  multipart field is capped at 16 KiB — the largest legitimate value (a
+  long `allowedMimeTypes` list) is ~2.5 KiB. An oversized field is
+  **rejected with 400** naming the field, never silently truncated (a
+  truncated value would parse as a *different* request); the already-staged
+  file part is aborted (FR-006).
 - Success responses byte-for-byte unchanged.
 
 ### PUT /internal/file/{id}/content (replace)

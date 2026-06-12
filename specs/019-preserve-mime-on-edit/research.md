@@ -94,9 +94,11 @@ reporting honestly.
 ## R6 — Repair job delivery & office-MIME vocabulary
 
 **Decision**: A goroutine launched from `cmd/server/app.go` after DB connect, running
-once per boot; suspect rows selected by SQL (`mimeType` ∈ generic set AND lowercased
-`displayName` LIKE one of the office extensions), content verified (non-empty + `PK`
-zip magic) before relabeling via a narrow `UpdateMimeType` repo method. The
+once per boot; suspect rows selected by SQL on generic MIME alone, with the
+office-extension check applied in the domain via `OfficeMIMEForName`
+(single-sourced vocabulary — see the post-review delta below), content
+verified (non-empty + `PK` zip magic) before relabeling via the
+`UpdateMimeType` repo method. The
 extension↔canonical-MIME map lives once in `internal/domain/model/mime.go` covering
 OOXML (`.docx/.xlsx/.pptx`) and OpenDocument (`.odt/.ods/.odp`) — the formats the
 Collabora flow stores (acc data shows all of `presentationml`, `wordprocessingml`,
@@ -115,3 +117,26 @@ clarification (would make the fix cross-repo). (b) Manual SQL — rejected in
 clarification (relies on an operator per environment). (c) Blocking startup until
 repair completes — rejected: a long storage read loop would delay readiness; the
 job is independent of request serving.
+
+## Post-review deltas (backfilled 2026-06-12 after PR #29 merged)
+
+Three implementation facts diverged from the text above during CodeRabbit
+review and are authoritative as shipped:
+
+1. **Repair relabel is compare-and-set.** `UpdateMimeType(ctx, id,
+   expectedExternalID, mimeType) (bool, error)` only applies while the row's
+   `externalID` still equals the blob the repair job sniffed. The repair
+   goroutine runs concurrently with request serving, so a Replace landing in
+   the scan→relabel window must win: the guard failing returns false and the
+   job skips the row (regression test
+   `TestRunMimeRepair_ConcurrentReplaceLosesGuardSkipsRelabel`).
+2. **Suspect scan splits SQL and domain filtering.** SQL selects by generic
+   MIME only — port method `ListByMimeTypes`, backed by the sqlc query
+   `ListDocumentsByMimeTypes`; the office-extension check runs in the domain
+   via `model.OfficeMIMEForName`, keeping the office vocabulary
+   single-sourced (constitution VIII) instead of duplicating it in a SQL
+   regex.
+3. **Outcome counters live at the adapter.** The domain emits structured
+   logs and reports the outcome on `StoredFile.ReplaceOutcome`; the HTTP
+   adapter increments `content_replace_outcomes_total` (hexagonal rule — the
+   domain never imports adapter metrics).
