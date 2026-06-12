@@ -8,11 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	gobreaker "github.com/sony/gobreaker/v2"
+	"go.uber.org/zap"
 
 	httpAdapter "github.com/alkem-io/file-service/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb"
@@ -119,13 +116,17 @@ func newHealthHandler(pool *pgxpool.Pool, nc *nats.Conn) *httpAdapter.HealthHand
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
-	h2s := &http2.Server{
-		MaxConcurrentStreams: 100,
-		IdleTimeout:          120 * time.Second,
-	}
+	// Native unencrypted HTTP/2 (Go ≥1.24) replaces the deprecated
+	// x/net h2c wrapper; in-cluster clients (server adapter, wopi) speak
+	// h2c to this service.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: h2c.NewHandler(handler, h2s),
+		Addr:      fmt.Sprintf(":%d", port),
+		Handler:   handler,
+		Protocols: protocols,
+		HTTP2:     &http.HTTP2Config{MaxConcurrentStreams: 100},
 		// Spec 020 (FR-009): the global ReadTimeout is replaced by a header
 		// deadline + per-request read deadlines. Upload handlers extend the
 		// deadline on progress (progressReader); every other route gets a

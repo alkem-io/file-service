@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 func startH2CServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
-	h2s := &http2.Server{}
-	srv := httptest.NewUnstartedServer(h2c.NewHandler(handler, h2s))
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv

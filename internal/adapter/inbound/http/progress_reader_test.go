@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
@@ -124,7 +123,11 @@ func TestProgressReader_StallAborts_HTTP1(t *testing.T) {
 
 func TestProgressReader_StallAborts_H2C(t *testing.T) {
 	res := &stallResult{}
-	srv := httptest.NewServer(h2c.NewHandler(drainHandler(1<<20, 250*time.Millisecond, res), &http2.Server{}))
+	srv := httptest.NewUnstartedServer(drainHandler(1<<20, 250*time.Millisecond, res))
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
 	defer srv.Close()
 
 	client := &http.Client{Transport: &http2.Transport{
