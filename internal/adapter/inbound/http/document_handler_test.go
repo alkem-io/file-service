@@ -2316,7 +2316,7 @@ func TestDocumentHandler_ReplaceContent_OverLimit413(t *testing.T) {
 // Round-2 CR catch: oversized metadata fields must be rejected, not
 // silently truncated into a different request.
 func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
-	h, _, _ := newDocHandler()
+	h, _, storage := newDocHandler()
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -2339,5 +2339,15 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "16 KiB") {
 		t.Errorf("body should name the field limit: %s", rr.Body.String())
+	}
+	// The file part precedes the oversized field, so a stage was already
+	// open — the real invariant (FR-006) is that the early return aborted it.
+	if len(storage.stages) == 0 {
+		t.Fatal("expected a stage to be opened before the oversized field was rejected")
+	}
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after oversized-field rejection")
+		}
 	}
 }
