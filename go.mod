@@ -11,7 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nats-io/nats-server/v2 v2.14.2
 	github.com/nats-io/nats.go v1.52.0
-	github.com/pashagolub/pgxmock/v4 v4.9.0
+	github.com/pashagolub/pgxmock/v5 v5.1.0
 	github.com/sony/gobreaker/v2 v2.4.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.56.0
