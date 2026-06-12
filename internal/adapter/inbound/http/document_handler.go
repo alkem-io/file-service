@@ -243,25 +243,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			declaredMIME := part.Header.Get("Content-Type")
 			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME)
 			if err != nil {
-				switch {
-				case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
-					h.writeIngestTransportError(w, err)
-				case errors.Is(err, port.ErrPixelBudgetExceeded):
-					IngestOutcomes.Add("rejected_pixel_budget", 1)
-					RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
-				case errors.Is(err, service.ErrImageProcessing):
-					IngestOutcomes.Add("failed_mid_stream", 1)
-					writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
-				default:
-					if isClientStreamError(err) {
-						IngestOutcomes.Add("client_abort", 1)
-						writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
-					} else {
-						IngestOutcomes.Add("failed_mid_stream", 1)
-						h.Logger.Error("failed to stage upload", zap.Error(err))
-						writeJSONError(w, http.StatusInternalServerError, "internal error")
-					}
-				}
+				h.writeStageError(w, err)
 				return
 			}
 		} else {
@@ -315,6 +297,30 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ImageWidth:  doc.ImageWidth,
 		ImageHeight: doc.ImageHeight,
 	}.Render(w)
+}
+
+// writeStageError maps a StageUpload failure to its HTTP response and
+// outcome counter (spec 020 FR-008).
+func (h *DocumentHandler) writeStageError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
+		h.writeIngestTransportError(w, err)
+	case errors.Is(err, port.ErrPixelBudgetExceeded):
+		IngestOutcomes.Add("rejected_pixel_budget", 1)
+		RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
+	case errors.Is(err, service.ErrImageProcessing):
+		IngestOutcomes.Add("failed_mid_stream", 1)
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		if isClientStreamError(err) {
+			IngestOutcomes.Add("client_abort", 1)
+			writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
+		} else {
+			IngestOutcomes.Add("failed_mid_stream", 1)
+			h.Logger.Error("failed to stage upload", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+		}
+	}
 }
 
 // isClientStreamError reports request-stream failures attributable to the
@@ -586,26 +592,30 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
-	content, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "failed to read request body")
-		return
+	capBytes := h.MaxUploadSize
+	if capBytes <= 0 {
+		capBytes = 32 << 20
 	}
+	idle := h.IdleTimeout
+	if idle <= 0 {
+		idle = 30 * time.Second
+	}
+	pr := newProgressReader(w, r.Body, capBytes, idle)
+	defer func() { _ = pr.Close() }()
 
 	// ReplaceContent note: if the new content's hash matches another file row in
 	// the same bucket, the unique(externalID, storageBucketID) index is violated.
 	// The service returns ErrConflict → 409 in that case. UpdateFile (PATCH) does
 	// not touch externalID, so it cannot trigger this.
-	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
+	result, err := h.Service.StoreAndLinkStream(r.Context(), docID, pr)
 	if err != nil {
 		var mismatch *service.MimeMismatchError
 		switch {
+		case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
+			h.writeIngestTransportError(w, err)
+		case errors.Is(err, port.ErrPixelBudgetExceeded):
+			IngestOutcomes.Add("rejected_pixel_budget", 1)
+			RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "document not found")
 		case errors.Is(err, service.ErrEmptyContent):

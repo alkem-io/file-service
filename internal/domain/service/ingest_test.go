@@ -39,7 +39,7 @@ func (p *patternReader) Read(b []byte) (int, error) {
 		n = rem
 	}
 	for i := int64(0); i < n; i++ {
-		b[i] = byte((p.off + i) * 31)
+		b[i] = byte((p.off + i) & 0x7F) //nolint:gosec // bounded by mask
 	}
 	p.off += n
 	return int(n), nil
@@ -316,5 +316,47 @@ func assertSingleAbortedStage(t *testing.T, storage *mockStorage) {
 	}
 	if st := storage.stages[0]; !st.aborted || st.committed {
 		t.Errorf("stage state aborted=%v committed=%v, want aborted only", st.aborted, st.committed)
+	}
+}
+
+// US3: replace-path transport guards — over-limit propagates, stage aborted,
+// document row untouched.
+func TestStoreAndLinkStream_OverLimitAborts(t *testing.T) {
+	storage := &mockStorage{}
+	repo := &mockRepo{doc: model.Document{ID: uuid.New(), MimeType: "application/pdf", ExternalID: "old"}}
+	svc := newIngestService(storage, repo)
+
+	_, err := svc.StoreAndLinkStream(context.Background(), uuid.New(), &failAfterReader{n: 8192, err: ErrOverLimit})
+	if !errors.Is(err, ErrOverLimit) {
+		t.Fatalf("err = %v, want ErrOverLimit", err)
+	}
+	assertSingleAbortedStage(t, storage)
+	if repo.updateFileCalls != 0 {
+		t.Error("document row mutated for an over-limit replace")
+	}
+}
+
+// GIF/SVG (and non-images) never route through the transcoder — passthrough
+// with lazily backfilled dims (US2 scenario 2 as clarified).
+func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
+	for _, mime := range []string{"image/gif", "image/svg+xml", "application/pdf", "image/bmp", "image/avif"} {
+		proc := &mockProcessor{detectMIME: mime}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "")
+		if err != nil {
+			t.Fatalf("%s: %v", mime, err)
+		}
+		su.Discard()
+		if proc.transcodeCalls != 0 {
+			t.Errorf("%s routed through the transcoder; want passthrough", mime)
+		}
+	}
+	// control: a transcodable type does route
+	proc := &mockProcessor{detectMIME: "image/jpeg"}
+	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
+	su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	su.Discard()
+	if proc.transcodeCalls != 1 {
+		t.Errorf("jpeg transcodeCalls = %d, want 1", proc.transcodeCalls)
 	}
 }

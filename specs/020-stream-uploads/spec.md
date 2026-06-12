@@ -100,11 +100,14 @@ output copies.
    JPEG — clarified 2026-06-12), **When** uploaded, **Then** the stored
    bytes, stored MIME type, and recorded dimensions are identical to the
    buffering implementation's output with the chosen streaming parameters.
-2. **Given** an image format the service does not re-encode (GIF, SVG),
-   **When** uploaded, **Then** it follows the pass-through streaming path
-   (US1) without a decode. JPEG/PNG/BMP/AVIF/WebP/HEIC always stream through
-   the encoder (clarified 2026-06-12: the recompress size guard is dropped;
-   recompressed output may occasionally exceed the original — accepted).
+2. **Given** an image format the service does not re-encode through the
+   streaming saver (GIF, SVG — and BMP/AVIF, which the image library cannot
+   stream-encode; implementation delta, see research R5), **When** uploaded,
+   **Then** it follows the pass-through streaming path (US1) without a
+   decode, with dimensions arriving via the existing lazy backfill.
+   JPEG/PNG/WebP/HEIC always stream through the encoder (clarified
+   2026-06-12: the recompress size guard is dropped; recompressed output may
+   occasionally exceed the original — accepted).
 3. **Given** a truncated or corrupt image stream, **When** conversion fails,
    **Then** the upload fails with the existing image-processing error and no
    permanent object remains.
@@ -229,8 +232,9 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 - **SC-001**: Peak per-request memory during a non-image upload is constant
   (fixed budget — pinned by the plan at 256 KiB copy buffer + 3 KiB sniff
-  prefix) for files from 1 MiB up to 1 GiB (the validated ceiling of the
-  configurable cap).
+  prefix, plus a 64 KiB image-header probe on the transcode route only) for
+  files from 1 MiB up to 1 GiB (the validated ceiling of the configurable
+  cap).
 - **SC-002**: For every **non-transcoded** input in the regression corpus,
   stored bytes, content hash, stored MIME type, and dimensions metadata are
   identical to the pre-change implementation. For **transcoded** images,

@@ -125,26 +125,38 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 		detected = normalizeMIME(s.Processor.DetectMIME(prefix))
 	}
 
+	su, err := s.stageContent(ctx, br, detected, len(prefix) > 0)
+	if err != nil {
+		return nil, err
+	}
+	su.DetectedMIME = detected
+	return su, nil
+}
+
+// stageContent opens a stage and streams br into it under the already-
+// decided MIME type — the shared back half of the create (StageUpload) and
+// replace (StoreAndLinkStream) pipelines.
+func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeType string, hasContent bool) (*StagedUpload, error) {
 	stage, err := s.Storage.OpenStage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open storage stage: %w", err)
 	}
-	su := &StagedUpload{stage: stage, MimeType: detected, DetectedMIME: detected}
+	su := &StagedUpload{stage: stage, MimeType: mimeType, DetectedMIME: mimeType}
 	cw := &countingWriter{w: stage}
 
-	if len(prefix) > 0 && transcodableMIME(detected) {
-		result, terr := s.Processor.TranscodeStream(br, cw, detected)
+	if hasContent && transcodableMIME(mimeType) {
+		result, terr := s.Processor.TranscodeStream(br, cw, mimeType)
 		if terr != nil {
 			su.Discard()
 			if isTransportError(terr, cw) {
-				s.logIngest("transcode transport failure", detected, cw.n, terr)
+				s.logIngest("transcode transport failure", mimeType, cw.n, terr)
 				return nil, terr
 			}
 			if errors.Is(terr, port.ErrPixelBudgetExceeded) {
-				s.logIngest("rejected: pixel budget", detected, cw.n, terr)
+				s.logIngest("rejected: pixel budget", mimeType, cw.n, terr)
 				return nil, terr
 			}
-			s.logIngest("transcode failed", detected, cw.n, terr)
+			s.logIngest("transcode failed", mimeType, cw.n, terr)
 			return nil, fmt.Errorf("%w: %w", ErrImageProcessing, terr)
 		}
 		su.MimeType = normalizeMIME(result.MimeType)
@@ -155,7 +167,7 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 		buf := make([]byte, copyBufferSize)
 		if _, cerr := io.CopyBuffer(cw, br, buf); cerr != nil {
 			su.Discard()
-			s.logIngest("stream copy failed", detected, cw.n, cerr)
+			s.logIngest("stream copy failed", mimeType, cw.n, cerr)
 			if cw.writeErr != nil {
 				return nil, fmt.Errorf("stage write: %w", cerr)
 			}

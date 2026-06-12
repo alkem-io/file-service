@@ -98,6 +98,18 @@ any pixel decode — including HEIC's whole-frame codec decode, which the disc
 threshold cannot bound (the budget is the only RAM guard there; spec
 clarification 2026-06-12).
 
+**Implementation deltas (recorded at build time)**: (1) the fork's
+disc-spill materialization is reachable through the *default* (non-
+sequential) reader load, so the composition probes the buffered head
+(≤64 KiB — added to the fixed budget) for dims/orientation, picks
+sequential vs materialized access, and reads dims post-AutoRotate from the
+ImageRef; (2) BMP and AVIF have no streaming saver in the library — they
+join GIF/SVG as byte-identical pass-through, dims via the existing lazy
+backfill (rotated BMP/AVIF lose eager canonicalization; vanishingly rare,
+self-heals on first read); (3) HEIC→JPEG is now a single encode at Q82
+baseline (the buffered path double-encoded Q100→Q82 — transcoded-class
+output re-baselined per amended SC-002).
+
 ## R6 — Timeout architecture
 
 **Decision**: Replace the server-wide `ReadTimeout: 30s` with

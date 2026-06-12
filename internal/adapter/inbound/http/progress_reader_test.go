@@ -92,7 +92,7 @@ func runStallScenario(t *testing.T, srv *httptest.Server, client *http.Client, r
 		resp, err := client.Do(req)
 		_ = err
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		close(done)
 	}()
@@ -146,7 +146,7 @@ func TestProgressReader_OverLimit(t *testing.T) {
 	req.ContentLength = -1
 	resp, err := srv.Client().Do(req)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	waitFor(t, func() bool { _, e := res.get(); return e != nil })
@@ -170,7 +170,7 @@ func TestProgressReader_HappyPathEOFAndDeadlineCleared(t *testing.T) {
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if n, rerr := res.get(); rerr != nil || n != 32<<10 {
 			t.Fatalf("request %d: n=%d err=%v", i, n, rerr)
 		}

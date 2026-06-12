@@ -202,8 +202,9 @@ type mockProcessor struct {
 	detectMIME string
 
 	// Streaming-transcode overrides (spec 020).
-	transcodeErr  error
-	transcodeMIME string
+	transcodeErr   error
+	transcodeMIME  string
+	transcodeCalls int
 }
 
 func (m *mockProcessor) DetectMIME(_ []byte) string {
@@ -1143,8 +1144,8 @@ func TestStoreAndLink_StorageFails(t *testing.T) {
 
 func TestCreateDocument_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{},
-		Storage:   &mockStorage{},
+		Repo:    &mockRepo{},
+		Storage: &mockStorage{},
 		// spec 020: only transcodable images touch the processor, so the
 		// failure test must sniff as an image to exercise the route.
 		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/png"},
@@ -1159,9 +1160,11 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 
 func TestStoreAndLink_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
+		// spec 020: only transcodable images route through the processor on
+		// replace; the stored type must be an image so the failure path runs.
+		Repo:      &mockRepo{doc: model.Document{ID: uuid.New(), MimeType: "image/jpeg"}},
 		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/jpeg"},
 	}
 
 	_, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("content"))
@@ -1747,6 +1750,7 @@ func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 // TranscodeStream (mock): pass-through copy; honors transcodeErr and reports
 // transcodeMIME/dims overrides for ingest-path tests.
 func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	m.transcodeCalls++
 	if m.transcodeErr != nil {
 		return port.TranscodeResult{}, m.transcodeErr
 	}

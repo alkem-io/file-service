@@ -1,11 +1,12 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	"io"
 	"strings"
 	"time"
 
@@ -241,32 +242,6 @@ func (s *FileService) reconcileReplaceMIME(knownMIME string, content []byte) (mi
 	}
 }
 
-// resolveMIME determines the effective MIME type and validates it against the allow-list.
-// Empty content: trust declaredMIME (no bytes to detect from).
-// Non-empty: detect from content bytes.
-func resolveMIME(p port.ImageProcessor, content []byte, declaredMIME string, allowedMimeTypes []string) (string, error) {
-	var mimeType string
-	if len(content) == 0 {
-		mimeType = normalizeMIME(declaredMIME)
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
-	} else {
-		mimeType = normalizeMIME(p.DetectMIME(content))
-	}
-
-	if len(allowedMimeTypes) > 0 {
-		normalized := make([]string, len(allowedMimeTypes))
-		for i, m := range allowedMimeTypes {
-			normalized[i] = normalizeMIME(m)
-		}
-		if !slices.Contains(normalized, mimeType) {
-			return "", ErrUnsupportedMediaType
-		}
-	}
-	return mimeType, nil
-}
-
 // insertDocument builds the Document, attempts a Create, and handles the
 // unique-key race by re-querying and returning the concurrent winner.
 //
@@ -367,18 +342,36 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // is violated. This can't be auto-merged without losing distinct document
 // identity, so we surface it as ErrConflict (HTTP 409). The caller should
 // delete one of the conflicting rows or abort the operation.
+// StoreAndLink stores new content for an existing document from a complete
+// buffer; delegates to the streaming pipeline (spec 020).
 func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, content []byte) (*model.StoredFile, error) {
+	return s.StoreAndLinkStream(ctx, documentID, bytes.NewReader(content))
+}
+
+// StoreAndLinkStream replaces a document's content from a one-pass stream
+// (spec 020 US3) while preserving every 019 semantic: the stored type is
+// authoritative (the sniff — now on the bounded prefix — is only a guard),
+// rejections happen before any storage side effect, and the outcome matrix
+// is unchanged.
+func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UUID, r io.Reader) (*model.StoredFile, error) {
 	doc, err := s.Repo.GetByID(ctx, documentID)
 	if err != nil {
 		return nil, err
 	}
 	oldExternalID := doc.ExternalID
 
+	br := bufio.NewReaderSize(r, sniffPrefixSize)
+	prefix, perr := br.Peek(sniffPrefixSize)
+	if perr != nil && !errors.Is(perr, io.EOF) && !errors.Is(perr, bufio.ErrBufferFull) {
+		s.logIngest("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
+		return nil, fmt.Errorf("read replacement prefix: %w", perr)
+	}
+
 	// The stored type is authoritative across content edits (FR-001); the
 	// content sniff is a guard, never the source of truth. All validation
-	// happens before Storage.Save, so a rejection has zero side effects
-	// (FR-007).
-	mimeType, detected, outcome, err := s.reconcileReplaceMIME(doc.MimeType, content)
+	// happens before the stage opens, so a rejection has zero side effects
+	// (FR-007). Empty content = empty prefix (019 FR-003a unchanged).
+	mimeType, detected, outcome, err := s.reconcileReplaceMIME(doc.MimeType, prefix)
 	if err != nil {
 		s.Logger.Warn("content replace rejected",
 			zap.String("documentID", documentID.String()),
@@ -396,25 +389,34 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 			zap.String("outcome", outcome))
 	}
 
-	result, err := s.Processor.Process(content, mimeType)
+	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
+		return nil, err
 	}
 
-	stored, err := s.Storage.Save(result.Content)
+	stored, err := su.stage.Commit()
 	if err != nil {
+		su.Discard()
+		s.logIngest("replace stage commit failed", su.MimeType, su.Size, err)
 		return nil, fmt.Errorf("store file: %w", err)
 	}
+	su.done = true
 
-	// Persist result.MimeType, not the reconciled mimeType: Process may
-	// canonicalize the encoding (HEIC/WebP → JPEG) and then result.Content —
-	// the bytes actually stored — IS that new format. The two values are
-	// identical on every other path (office and non-image types pass
-	// through), and stored types are always post-canonicalization, so the
-	// type-stability invariant (FR-001/FR-005) is preserved: a stored type
-	// can never regress to a generic or mismatched value here.
-	contentMetadata := processResultToContentMetadata(result, result.MimeType)
-	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, result.MimeType, stored.Size, contentMetadata)
+	// Persist su.MimeType (the transcode output), not the reconciled
+	// mimeType: the streaming transcode may canonicalize the encoding
+	// (HEIC/WebP → JPEG) and the staged bytes ARE that new format. The two
+	// values are identical on every other path (office and non-image types
+	// pass through), and stored types are always post-canonicalization, so
+	// the type-stability invariant (FR-001/FR-005) is preserved: a stored
+	// type can never regress to a generic or mismatched value here.
+	result := port.ProcessResult{
+		MimeType:    su.MimeType,
+		ImageWidth:  su.ImageWidth,
+		ImageHeight: su.ImageHeight,
+		Measured:    su.Measured,
+	}
+	contentMetadata := processResultToContentMetadata(result, su.MimeType)
+	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
 	if err != nil {
 		// Never delete the newly-stored blob on failure: another concurrent
 		// request in any bucket may have already linked this externalID
@@ -441,10 +443,10 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 
 	return &model.StoredFile{
 		ExternalID:     stored.ExternalID,
-		MimeType:       result.MimeType,
+		MimeType:       su.MimeType,
 		Size:           stored.Size,
-		ImageWidth:     result.ImageWidth,
-		ImageHeight:    result.ImageHeight,
+		ImageWidth:     su.ImageWidth,
+		ImageHeight:    su.ImageHeight,
 		ReplaceOutcome: outcome,
 	}, nil
 }

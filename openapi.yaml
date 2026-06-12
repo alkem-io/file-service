@@ -202,51 +202,41 @@ paths:
     post:
       operationId: DocumentHandler.Create
       parameters:
-        - in: form
-          name: file
-          schema:
-            format: binary
-            type: string
-        - in: form
-          name: displayName
-          schema:
-            type: string
-        - in: form
-          name: storageBucketId
-          schema:
-            format: uuid
-            type: string
-        - in: form
-          name: authorizationId
-          schema:
-            format: uuid
-            type: string
-        - in: form
+        - in: path
           name: tagsetId
+          required: true
           schema:
-            format: uuid
             type: string
-        - in: form
+        - in: path
           name: createdBy
+          required: true
           schema:
-            format: uuid
             type: string
-        - in: form
+        - in: path
           name: temporaryLocation
-          schema:
-            type: boolean
-        - in: form
-          name: skipDedup
-          schema:
-            type: boolean
-        - in: form
-          name: allowedMimeTypes
+          required: true
           schema:
             type: string
-        - in: form
-          name: maxFileSize
+        - in: path
+          name: skipDedup
+          required: true
           schema:
-            type: integer
+            type: string
+        - in: path
+          name: allowedMimeTypes
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: maxFileSize
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: displayName
+          required: true
+          schema:
+            type: string
       responses:
         "201":
           content:
@@ -260,6 +250,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
+        "408":
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/http.errorResponse'
+                  - $ref: '#/components/schemas/http.RejectedContentResponse'
+          description: Request Timeout
         "409":
           content:
             application/json:
@@ -280,9 +278,7 @@ paths:
           description: Unsupported Media Type
         "422":
           content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
+            application/json: {}
           description: Unprocessable Entity
         "500":
           content:
@@ -473,6 +469,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
+        "408":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Timeout
         "409":
           content:
             application/json:

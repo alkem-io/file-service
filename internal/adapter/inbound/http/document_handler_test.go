@@ -1,12 +1,12 @@
 package http
 
 import (
-	"io"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -2288,4 +2288,27 @@ func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType strin
 	}
 	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
 	return port.TranscodeResult{MimeType: mimeType, ImageWidth: p.processDimsW, ImageHeight: p.processDimsH, Measured: measured}, nil
+}
+
+// US3/T022: replace path enforces the streaming cap (413 + counter path).
+func TestDocumentHandler_ReplaceContent_OverLimit413(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	h.MaxUploadSize = 1024
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: "application/pdf"}
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", bytes.NewReader(bytes.Repeat([]byte("z"), 8192)))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413, body: %s", rr.Code, rr.Body.String())
+	}
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after over-limit replace")
+		}
+	}
 }

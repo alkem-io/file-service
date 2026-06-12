@@ -303,6 +303,9 @@ type httpMockStage struct {
 
 func (s *httpMockStage) Write(p []byte) (int, error) { return s.buf.Write(p) }
 func (s *httpMockStage) Commit() (model.StoredFile, error) {
+	if s.parent.saveErr != nil {
+		return model.StoredFile{}, s.parent.saveErr
+	}
 	content := s.buf.Bytes()
 	s.parent.saved = content
 	return model.StoredFile{ExternalID: service.ComputeHash(content), Size: len(content), Created: true}, nil
