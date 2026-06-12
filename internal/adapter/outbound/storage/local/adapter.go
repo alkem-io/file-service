@@ -22,6 +22,8 @@ type Adapter struct {
 	basePath string
 }
 
+// New creates an Adapter rooted at basePath. The directory is not created
+// here — OpenStage creates it lazily on the first write.
 func New(basePath string) *Adapter {
 	return &Adapter{basePath: basePath}
 }
@@ -45,6 +47,9 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 	return stored, nil
 }
 
+// Read returns the whole blob. The wrapped error matches os.ErrNotExist via
+// errors.Is when the blob is missing; an invalid externalID is rejected
+// before touching the filesystem.
 func (a *Adapter) Read(externalID string) ([]byte, error) {
 	if !isValidExternalID(externalID) {
 		return nil, fmt.Errorf("invalid external ID: %s", externalID)
@@ -56,6 +61,8 @@ func (a *Adapter) Read(externalID string) ([]byte, error) {
 	return data, nil
 }
 
+// Delete removes the blob. Idempotent: a missing file is success, so
+// concurrent refcount-driven cleanups cannot fail each other.
 func (a *Adapter) Delete(externalID string) error {
 	if !isValidExternalID(externalID) {
 		return fmt.Errorf("invalid external ID: %s", externalID)
@@ -67,6 +74,8 @@ func (a *Adapter) Delete(externalID string) error {
 	return nil
 }
 
+// Exists stats the blob path without opening it. (false, nil) is a
+// definitive "not there"; any other stat failure is returned as an error.
 func (a *Adapter) Exists(externalID string) (bool, error) {
 	if !isValidExternalID(externalID) {
 		return false, fmt.Errorf("invalid external ID: %s", externalID)
@@ -149,6 +158,11 @@ func (s *stage) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// Commit closes the staging file and publishes it under its content hash.
+// Dedup hit (the hash already exists): the staging file is discarded and
+// Created=false is returned — the existing blob is byte-identical by
+// construction. Otherwise a rename makes the publish atomic on the same
+// filesystem. Calling Commit twice, or after Abort, is an error.
 func (s *stage) Commit() (model.StoredFile, error) {
 	if s.committed {
 		return model.StoredFile{}, fmt.Errorf("stage: double commit")
@@ -181,6 +195,10 @@ func (s *stage) Commit() (model.StoredFile, error) {
 	return model.StoredFile{ExternalID: externalID, Size: s.size, Created: true}, nil
 }
 
+// Abort closes and removes the staging file. Safe to call at any point —
+// a no-op after a successful Commit or a prior Abort, and after a failed
+// Commit it cleans up the leftover staging file — so callers can defer it
+// unconditionally.
 func (s *stage) Abort() error {
 	if s.aborted || s.committed {
 		return nil

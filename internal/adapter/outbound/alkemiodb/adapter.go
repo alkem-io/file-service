@@ -31,6 +31,8 @@ func New(db queries.DBTX) *Adapter {
 	}
 }
 
+// GetByID implements port.DocumentRepo: pgx.ErrNoRows is translated to
+// model.ErrDocumentNotFound; other database errors pass through unwrapped.
 func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, error) {
 	row, err := a.queries.GetDocumentByID(ctx, uuidToPgx(id))
 	if err != nil {
@@ -42,6 +44,8 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 	return rowToDocument(row), nil
 }
 
+// FindByExternalIDAndBucket implements port.DocumentRepo's dedup lookup.
+// No row for the (externalID, storageBucketID) pair → model.ErrDocumentNotFound.
 func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {
 	row, err := a.queries.FindDocumentByExternalIDAndBucket(ctx, queries.FindDocumentByExternalIDAndBucketParams{
 		ExternalID:      externalID,
@@ -56,6 +60,11 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
+// Create inserts a new document row, serializing contentMetadata into the
+// JSONB content_metadata column (see marshalContentMetadata for the shape
+// rules). A unique violation — another row already holds this content in the
+// bucket — surfaces as model.ErrDuplicateKey so the service can fall back to
+// its dedup path.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -86,6 +95,10 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadat
 	return pgxToUUID(id), nil
 }
 
+// UpdateFile rewrites the content fields (externalID, mimeType, size) plus
+// content_metadata in one statement — the Replace flow. Returns
+// model.ErrDuplicateKey when the new content hash collides with another row
+// in the same bucket, and model.ErrDocumentNotFound when the row is gone.
 func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -112,6 +125,10 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 	return nil
 }
 
+// UpdateMetadata mutates bucket/temporaryLocation/displayName under
+// optimistic locking (WHERE version = $given, SET version = version + 1).
+// 0 rows affected — row missing or version stale — returns
+// model.ErrDocumentNotFound; the service maps that to its conflict error.
 func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
 	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
 		ID:                uuidToPgx(id),
@@ -196,6 +213,9 @@ func marshalContentMetadata(meta model.ContentMetadata) ([]byte, error) {
 	return []byte(`{}`), nil
 }
 
+// Delete removes the row and returns the cleanup identifiers (content hash,
+// authorization id, optional tagset id) from the DELETE ... RETURNING.
+// A missing row returns model.ErrDocumentNotFound.
 func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error) {
 	row, err := a.queries.DeleteDocument(ctx, uuidToPgx(id))
 	if err != nil {
@@ -211,6 +231,9 @@ func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocume
 	}, nil
 }
 
+// CountByExternalID counts rows referencing a content hash across all
+// buckets — the refcount that decides whether the underlying blob may be
+// physically deleted.
 func (a *Adapter) CountByExternalID(ctx context.Context, externalID string) (int, error) {
 	count, err := a.queries.CountDocumentsByExternalID(ctx, externalID)
 	if err != nil {

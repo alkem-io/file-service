@@ -13,5 +13,10 @@ import (
 
 // AuthPort abstracts the authorization check against the auth-evaluation-service.
 type AuthPort interface {
+	// CheckPrivilege asks whether the actor holds the privilege under the
+	// given authorization policy. A non-nil error means the question could
+	// not be answered (transport failure, open circuit breaker, degraded
+	// auth service) — callers must fail closed, never treat it as "denied
+	// but healthy". A clean denial is (AuthResult{Allowed: false}, nil).
 	CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error)
 }

@@ -43,6 +43,10 @@ type AuthClient struct {
 	Subject string
 }
 
+// CheckPrivilege implements port.AuthPort: a request-reply round trip on the
+// configured subject, bounded by ctx. A degraded auth service (error payload
+// with retryAfterMs) returns both a denying AuthResult and a non-nil error so
+// callers fail closed without mistaking the outage for a policy denial.
 func (c *AuthClient) CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	if c.Conn == nil {
 		return model.AuthResult{}, fmt.Errorf("NATS connection is nil")

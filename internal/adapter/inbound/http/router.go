@@ -21,6 +21,7 @@ func ServeLive(w http.ResponseWriter, _ *http.Request) {
 	LiveResponse{Status: "alive"}.Render(w)
 }
 
+// Render writes the response as JSON with HTTP 200.
 func (r LiveResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

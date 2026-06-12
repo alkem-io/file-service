@@ -16,15 +16,26 @@ import (
 // Processor implements port.ImageProcessor using govips and mimetype.
 type Processor struct{}
 
+// New initializes libvips (idempotent across calls — govips guards repeat
+// Startup) and returns the processor. Call before ConfigureStreaming so the
+// streaming knobs land on an initialized library.
 func New() *Processor {
 	_ = vips.Startup(nil)
 	return &Processor{}
 }
 
+// DetectMIME sniffs the type from the content bytes via the mimetype
+// library; undetectable content yields application/octet-stream.
 func (p *Processor) DetectMIME(content []byte) string {
 	return mimetype.Detect(content).String()
 }
 
+// Process canonicalizes image bytes per format family — HEIC/HEIF convert
+// to JPEG, JPEG/WebP recompress (with a size guard for already-canonical
+// inputs), PNG/BMP/AVIF re-encode only when rotation is needed, SVG/GIF pass
+// through measured — always auto-rotating and stripping EXIF/IPTC/XMP while
+// preserving ICC (spec 018). Non-image MIME types pass through untouched
+// with Measured=false.
 func (p *Processor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
 	switch mimeType {
 	case "image/heic", "image/heif":

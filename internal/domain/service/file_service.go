@@ -201,6 +201,9 @@ func (e *MimeMismatchError) Error() string {
 	return fmt.Sprintf("content type %q does not match the document's stored type %q", e.Detected, e.Known)
 }
 
+// Is makes every MimeMismatchError match the ErrMimeMismatch sentinel, so
+// callers can branch with errors.Is and only reach for errors.As when they
+// need the concrete MIME pair.
 func (e *MimeMismatchError) Is(target error) bool { return target == ErrMimeMismatch }
 
 // Replace outcomes, persisted on model.StoredFile.ReplaceOutcome so the HTTP
@@ -484,11 +487,23 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 }
 
 var (
-	ErrForbidden            = errors.New("forbidden")
-	ErrConflict             = errors.New("conflict: document was modified concurrently")
-	ErrPayloadTooLarge      = errors.New("payload too large")
+	// ErrForbidden is returned when the auth evaluation explicitly denies
+	// the actor the required privilege. An evaluation that could not run at
+	// all surfaces as a wrapped transport error instead.
+	ErrForbidden = errors.New("forbidden")
+	// ErrConflict covers both flavors of write conflict: an optimistic-lock
+	// version mismatch on metadata updates, and a content-hash collision
+	// when SkipDedup forbids reusing the existing row.
+	ErrConflict = errors.New("conflict: document was modified concurrently")
+	// ErrPayloadTooLarge rejects an upload exceeding the bucket's maxFileSize
+	// policy (distinct from the transport-level ErrOverLimit cap).
+	ErrPayloadTooLarge = errors.New("payload too large")
+	// ErrUnsupportedMediaType rejects an upload whose detected MIME type is
+	// not in the bucket's allowedMimeTypes policy.
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
-	ErrImageProcessing      = errors.New("image processing failed")
+	// ErrImageProcessing wraps a canonicalization failure for content that
+	// claims to be an image but cannot be processed as one.
+	ErrImageProcessing = errors.New("image processing failed")
 
 	// ErrEmptyContent rejects 0-byte content replacement: a valid office file
 	// is never empty, so an empty body always signals a failed save (FR-003a).

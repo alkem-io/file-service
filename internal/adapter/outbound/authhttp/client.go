@@ -63,6 +63,11 @@ func New(baseURL string, breaker *gobreaker.CircuitBreaker[model.AuthResult], lo
 	}
 }
 
+// CheckPrivilege implements port.AuthPort: it POSTs the evaluation request
+// to /internal/auth/evaluate through the circuit breaker (when configured).
+// Errors — transport failures, an open breaker, HTTP 503 from a degraded
+// auth service — mean "could not evaluate"; only (AuthResult, nil) carries
+// an actual allow/deny decision.
 func (c *Client) CheckPrivilege(ctx context.Context, actorID, privilege, authorizationPolicyID string) (model.AuthResult, error) {
 	if c.httpClient == nil {
 		return model.AuthResult{}, fmt.Errorf("h2c client is nil")
