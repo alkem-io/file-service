@@ -129,3 +129,21 @@ func shutdownServer(srv *http.Server, logger *zap.Logger) {
 		logger.Error("shutdown error", zap.Error(err))
 	}
 }
+
+// runMimeRepair executes the boot-time MIME repair (spec 019 FR-006) and
+// feeds the summary into the mime_repair_total metric. Failures are logged,
+// never fatal — the job is independent of request serving and reruns on the
+// next boot.
+func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *zap.Logger) {
+	httpAdapter.InitMetrics()
+	sum := fileSvc.RunMimeRepair(ctx)
+	httpAdapter.MimeRepairOps.Add("relabeled", int64(sum.Relabeled))
+	httpAdapter.MimeRepairOps.Add("unrecoverable", int64(sum.Unrecoverable))
+	httpAdapter.MimeRepairOps.Add("skipped_not_office", int64(sum.SkippedNotOffice))
+	httpAdapter.MimeRepairOps.Add("errors", int64(sum.Errors))
+	logger.Info("mime-repair metrics recorded",
+		zap.Int("relabeled", sum.Relabeled),
+		zap.Int("unrecoverable", sum.Unrecoverable),
+		zap.Int("skipped_not_office", sum.SkippedNotOffice),
+		zap.Int("errors", sum.Errors))
+}

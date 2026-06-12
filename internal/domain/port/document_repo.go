@@ -30,4 +30,16 @@ type DocumentRepo interface {
 	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error
 	Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error)
 	CountByExternalID(ctx context.Context, externalID string) (int, error)
+	// ListByMimeTypes returns documents whose stored MIME type is one of the
+	// given values (spec 019 repair-job scan). Only ID, ExternalID, MimeType,
+	// Size and DisplayName are populated.
+	ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error)
+	// UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
+	// relabel). Content fields change exclusively via UpdateFile.
+	// Compare-and-set: the relabel applies only while the row's externalID
+	// still equals expectedExternalID — the content the caller sniffed. A
+	// false return (no error) means the guard failed: a concurrent Replace
+	// changed the content (and already wrote the correct MIME type) or the
+	// row was deleted; the caller must not treat the row as relabeled.
+	UpdateMimeType(ctx context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error)
 }

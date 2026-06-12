@@ -113,6 +113,11 @@ type StoredFile struct {
 	// surface dims on ReplaceContentResponse without re-reading the row.
 	ImageWidth  *int
 	ImageHeight *int
+
+	// ReplaceOutcome reports how StoreAndLink reconciled the MIME type
+	// (accepted | fallback_generic_sniff). The HTTP adapter counts it in
+	// content_replace_outcomes_total; empty for non-replace flows.
+	ReplaceOutcome string
 }
 
 // AuthResult represents the outcome of an authorization check.

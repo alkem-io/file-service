@@ -216,6 +216,50 @@ func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocum
 	return i, err
 }
 
+const listDocumentsByMimeTypes = `-- name: ListDocumentsByMimeTypes :many
+SELECT id, "externalID", "mimeType", size, "displayName"
+FROM file
+WHERE "mimeType" = ANY($1::text[])
+ORDER BY "createdDate" ASC
+`
+
+type ListDocumentsByMimeTypesRow struct {
+	ID          pgtype.UUID `json:"id"`
+	ExternalID  string      `json:"externalID"`
+	MimeType    string      `json:"mimeType"`
+	Size        int32       `json:"size"`
+	DisplayName string      `json:"displayName"`
+}
+
+// Repair-job scan (spec 019): rows whose stored type is one of the given
+// (generic) MIME types. Office-extension filtering happens in the domain
+// layer, which owns the office vocabulary.
+func (q *Queries) ListDocumentsByMimeTypes(ctx context.Context, dollar_1 []string) ([]ListDocumentsByMimeTypesRow, error) {
+	rows, err := q.db.Query(ctx, listDocumentsByMimeTypes, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDocumentsByMimeTypesRow{}
+	for rows.Next() {
+		var i ListDocumentsByMimeTypesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ExternalID,
+			&i.MimeType,
+			&i.Size,
+			&i.DisplayName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows
 UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
@@ -280,6 +324,41 @@ func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocument
 		arg.DisplayName,
 		arg.UpdatedDate,
 		arg.Version,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateDocumentMimeType = `-- name: UpdateDocumentMimeType :execrows
+UPDATE file
+SET "mimeType"    = $2,
+    "updatedDate" = $3,
+    version       = version + 1
+WHERE id = $1
+  AND "externalID" = $4
+`
+
+type UpdateDocumentMimeTypeParams struct {
+	ID          pgtype.UUID        `json:"id"`
+	MimeType    string             `json:"mimeType"`
+	UpdatedDate pgtype.Timestamptz `json:"updatedDate"`
+	ExternalID  string             `json:"externalID"`
+}
+
+// Repair-job relabel (spec 019): corrects only the stored MIME type.
+// Deliberately narrow — content fields change exclusively via
+// UpdateDocumentFile. Compare-and-set on externalID: the relabel applies
+// only if the content is still the one the repair job sniffed, protecting
+// against a concurrent Replace (which already set the correct MIME type)
+// landing between the suspect scan and this write.
+func (q *Queries) UpdateDocumentMimeType(ctx context.Context, arg UpdateDocumentMimeTypeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateDocumentMimeType,
+		arg.ID,
+		arg.MimeType,
+		arg.UpdatedDate,
+		arg.ExternalID,
 	)
 	if err != nil {
 		return 0, err

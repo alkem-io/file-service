@@ -120,9 +120,11 @@ type mockStorage struct {
 	data    []byte
 	err     error
 	saveErr error
+	saved   []byte // captures the last Save payload (replace-path rejection tests)
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
+	m.saved = content
 	if m.saveErr != nil {
 		return model.StoredFile{}, m.saveErr
 	}
@@ -279,4 +281,11 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 	if rr.Code != http.StatusNotModified {
 		t.Fatalf("status = %d, want 304", rr.Code)
 	}
+}
+
+func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
 }

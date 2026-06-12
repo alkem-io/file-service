@@ -215,6 +215,64 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }
 
+// MimeMismatchError reports a content replacement whose detected type is
+// unambiguously different from the document's stored type (FR-004). It
+// matches ErrMimeMismatch via errors.Is.
+type MimeMismatchError struct {
+	Known    string
+	Detected string
+}
+
+func (e *MimeMismatchError) Error() string {
+	return fmt.Sprintf("content type %q does not match the document's stored type %q", e.Detected, e.Known)
+}
+
+func (e *MimeMismatchError) Is(target error) bool { return target == ErrMimeMismatch }
+
+// Replace outcomes, persisted on model.StoredFile.ReplaceOutcome so the HTTP
+// adapter can count them (content_replace_outcomes_total) without the domain
+// importing adapter metrics.
+const (
+	ReplaceOutcomeAccepted         = "accepted"
+	ReplaceOutcomeFallback         = "fallback_generic_sniff"
+	ReplaceOutcomeRejectedEmpty    = "rejected_empty"
+	ReplaceOutcomeRejectedMismatch = "rejected_mismatch"
+)
+
+// reconcileReplaceMIME decides the MIME type to persist when replacing a
+// document's content. Unlike resolveMIME (create path), the question here is
+// not "what is this content?" but "is this content compatible with the type
+// this document already has?" — the stored type is authoritative, content
+// detection is only a guard (FR-001..004):
+//
+//	empty content              → ErrEmptyContent (a valid save is never 0 bytes)
+//	known type empty/generic   → accept the sniff (legacy/corrupted rows may
+//	                             self-heal to a concrete type, never downgrade
+//	                             below what they already are)
+//	sniff generic              → keep the known type (container formats and
+//	                             degenerate bodies can't carry their identity)
+//	sniff == known             → keep the known type
+//	concrete sniff ≠ known     → MimeMismatchError (silent relabeling forbidden)
+func (s *FileService) reconcileReplaceMIME(knownMIME string, content []byte) (mimeType, detected, outcome string, err error) {
+	if len(content) == 0 {
+		return "", "", ReplaceOutcomeRejectedEmpty, ErrEmptyContent
+	}
+	known := normalizeMIME(knownMIME)
+	detected = normalizeMIME(s.Processor.DetectMIME(content))
+
+	switch {
+	case known == "" || model.IsGenericMIME(known):
+		// No trustworthy stored type to defend; behave like before.
+		return detected, detected, ReplaceOutcomeAccepted, nil
+	case model.IsGenericMIME(detected):
+		return known, detected, ReplaceOutcomeFallback, nil
+	case detected == known:
+		return known, detected, ReplaceOutcomeAccepted, nil
+	default:
+		return "", detected, ReplaceOutcomeRejectedMismatch, &MimeMismatchError{Known: known, Detected: detected}
+	}
+}
+
 // resolveMIME determines the effective MIME type and validates it against the allow-list.
 // Empty content: trust declaredMIME (no bytes to detect from).
 // Non-empty: detect from content bytes.
@@ -348,7 +406,28 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	}
 	oldExternalID := doc.ExternalID
 
-	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
+	// The stored type is authoritative across content edits (FR-001); the
+	// content sniff is a guard, never the source of truth. All validation
+	// happens before Storage.Save, so a rejection has zero side effects
+	// (FR-007).
+	mimeType, detected, outcome, err := s.reconcileReplaceMIME(doc.MimeType, content)
+	if err != nil {
+		s.Logger.Warn("content replace rejected",
+			zap.String("documentID", documentID.String()),
+			zap.String("knownMime", normalizeMIME(doc.MimeType)),
+			zap.String("detectedMime", detected),
+			zap.String("outcome", outcome),
+			zap.Error(err))
+		return nil, err
+	}
+	if outcome == ReplaceOutcomeFallback {
+		s.Logger.Info("content replace: generic sniff, keeping stored type",
+			zap.String("documentID", documentID.String()),
+			zap.String("knownMime", mimeType),
+			zap.String("detectedMime", detected),
+			zap.String("outcome", outcome))
+	}
+
 	result, err := s.Processor.Process(content, mimeType)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
@@ -359,6 +438,13 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 		return nil, fmt.Errorf("store file: %w", err)
 	}
 
+	// Persist result.MimeType, not the reconciled mimeType: Process may
+	// canonicalize the encoding (HEIC/WebP → JPEG) and then result.Content —
+	// the bytes actually stored — IS that new format. The two values are
+	// identical on every other path (office and non-image types pass
+	// through), and stored types are always post-canonicalization, so the
+	// type-stability invariant (FR-001/FR-005) is preserved: a stored type
+	// can never regress to a generic or mismatched value here.
 	contentMetadata := processResultToContentMetadata(result, result.MimeType)
 	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, result.MimeType, stored.Size, contentMetadata)
 	if err != nil {
@@ -386,11 +472,12 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	}
 
 	return &model.StoredFile{
-		ExternalID:  stored.ExternalID,
-		MimeType:    result.MimeType,
-		Size:        stored.Size,
-		ImageWidth:  result.ImageWidth,
-		ImageHeight: result.ImageHeight,
+		ExternalID:     stored.ExternalID,
+		MimeType:       result.MimeType,
+		Size:           stored.Size,
+		ImageWidth:     result.ImageWidth,
+		ImageHeight:    result.ImageHeight,
+		ReplaceOutcome: outcome,
 	}, nil
 }
 
@@ -427,11 +514,19 @@ var (
 	ErrPayloadTooLarge      = errors.New("payload too large")
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
 	ErrImageProcessing      = errors.New("image processing failed")
+
+	// ErrEmptyContent rejects 0-byte content replacement: a valid office file
+	// is never empty, so an empty body always signals a failed save (FR-003a).
+	ErrEmptyContent = errors.New("empty content: replacement bodies must not be 0 bytes")
+
+	// ErrMimeMismatch is the sentinel for errors.Is matching; the concrete
+	// error carrying the MIME pair is MimeMismatchError (errors.As).
+	ErrMimeMismatch = errors.New("content type does not match the document's stored type")
 )
 
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
-	return strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+	return model.NormalizeMIME(mimeType)
 }
 
 // BackfillIfNeeded is the public entry point for handlers that read a
