@@ -94,9 +94,11 @@ reporting honestly.
 ## R6 — Repair job delivery & office-MIME vocabulary
 
 **Decision**: A goroutine launched from `cmd/server/app.go` after DB connect, running
-once per boot; suspect rows selected by SQL (`mimeType` ∈ generic set AND lowercased
-`displayName` LIKE one of the office extensions), content verified (non-empty + `PK`
-zip magic) before relabeling via an `UpdateMimeType` repo method. The
+once per boot; suspect rows selected by SQL on generic MIME alone, with the
+office-extension check applied in the domain via `OfficeMIMEForName`
+(single-sourced vocabulary — see the post-review delta below), content
+verified (non-empty + `PK` zip magic) before relabeling via the
+`UpdateMimeType` repo method. The
 extension↔canonical-MIME map lives once in `internal/domain/model/mime.go` covering
 OOXML (`.docx/.xlsx/.pptx`) and OpenDocument (`.odt/.ods/.odp`) — the formats the
 Collabora flow stores (acc data shows all of `presentationml`, `wordprocessingml`,
@@ -129,8 +131,9 @@ review and are authoritative as shipped:
    job skips the row (regression test
    `TestRunMimeRepair_ConcurrentReplaceLosesGuardSkipsRelabel`).
 2. **Suspect scan splits SQL and domain filtering.** SQL selects by generic
-   MIME only (`ListDocumentsByMimeTypes`); the office-extension check runs in
-   the domain via `model.OfficeMIMEForName`, keeping the office vocabulary
+   MIME only — port method `ListByMimeTypes`, backed by the sqlc query
+   `ListDocumentsByMimeTypes`; the office-extension check runs in the domain
+   via `model.OfficeMIMEForName`, keeping the office vocabulary
    single-sourced (constitution VIII) instead of duplicating it in a SQL
    regex.
 3. **Outcome counters live at the adapter.** The domain emits structured
