@@ -89,7 +89,8 @@ here is bounding memory by the *decoded working set* instead of additionally
 holding both compressed copies.
 
 **Independent Test**: Upload a large transcodable image and verify the stored
-output is identical to what the buffered implementation produces, dimensions
+output is identical to what the buffered implementation produces **with the
+chosen streaming parameters (baseline JPEG — SC-002 as amended)**, dimensions
 metadata is still captured, and peak memory excludes the compressed input and
 output copies.
 
