@@ -24,18 +24,20 @@ linters:
     - whitespace
   settings:
     gocyclo:
-      min-complexity: 20
+      min-complexity: 15
     staticcheck:
       checks:
-        - "all"
-        - "-ST1000"     # Don't require package comments (constitution: no obvious comments)
+        - "all"         # Enable all rules including ST1020 (comment format)
     revive:
       enable-all-rules: false
       rules:
-        - name: package-comments
-          disabled: true              # Don't require package comments
         - name: exported
-          disabled: true              # Don't require comments on every export
+          severity: warning
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+            - "checkPublicInterface"    # Check comments on public interface methods
+        - name: package-comments
         - name: unused-parameter
         - name: unreachable-code
         - name: redefines-builtin-id
