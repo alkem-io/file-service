@@ -528,11 +528,6 @@ paths:
                 type: string
           description: OK
         "304":
-          content:
-            application/octet-stream:
-              schema:
-                format: binary
-                type: string
           description: Not Modified
         "403":
           content:
