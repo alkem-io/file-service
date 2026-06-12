@@ -3,6 +3,7 @@
 package imaging
 
 import (
+	"io"
 	"net/http"
 
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -34,4 +35,13 @@ func (p *Processor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
 	// No decoder available; backfillIfNeeded skips persist on (nil, nil, nil)
 	// so legacy rows remain {} and a future vips environment can retry.
 	return nil, nil, nil
+}
+
+// TranscodeStream (no-vips stub): pass-through copy, no decoding available.
+// Dims unreported (Measured=false) per the lazy-backfill convention.
+func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	return port.TranscodeResult{MimeType: mimeType, Measured: false}, nil
 }

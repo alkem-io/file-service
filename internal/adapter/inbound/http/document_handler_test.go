@@ -1,6 +1,7 @@
 package http
 
 import (
+	"io"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -2277,4 +2278,13 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 	if storage.saved != nil {
 		t.Error("blob written for rejected mismatched content")
 	}
+}
+
+// TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
+// detectMIME override or the input type.
+func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	return port.TranscodeResult{MimeType: mimeType, Measured: false}, nil
 }

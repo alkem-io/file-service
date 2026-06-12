@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/google/uuid"
@@ -148,6 +150,13 @@ type mockStorage struct {
 	// dataByID serves per-externalID content (MIME-repair tests). When nil,
 	// Read falls back to the flat data/readErr pair.
 	dataByID map[string][]byte
+
+	// Streaming-stage controls (spec 020).
+	openStageErr   error
+	stageWriteErr  error
+	stageCommitErr error
+	stageDedupHit  bool
+	stages         []*mockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -190,6 +199,10 @@ type mockProcessor struct {
 	// detectMIME override — when non-empty, replaces the default
 	// application/octet-stream (replace-path reconciliation tests).
 	detectMIME string
+
+	// Streaming-transcode overrides (spec 020).
+	transcodeErr  error
+	transcodeMIME string
 }
 
 func (m *mockProcessor) DetectMIME(_ []byte) string {
@@ -1671,4 +1684,70 @@ func TestProcessResultToContentMetadata_AllBranches(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Spec 020: streaming stage mock ---
+
+type mockStage struct {
+	parent    *mockStorage
+	buf       bytes.Buffer
+	writeErr  error
+	commitErr error
+	committed bool
+	aborted   bool
+}
+
+func (s *mockStage) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	return s.buf.Write(p)
+}
+
+func (s *mockStage) Commit() (model.StoredFile, error) {
+	if s.commitErr != nil {
+		return model.StoredFile{}, s.commitErr
+	}
+	s.committed = true
+	content := s.buf.Bytes()
+	s.parent.saved = content
+	return model.StoredFile{
+		ExternalID: ComputeHash(content),
+		Size:       len(content),
+		Created:    !s.parent.stageDedupHit,
+	}, nil
+}
+
+func (s *mockStage) Abort() error {
+	s.aborted = true
+	return nil
+}
+
+func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	if m.openStageErr != nil {
+		return nil, m.openStageErr
+	}
+	st := &mockStage{parent: m, writeErr: m.stageWriteErr, commitErr: m.stageCommitErr}
+	m.stages = append(m.stages, st)
+	return st, nil
+}
+
+// TranscodeStream (mock): pass-through copy; honors transcodeErr and reports
+// transcodeMIME/dims overrides for ingest-path tests.
+func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	if m.transcodeErr != nil {
+		return port.TranscodeResult{}, m.transcodeErr
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	out := mimeType
+	if m.transcodeMIME != "" {
+		out = m.transcodeMIME
+	}
+	return port.TranscodeResult{MimeType: out, ImageWidth: m.processDimsW, ImageHeight: m.processDimsH, Measured: m.processDimsW != nil}, nil
+}
+
+func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
 }
