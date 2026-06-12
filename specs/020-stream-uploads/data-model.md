@@ -61,7 +61,7 @@ of today's `ProcessResult` for the streaming path; orientation-aware
 
 | Env | Default | Governs |
 |---|---|---|
-| `MAX_UPLOAD_SIZE` | 33554432 (32 MiB) | incremental stream cap (FR-005) |
+| `MAX_UPLOAD_SIZE` | 33554432 (32 MiB) | incremental stream cap (FR-005); values above 1073741824 (1 GiB, the validated ceiling) are rejected at startup |
 | `UPLOAD_IDLE_TIMEOUT_MS` | 30000 | progress idle abort (FR-009) |
 | `IMAGE_PIXEL_BUDGET` | 100000000 (100 MP) | decode guard (FR-010) |
 | `VIPS_STREAM_DISC_THRESHOLD` | library default (100 MB) | decoded-frame RAM→scratch spill |

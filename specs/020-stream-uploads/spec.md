@@ -187,9 +187,11 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   exceeding a limit aborts the upload promptly without consuming the
   remainder of the body. The maximum upload size MUST become a configuration
   value, defaulting to the current 32 MiB (no rollout behavior change) and
-  supported — validated — up to 1 GiB; memory cost stays fixed at any
-  setting. Raising the cap in an environment is a config-only operation
-  (paired with the matching ingress limit, an infra-ops concern).
+  supported — validated AND enforced — up to 1 GiB: configuration above the
+  validated ceiling is rejected at startup (shipped delta, PR #31 review).
+  Memory cost stays fixed at any setting. Raising the cap in an environment
+  is a config-only operation (paired with the matching ingress limit, an
+  infra-ops concern).
 - **FR-006**: Ingestion MUST be atomic with respect to permanent storage: an
   upload that fails or is aborted at any point leaves no partial permanent
   object and no document row referencing one; staging artifacts are cleaned
