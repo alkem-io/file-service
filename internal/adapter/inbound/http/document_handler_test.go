@@ -2312,3 +2312,32 @@ func TestDocumentHandler_ReplaceContent_OverLimit413(t *testing.T) {
 		}
 	}
 }
+
+// Round-2 CR catch: oversized metadata fields must be rejected, not
+// silently truncated into a different request.
+func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "f.bin")
+	_, _ = part.Write([]byte("content"))
+	_ = writer.WriteField("displayName", strings.Repeat("x", (16<<10)+5))
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "16 KiB") {
+		t.Errorf("body should name the field limit: %s", rr.Body.String())
+	}
+}

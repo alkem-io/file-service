@@ -289,10 +289,17 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// 16 KiB is ample for every metadata field (the largest legit
 			// value, a long allowedMimeTypes list, is ~2.5 KiB) and bounds
-			// per-request abuse surface.
-			b, rerr := io.ReadAll(io.LimitReader(part, 16<<10))
+			// per-request abuse surface. Read one byte past the cap so an
+			// oversized field is REJECTED rather than silently truncated
+			// into a different request.
+			const maxCreateFieldBytes = 16 << 10
+			b, rerr := io.ReadAll(io.LimitReader(part, maxCreateFieldBytes+1))
 			if rerr != nil {
 				h.writeIngestTransportError(w, rerr)
+				return
+			}
+			if len(b) > maxCreateFieldBytes {
+				writeJSONError(w, http.StatusBadRequest, part.FormName()+" exceeds the 16 KiB field limit")
 				return
 			}
 			fields.set(part.FormName(), string(b))
