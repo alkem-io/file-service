@@ -37,6 +37,7 @@ proven it in production use.
 - Q: The image library fork decodes the full frame to RAM (by design, for early source release) — does the transcode path need an explicit decode guard? → A: Yes, two-track: (1) this feature ships a configurable pixel-dimension budget, checked from the stream header before any decode — images above it are rejected; (2) in parallel, the govips fork gains sequential-streaming and disk-backed-decode modes (separate fork workstream, prompt handed off), after which the budget can be relaxed. The fork enhancement is NOT a dependency of this feature.
 - Q: The fork workstream landed (TranscodeStream with sequential fast path + disc-backed materialization, threshold/scratch knobs, backpressure-safe chunked output) — does that change our requirements? → A: The fork is sufficient; no further fork changes needed. Three codec realities adjust this spec's framing: (1) HEIC decodes whole-frame inside the codec regardless of access mode, so the FR-010 pixel budget remains permanently load-bearing for such formats (not merely transitional) — it is the only guard on codec-internal decode memory, and also defends CPU and scratch disk; (2) interlaced/progressive JPEG cannot stream — whether the service keeps its current (interlaced) export params for byte-identity or switches to non-interlaced for true output streaming is a plan decision; (3) the library's pipe read limit, disc threshold, and scratch directory become service configuration, and scratch disk becomes a deployment sizing concern.
 - Q: Interlaced (progressive) JPEG output cannot stream on encode — keep current export params for byte-identity, or switch? → A (plan decision R7): switch JPEG exports to non-interlaced (baseline). Streaming is the feature's purpose; keeping progressive would buffer the whole compressed output and silently void US2 for the most common transcode target. SC-002 amended: byte-identity holds for non-transcoded content; transcoded outputs are byte-identical to the buffered export with the new parameters (goldens re-baselined). Quality and decoded pixels unchanged (same Q82).
+- Q: Streaming cannot replicate today's "recompress JPEG, keep the original if recompression didn't shrink it" size guard (it needs both copies whole). What happens to canonical (non-rotated) JPEG uploads? → A: Always recompress to quality 82 (baseline). Every JPEG streams through the encoder; predictable storage behavior is retained at the cost of occasionally storing a larger-than-original file for already-optimized inputs (the dropped size guard) — accepted. Pass-through is reserved for formats the service never re-encoded (GIF, SVG) and non-images.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -97,9 +98,11 @@ output copies.
 1. **Given** a transcodable image (HEIC, WebP, rotated JPEG), **When**
    uploaded, **Then** the stored bytes, stored MIME type, and recorded
    dimensions are identical to the buffering implementation's output.
-2. **Given** a non-transcodable image (already-canonical JPEG/PNG within the
-   size guard), **When** uploaded, **Then** it follows the pass-through
-   streaming path (US1) without a decode.
+2. **Given** an image format the service does not re-encode (GIF, SVG),
+   **When** uploaded, **Then** it follows the pass-through streaming path
+   (US1) without a decode. JPEG/PNG/BMP/AVIF/WebP/HEIC always stream through
+   the encoder (clarified 2026-06-12: the recompress size guard is dropped;
+   recompressed output may occasionally exceed the original — accepted).
 3. **Given** a truncated or corrupt image stream, **When** conversion fails,
    **Then** the upload fails with the existing image-processing error and no
    permanent object remains.
@@ -150,6 +153,10 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   force buffering beyond a small fixed prefix.
 - Pixel bomb (tiny compressed image declaring enormous dimensions): rejected
   by the pixel-dimension budget before any decode; never OOMs the service.
+- Already-optimized JPEG input: recompression may produce a slightly larger
+  stored file than the original (the buffered size guard is gone under
+  streaming) — accepted per clarification; storage remains content-addressed
+  and correct.
 - Zero-byte and tiny files: behave exactly as today (019 rules unchanged).
 - Concurrent identical uploads: both stream; content-addressed storage must
   end with one blob and correct rows, as today.
