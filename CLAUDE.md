@@ -117,6 +117,8 @@ principles and governance rules.
 ## Active Technologies
 - Go 1.26 (constitution-mandated) + govips v2.18.0 (libvips bindings — `Orientation()`, `RemoveMetadata()`, format exports), mimetype v1.4.13, chi v5.2.5, pgx v5.9.1, sqlc, zap v1.27.1
 - PostgreSQL (Alkemio shared DB; this service owns the `file` table and adds `content_metadata` JSONB) and local filesystem (file bytes; content-addressed by SHA3-256)
+- Go 1.26.1 + chi v5, pgx/v5 + sqlc, zap, `gabriel-vasile/mimetype`, (020-stream-uploads)
+- PostgreSQL `file` table (unchanged); content-addressed blobs (020-stream-uploads)
 
 ## Recent Changes
 - 019-preserve-mime-on-edit: MIME type preservation on content replace (reconcile + 422 rejections) and boot-time MIME repair job

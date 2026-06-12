@@ -36,6 +36,7 @@ proven it in production use.
 - Q: What timeout policy governs streaming uploads (the server currently enforces a global 30 s read timeout)? → A: Progress-based idle timeout: an upload stays alive while bytes keep arriving and is aborted after ~30 s without progress; total duration is implicitly bounded by cap ÷ minimum rate. Non-upload endpoints keep today's strict timeouts. A stalled/slowloris connection is killed quickly; a slow-but-moving large upload is never penalized.
 - Q: The image library fork decodes the full frame to RAM (by design, for early source release) — does the transcode path need an explicit decode guard? → A: Yes, two-track: (1) this feature ships a configurable pixel-dimension budget, checked from the stream header before any decode — images above it are rejected; (2) in parallel, the govips fork gains sequential-streaming and disk-backed-decode modes (separate fork workstream, prompt handed off), after which the budget can be relaxed. The fork enhancement is NOT a dependency of this feature.
 - Q: The fork workstream landed (TranscodeStream with sequential fast path + disc-backed materialization, threshold/scratch knobs, backpressure-safe chunked output) — does that change our requirements? → A: The fork is sufficient; no further fork changes needed. Three codec realities adjust this spec's framing: (1) HEIC decodes whole-frame inside the codec regardless of access mode, so the FR-010 pixel budget remains permanently load-bearing for such formats (not merely transitional) — it is the only guard on codec-internal decode memory, and also defends CPU and scratch disk; (2) interlaced/progressive JPEG cannot stream — whether the service keeps its current (interlaced) export params for byte-identity or switches to non-interlaced for true output streaming is a plan decision; (3) the library's pipe read limit, disc threshold, and scratch directory become service configuration, and scratch disk becomes a deployment sizing concern.
+- Q: Interlaced (progressive) JPEG output cannot stream on encode — keep current export params for byte-identity, or switch? → A (plan decision R7): switch JPEG exports to non-interlaced (baseline). Streaming is the feature's purpose; keeping progressive would buffer the whole compressed output and silently void US2 for the most common transcode target. SC-002 amended: byte-identity holds for non-transcoded content; transcoded outputs are byte-identical to the buffered export with the new parameters (goldens re-baselined). Quality and decoded pixels unchanged (same Q82).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -220,9 +221,12 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 - **SC-001**: Peak per-request memory during a non-image upload is constant
   (fixed budget) for files from 1 MiB up to 1 GiB (the validated ceiling of
   the configurable cap).
-- **SC-002**: For every input in the regression corpus (non-images, canonical
-  images, transcodable images), stored bytes, content hash, stored MIME type,
-  and dimensions metadata are identical to the pre-change implementation.
+- **SC-002**: For every **non-transcoded** input in the regression corpus,
+  stored bytes, content hash, stored MIME type, and dimensions metadata are
+  identical to the pre-change implementation. For **transcoded** images,
+  stored bytes are byte-identical to the buffered export with the chosen
+  streaming-capable parameters (baseline JPEG — plan decision R7, goldens
+  re-baselined); MIME type and dimensions are identical to pre-change.
 - **SC-003**: An upload exceeding the configured size limit is rejected
   before the full body is transferred, and storage contains no artifact of it
   afterwards.
