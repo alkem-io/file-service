@@ -139,6 +139,13 @@ both transports; the only h2c quirk is the deadline error shape (a bare
 watchdog fallback is implemented anyway and engages automatically if a
 future transport returns `ErrNotSupported`.
 
+**Transport modernization (deps rollup, post-merge of this spec)**: the
+deprecated x/net h2c wrapper was replaced by Go's native
+`http.Server.Protocols` unencrypted HTTP/2 (+ `http.HTTP2Config`). The
+progressReader h2c stall test runs against the native transport and passes
+— per-stream read deadlines hold there as well; the error-shape match and
+watchdog fallback remain as written.
+
 ## R7 — JPEG interlace: streaming wins over byte-identity (SC-002 amended)
 
 **Decision**: Switch JPEG export to `Interlace: false` (baseline) for all

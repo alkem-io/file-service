@@ -1,10 +1,9 @@
 package service
 
 import (
+	"crypto/sha3"
 	"encoding/hex"
 	"hash"
-
-	"golang.org/x/crypto/sha3"
 )
 
 // Hasher computes the content identity (hex SHA3-256) incrementally — the
