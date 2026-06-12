@@ -1,6 +1,9 @@
 package port
 
-import "io"
+import (
+	"errors"
+	"io"
+)
 
 // ProcessResult captures everything Process decided about an upload:
 // the post-canonicalization bytes, the (possibly re-detected) MIME, optional
@@ -21,6 +24,12 @@ type ProcessResult struct {
 	ImageHeight *int
 	Measured    bool
 }
+
+// ErrPixelBudgetExceeded rejects an image whose header-declared dimensions
+// exceed the configured pixel budget — checked before any pixel decode
+// (spec 020 FR-010). The budget is the only RAM guard for whole-frame
+// codecs (HEIC) and defends CPU/scratch-disk for every format.
+var ErrPixelBudgetExceeded = errors.New("image dimensions exceed the configured pixel budget")
 
 // TranscodeResult reports a streaming transcode's outcome (spec 020): the
 // final stored MIME and the header-derived, orientation-corrected pixel

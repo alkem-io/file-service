@@ -9,12 +9,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
@@ -23,6 +25,11 @@ type DocumentHandler struct {
 	Service *service.FileService
 	MaxAge  int
 	Logger  *zap.Logger
+
+	// Streaming-ingest guards (spec 020). Zero values fall back to the
+	// historical defaults (32 MiB cap, 30 s idle).
+	MaxUploadSize int64
+	IdleTimeout   time.Duration
 }
 
 // GetMeta handles GET /internal/document/{id}/meta
@@ -82,73 +89,62 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// parseCreateForm extracts and validates all fields from the multipart create request.
-func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("missing file part")
-	}
-	defer func() { _ = file.Close() }()
-
-	declaredMIME = header.Header.Get("Content-Type")
-
-	content, err = io.ReadAll(file)
-	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("failed to read file")
-	}
-
-	displayName := r.FormValue("displayName")
+// buildCreateInput validates the collected metadata fields (spec 020: the
+// fields trail the file part in the multipart body, so they are parsed
+// after the upload has been staged — research R4).
+func buildCreateInput(fields map[string]string) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
+	displayName := fields["displayName"]
 	if err := validateDisplayName(displayName); err != nil {
-		return nil, "", input, nil, 0, err
+		return input, nil, 0, err
 	}
 
-	storageBucketID, err := uuid.Parse(r.FormValue("storageBucketId"))
+	storageBucketID, err := uuid.Parse(fields["storageBucketId"])
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("invalid storageBucketId")
+		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(r.FormValue("authorizationId"))
+	authorizationID, err := uuid.Parse(fields["authorizationId"])
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("invalid authorizationId")
+		return input, nil, 0, fmt.Errorf("invalid authorizationId")
 	}
 
 	var tagsetID *uuid.UUID
-	if v := r.FormValue("tagsetId"); v != "" {
+	if v := fields["tagsetId"]; v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid tagsetId")
+			return input, nil, 0, fmt.Errorf("invalid tagsetId")
 		}
 		tagsetID = &parsed
 	}
 
 	var createdBy *uuid.UUID
-	if v := r.FormValue("createdBy"); v != "" {
+	if v := fields["createdBy"]; v != "" {
 		parsed, err := uuid.Parse(v)
 		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid createdBy")
+			return input, nil, 0, fmt.Errorf("invalid createdBy")
 		}
 		createdBy = &parsed
 	}
 
 	temporaryLocation := false
-	if v := r.FormValue("temporaryLocation"); v != "" {
+	if v := fields["temporaryLocation"]; v != "" {
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
+			return input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
 		}
 		temporaryLocation = parsed
 	}
 
 	skipDedup := false
-	if v := r.FormValue("skipDedup"); v != "" {
+	if v := fields["skipDedup"]; v != "" {
 		parsed, err := strconv.ParseBool(v)
 		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
+			return input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
 		}
 		skipDedup = parsed
 	}
 
-	if v := r.FormValue("allowedMimeTypes"); v != "" {
+	if v := fields["allowedMimeTypes"]; v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
 			if trimmed := strings.TrimSpace(p); trimmed != "" {
@@ -157,10 +153,10 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		}
 	}
 
-	if v := r.FormValue("maxFileSize"); v != "" {
+	if v := fields["maxFileSize"]; v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil || parsed < 0 {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
+			return input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
 		}
 		maxFileSize = parsed
 	}
@@ -174,54 +170,142 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		TagsetID:          tagsetID,
 		SkipDedup:         skipDedup,
 	}
-
-	return content, declaredMIME, input, allowedMimeTypes, maxFileSize, nil
+	return input, allowedMimeTypes, maxFileSize, nil
 }
 
-// Create handles POST /internal/document
+// writeIngestTransportError maps a streaming transport failure to its HTTP
+// response and outcome counter (spec 020 FR-008).
+func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrOverLimit):
+		IngestOutcomes.Add("rejected_over_limit", 1)
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "upload exceeds the configured size limit")
+	case errors.Is(err, service.ErrStalled):
+		IngestOutcomes.Add("stalled", 1)
+		writeJSONError(w, http.StatusRequestTimeout, "upload stalled: no bytes received within the idle timeout")
+	case errors.As(err, new(*service.MimeMismatchError)), errors.Is(err, service.ErrEmptyContent):
+		// replace-path semantics handled by the caller; not transport
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+	default:
+		// Client went away (connection reset, unexpected EOF, multipart
+		// truncation): nothing useful to send, but try.
+		IngestOutcomes.Add("client_abort", 1)
+		writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
+	}
+}
+
+// Create handles POST /internal/file — streaming ingest (spec 020): the
+// file part flows request → sniff → (transcode) → staged storage without
+// whole-file buffering; metadata fields are collected after it (R4) and
+// validated before the stage is published.
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
+	capBytes := h.MaxUploadSize
+	if capBytes <= 0 {
+		capBytes = 32 << 20
+	}
+	idle := h.IdleTimeout
+	if idle <= 0 {
+		idle = 30 * time.Second
+	}
+	pr := newProgressReader(w, r.Body, capBytes, idle)
+	defer func() { _ = pr.Close() }()
+	r.Body = pr
+
+	mr, err := r.MultipartReader()
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
+
+	fields := map[string]string{}
+	var staged *service.StagedUpload
 	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
+		// Any non-success exit path discards the stage (FR-006); Discard
+		// after CompleteUpload is a no-op.
+		staged.Discard()
 	}()
 
-	content, declaredMIME, input, allowedMimeTypes, maxFileSize, err := parseCreateForm(r)
+	for {
+		part, perr := mr.NextPart()
+		if errors.Is(perr, io.EOF) {
+			break
+		}
+		if perr != nil {
+			h.writeIngestTransportError(w, perr)
+			return
+		}
+
+		if part.FormName() == "file" {
+			if staged != nil {
+				writeJSONError(w, http.StatusBadRequest, "duplicate file part")
+				return
+			}
+			declaredMIME := part.Header.Get("Content-Type")
+			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME)
+			if err != nil {
+				switch {
+				case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
+					h.writeIngestTransportError(w, err)
+				case errors.Is(err, port.ErrPixelBudgetExceeded):
+					IngestOutcomes.Add("rejected_pixel_budget", 1)
+					RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
+				case errors.Is(err, service.ErrImageProcessing):
+					IngestOutcomes.Add("failed_mid_stream", 1)
+					writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+				default:
+					if isClientStreamError(err) {
+						IngestOutcomes.Add("client_abort", 1)
+						writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
+					} else {
+						IngestOutcomes.Add("failed_mid_stream", 1)
+						h.Logger.Error("failed to stage upload", zap.Error(err))
+						writeJSONError(w, http.StatusInternalServerError, "internal error")
+					}
+				}
+				return
+			}
+		} else {
+			b, rerr := io.ReadAll(io.LimitReader(part, 64<<10))
+			if rerr != nil {
+				h.writeIngestTransportError(w, rerr)
+				return
+			}
+			fields[part.FormName()] = string(b)
+		}
+		_ = part.Close()
+	}
+
+	if staged == nil {
+		writeJSONError(w, http.StatusBadRequest, "missing file part")
+		return
+	}
+
+	input, allowedMimeTypes, maxFileSize, err := buildCreateInput(fields)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	doc, err := h.Service.CreateDocument(r.Context(), input, content, declaredMIME, allowedMimeTypes, maxFileSize)
+	doc, err := h.Service.CompleteUpload(r.Context(), staged, input, allowedMimeTypes, maxFileSize)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrPayloadTooLarge):
+			IngestOutcomes.Add("rejected_bucket_policy", 1)
 			writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
 		case errors.Is(err, service.ErrUnsupportedMediaType):
+			IngestOutcomes.Add("rejected_bucket_policy", 1)
 			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
-		case errors.Is(err, service.ErrImageProcessing):
-			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, service.ErrConflict):
-			// Reachable only when SkipDedup=true and a row with this
-			// (externalID, storageBucketID) already exists.
 			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
 		default:
+			IngestOutcomes.Add("failed_mid_stream", 1)
 			h.Logger.Error("failed to create document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
 
+	IngestOutcomes.Add("accepted", 1)
 	CreateDocumentResponse{
 		ID:          doc.ID.String(),
 		ExternalID:  doc.ExternalID,
@@ -231,6 +315,15 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ImageWidth:  doc.ImageWidth,
 		ImageHeight: doc.ImageHeight,
 	}.Render(w)
+}
+
+// isClientStreamError reports request-stream failures attributable to the
+// client (abort, reset, truncated multipart) rather than to the service.
+func isClientStreamError(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		strings.Contains(err.Error(), "connection reset") ||
+		strings.Contains(err.Error(), "client disconnected") ||
+		strings.Contains(err.Error(), "multipart")
 }
 
 // Copy handles POST /internal/file/copy.

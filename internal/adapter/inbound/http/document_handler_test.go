@@ -2286,5 +2286,6 @@ func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType strin
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}
-	return port.TranscodeResult{MimeType: mimeType, Measured: false}, nil
+	measured := p.processMeasured || (p.processDimsW != nil && p.processDimsH != nil)
+	return port.TranscodeResult{MimeType: mimeType, ImageWidth: p.processDimsW, ImageHeight: p.processDimsH, Measured: measured}, nil
 }

@@ -119,11 +119,13 @@ clarification (slowloris exposure scales with the cap).
 
 **h2c caveat (analyze finding I1)**: the server also runs h2c
 (`cmd/server/app.go`) — `SetReadDeadline` support on the x/net HTTP/2 path
-must be verified by test (T013 covers both transports). If unsupported
-(`ErrNotSupported`), the documented fallback is a per-read watchdog timer
-cancelling the request context on idle expiry — same `stalled` outcome
-semantics, transport-independent. The chosen mechanism is recorded here at
-implementation time.
+must be verified by test (T013 covers both transports). **Resolved at implementation time**: x/net's
+h2c server DOES support `SetReadDeadline` (verified by
+`TestProgressReader_StallAborts_H2C`), so the primary mechanism works on
+both transports; the only h2c quirk is the deadline error shape (a bare
+"i/o timeout" not satisfying `os.IsTimeout` — matched explicitly). The
+watchdog fallback is implemented anyway and engages automatically if a
+future transport returns `ErrNotSupported`.
 
 ## R7 — JPEG interlace: streaming wins over byte-identity (SC-002 amended)
 

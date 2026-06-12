@@ -156,6 +156,7 @@ type mockStorage struct {
 	stageWriteErr  error
 	stageCommitErr error
 	stageDedupHit  bool
+	stageDiscard   bool // count writes without buffering (allocation tests)
 	stages         []*mockStage
 }
 
@@ -1144,7 +1145,9 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
 		Repo:      &mockRepo{},
 		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		// spec 020: only transcodable images touch the processor, so the
+		// failure test must sniff as an image to exercise the route.
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/png"},
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
@@ -1691,6 +1694,7 @@ func TestProcessResultToContentMetadata_AllBranches(t *testing.T) {
 type mockStage struct {
 	parent    *mockStorage
 	buf       bytes.Buffer
+	n         int64
 	writeErr  error
 	commitErr error
 	committed bool
@@ -1700,6 +1704,10 @@ type mockStage struct {
 func (s *mockStage) Write(p []byte) (int, error) {
 	if s.writeErr != nil {
 		return 0, s.writeErr
+	}
+	s.n += int64(len(p))
+	if s.parent.stageDiscard {
+		return len(p), nil
 	}
 	return s.buf.Write(p)
 }
@@ -1727,7 +1735,11 @@ func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	if m.openStageErr != nil {
 		return nil, m.openStageErr
 	}
-	st := &mockStage{parent: m, writeErr: m.stageWriteErr, commitErr: m.stageCommitErr}
+	commitErr := m.stageCommitErr
+	if commitErr == nil {
+		commitErr = m.saveErr
+	}
+	st := &mockStage{parent: m, writeErr: m.stageWriteErr, commitErr: commitErr}
 	m.stages = append(m.stages, st)
 	return st, nil
 }
@@ -1737,6 +1749,9 @@ func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
 	if m.transcodeErr != nil {
 		return port.TranscodeResult{}, m.transcodeErr
+	}
+	if m.processErr != nil {
+		return port.TranscodeResult{}, m.processErr
 	}
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err

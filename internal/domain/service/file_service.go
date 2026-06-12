@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -87,59 +88,26 @@ func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actor
 	}, nil
 }
 
-// CreateDocument processes a file, stores it, and creates a document record.
+// CreateDocument ingests a complete buffer through the streaming pipeline
+// (spec 020): stage → validate → publish. Kept for buffer-shaped callers;
+// the HTTP handler streams the request directly via StageUpload +
+// CompleteUpload. One pipeline, no buffered twin (constitution X).
+//
+// Note: the buffered implementation rejected over-limit/disallowed uploads
+// before any storage work; the pipeline rejects them before *publish*
+// (validation order is a documented consequence of the multipart field
+// order, research R4). Observable outcomes are identical.
 func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
-	if maxFileSize > 0 && len(content) > maxFileSize {
-		return nil, ErrPayloadTooLarge
-	}
-
-	mimeType, err := resolveMIME(s.Processor, content, declaredMIME, allowedMimeTypes)
+	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME)
 	if err != nil {
 		return nil, err
 	}
-
-	result, err := s.Processor.Process(content, mimeType)
+	doc, err := s.CompleteUpload(ctx, su, input, allowedMimeTypes, maxFileSize)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
-	}
-
-	stored, err := s.Storage.Save(result.Content)
-	if err != nil {
-		return nil, fmt.Errorf("store file: %w", err)
-	}
-
-	contentMetadata := processResultToContentMetadata(result, result.MimeType)
-
-	// Caller opt-out: skip the dedup lookup and force a fresh row insert
-	// even when an existing row in this bucket has the same externalID.
-	// Used by placeholder flows (e.g., Collabora documents) where two
-	// logical documents must NOT share a backing row even if their content
-	// hashes collide. The caller-supplied AuthorizationID / TagsetID are
-	// honored on the new row.
-	if input.SkipDedup {
-		return s.insertDocument(ctx, input, stored, result.MimeType, contentMetadata, result.ImageWidth, result.ImageHeight)
-	}
-
-	// Row-level dedup: if a file row already exists for (externalID, storageBucketID),
-	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
-	// the existing row's values are authoritative. Caller must use Reused=true to
-	// clean up the auth/tagset rows it pre-created.
-	//
-	// Lookup failure (non-not-found): another row may already reference this
-	// blob — deleting it would orphan that row, which is worse than orphaning
-	// a blob (blobs are GC-able). Leave the blob in place.
-	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)
-	if err != nil {
+		su.Discard()
 		return nil, err
 	}
-	if found {
-		existing.Reused = true
-		// Lazy-backfill: legacy image rows may have empty content_metadata.
-		// Best-effort dim measurement so the response carries imageWidth/Height.
-		return s.backfillIfNeeded(ctx, existing), nil
-	}
-
-	return s.insertDocument(ctx, input, stored, result.MimeType, contentMetadata, result.ImageWidth, result.ImageHeight)
+	return doc, nil
 }
 
 // findDedupDocument looks up an existing file row for (externalID, bucketID).
