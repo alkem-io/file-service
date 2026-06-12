@@ -268,7 +268,9 @@ paths:
           description: Conflict
         "413":
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
           description: Request Entity Too Large
         "415":
           content:
@@ -393,7 +395,9 @@ paths:
           description: Bad Request
         "404":
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "409":
           content:
@@ -461,13 +465,13 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/http.errorResponse'
-                  - $ref: '#/components/schemas/http.RejectedContentResponse'
+                $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "409":
           content:
@@ -483,7 +487,9 @@ paths:
           description: Request Entity Too Large
         "422":
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.RejectedContentResponse'
           description: Unprocessable Entity
         "500":
           content:
@@ -557,7 +563,10 @@ paths:
           description: OK
         "304":
           content:
-            application/octet-stream: {}
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
           description: Not Modified
         "403":
           content:
@@ -567,7 +576,9 @@ paths:
           description: Forbidden
         "404":
           content:
-            application/octet-stream: {}
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
