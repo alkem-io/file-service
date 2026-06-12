@@ -387,6 +387,14 @@ func TestLoadIngestConfig_OverridesAndValidation(t *testing.T) {
 		t.Errorf("overrides not applied: %+v", cfg)
 	}
 
+	t.Run("MAX_UPLOAD_SIZE_ExceedsValidatedCeiling", func(t *testing.T) {
+		clearIngestEnv(t)
+		t.Setenv("MAX_UPLOAD_SIZE", "1073741825") // 1 GiB + 1
+		if _, err := loadIngestConfig(); err == nil {
+			t.Error("expected validation error for MAX_UPLOAD_SIZE > 1 GiB")
+		}
+	})
+
 	for env, bad := range map[string]string{
 		"MAX_UPLOAD_SIZE":            "0",
 		"UPLOAD_IDLE_TIMEOUT_MS":     "-1",

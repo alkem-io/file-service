@@ -142,6 +142,11 @@ func loadIngestConfig() (IngestConfig, error) {
 	if maxUpload <= 0 {
 		return IngestConfig{}, fmt.Errorf("MAX_UPLOAD_SIZE must be positive")
 	}
+	if maxUpload > 1<<30 {
+		// 1 GiB is the validated ceiling of the streaming pipeline
+		// (spec 020 FR-005/SC-001); larger values are unproven territory.
+		return IngestConfig{}, fmt.Errorf("MAX_UPLOAD_SIZE must be <= 1073741824 (1 GiB, the validated ceiling)")
+	}
 
 	idleMS, err := getenvInt("UPLOAD_IDLE_TIMEOUT_MS", 30000)
 	if err != nil {

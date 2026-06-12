@@ -67,6 +67,9 @@ func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port
 }
 
 func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) *service.FileService {
+	// imaging.New runs vips.Startup (vips build); the streaming knobs must
+	// be applied to an initialized libvips, so configure AFTER New.
+	processor := imaging.New()
 	imaging.ConfigureStreaming(imaging.StreamingConfig{
 		DiscThreshold: cfg.Ingest.VipsDiscThreshold,
 		ScratchDir:    cfg.Ingest.VipsScratchDir,
@@ -77,7 +80,7 @@ func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config
 		Repo:      alkemiodb.New(pool),
 		Auth:      auth,
 		Storage:   local.New(cfg.StoragePath),
-		Processor: imaging.New(),
+		Processor: processor,
 		Logger:    logger,
 	}
 }

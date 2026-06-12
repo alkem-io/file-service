@@ -39,7 +39,9 @@ curl -sf -X POST ... -F 'file=@photo.heic;type=image/heic' ...
 
 ```bash
 # over-limit: cut off promptly, no artifact
-head -c 40000000 /dev/urandom | curl -sf -X POST ... # default 32 MiB cap → 413
+head -c 40000000 /dev/urandom > too-big.bin
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:4003/internal/file \
+  -F 'file=@too-big.bin' -F 'displayName=too-big.bin' ... # default 32 MiB cap → 413
 ls storage/ | grep tmp   # nothing staged left behind
 # stall: open a connection, send headers + 1 KiB, sleep 40s → connection
 # aborted, ingest_outcomes_total.stalled++ in /debug/vars

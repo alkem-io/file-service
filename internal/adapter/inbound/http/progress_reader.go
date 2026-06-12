@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,7 @@ func isTimeoutErr(err error) bool {
 	if os.IsTimeout(err) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return true
 	}
-	return err.Error() == "i/o timeout"
+	return strings.Contains(err.Error(), "i/o timeout")
 }
 
 // Close releases the guards: stops the watchdog and clears the connection

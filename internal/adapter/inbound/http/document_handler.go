@@ -233,8 +233,11 @@ func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err e
 
 // Create handles POST /internal/file — streaming ingest (spec 020): the
 // file part flows request → sniff → (transcode) → staged storage without
-// whole-file buffering; metadata fields are collected after it (R4) and
-// validated before the stage is published.
+// whole-file buffering. Parts are processed in whatever order they arrive;
+// metadata validation always happens after the loop, before the stage is
+// published. (The known caller sends the file part first — research R4 —
+// which is why bucket-level limits cannot gate the stream early; the
+// handler itself does not depend on any ordering.)
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	capBytes := h.MaxUploadSize
 	if capBytes <= 0 {
@@ -284,7 +287,10 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			b, rerr := io.ReadAll(io.LimitReader(part, 64<<10))
+			// 16 KiB is ample for every metadata field (the largest legit
+			// value, a long allowedMimeTypes list, is ~2.5 KiB) and bounds
+			// per-request abuse surface.
+			b, rerr := io.ReadAll(io.LimitReader(part, 16<<10))
 			if rerr != nil {
 				h.writeIngestTransportError(w, rerr)
 				return

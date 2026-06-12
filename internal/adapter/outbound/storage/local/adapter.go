@@ -159,7 +159,11 @@ func (s *stage) Commit() (model.StoredFile, error) {
 
 	// Content-addressable dedup: blob already published → discard staging.
 	if _, err := os.Stat(finalPath); err == nil {
-		_ = os.Remove(s.tmpName)
+		if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			// The blob is safe (finalPath exists) but the staging artifact
+			// leaked — surface it rather than accumulate orphans.
+			return model.StoredFile{}, fmt.Errorf("remove staging file on dedup: %w", rmErr)
+		}
 		s.committed = true
 		return model.StoredFile{ExternalID: externalID, Size: s.size, Created: false}, nil
 	}
