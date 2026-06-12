@@ -117,6 +117,14 @@ write small responses).
 **Alternatives**: raising the global ReadTimeout — rejected in
 clarification (slowloris exposure scales with the cap).
 
+**h2c caveat (analyze finding I1)**: the server also runs h2c
+(`cmd/server/app.go`) — `SetReadDeadline` support on the x/net HTTP/2 path
+must be verified by test (T013 covers both transports). If unsupported
+(`ErrNotSupported`), the documented fallback is a per-read watchdog timer
+cancelling the request context on idle expiry — same `stalled` outcome
+semantics, transport-independent. The chosen mechanism is recorded here at
+implementation time.
+
 ## R7 — JPEG interlace: streaming wins over byte-identity (SC-002 amended)
 
 **Decision**: Switch JPEG export to `Interlace: false` (baseline) for all

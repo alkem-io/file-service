@@ -95,9 +95,10 @@ output copies.
 
 **Acceptance Scenarios**:
 
-1. **Given** a transcodable image (HEIC, WebP, rotated JPEG), **When**
-   uploaded, **Then** the stored bytes, stored MIME type, and recorded
-   dimensions are identical to the buffering implementation's output.
+1. **Given** a transcodable image (HEIC, WebP, rotated JPEG, canonical
+   JPEG — clarified 2026-06-12), **When** uploaded, **Then** the stored
+   bytes, stored MIME type, and recorded dimensions are identical to the
+   buffering implementation's output with the chosen streaming parameters.
 2. **Given** an image format the service does not re-encode (GIF, SVG),
    **When** uploaded, **Then** it follows the pass-through streaming path
    (US1) without a decode. JPEG/PNG/BMP/AVIF/WebP/HEIC always stream through
@@ -226,8 +227,9 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 ### Measurable Outcomes
 
 - **SC-001**: Peak per-request memory during a non-image upload is constant
-  (fixed budget) for files from 1 MiB up to 1 GiB (the validated ceiling of
-  the configurable cap).
+  (fixed budget — pinned by the plan at 256 KiB copy buffer + 3 KiB sniff
+  prefix) for files from 1 MiB up to 1 GiB (the validated ceiling of the
+  configurable cap).
 - **SC-002**: For every **non-transcoded** input in the regression corpus,
   stored bytes, content hash, stored MIME type, and dimensions metadata are
   identical to the pre-change implementation. For **transcoded** images,
@@ -239,9 +241,10 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
   afterwards.
 - **SC-004**: A client abort or mid-stream failure leaves zero partial
   permanent objects across the regression suite's fault-injection runs.
-- **SC-005**: The service sustains N concurrent maximum-size uploads within
-  N × (fixed budget) + transcode working sets of memory — demonstrated at a
-  concurrency level that would OOM the buffering implementation.
+- **SC-005**: The service sustains **8 concurrent** maximum-size uploads
+  within 8 × (fixed budget) + transcode working sets of memory — a load that
+  would OOM the buffering implementation (8 × 1 GiB buffered ≫ any sane
+  container limit).
 - **SC-006**: All feature-019 replace-path tests continue to pass unchanged.
 
 ## Assumptions
