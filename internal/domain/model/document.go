@@ -1,3 +1,8 @@
+// Package model holds the domain types of the file-service core — documents,
+// content metadata, MIME classification helpers, auth results — plus the
+// sentinel errors adapters translate their backend failures into. It depends
+// on nothing but the standard library and uuid, so every other layer can
+// import it freely.
 package model
 
 import (

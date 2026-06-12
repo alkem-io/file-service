@@ -1,3 +1,8 @@
+// Package authhttp implements port.AuthPort over h2c (HTTP/2 cleartext) to
+// the auth-evaluation-service, using one persistent multiplexed TCP
+// connection guarded by a circuit breaker. It is the preferred auth
+// transport; the NATS request-reply variant lives in the sibling nats
+// package.
 package authhttp
 
 import (

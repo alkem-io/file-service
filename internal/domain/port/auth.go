@@ -1,3 +1,8 @@
+// Package port defines the outbound interfaces the domain core depends on —
+// document persistence, blob storage, authorization, and image processing.
+// Adapters under internal/adapter implement them; the domain service only
+// ever sees these contracts, which is what keeps the hexagon's dependencies
+// pointing inward.
 package port
 
 import (

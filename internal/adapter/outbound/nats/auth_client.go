@@ -1,3 +1,7 @@
+// Package nats implements port.AuthPort via NATS request-reply on the
+// auth.evaluate subject — the legacy auth transport, kept for environments
+// that have not switched to the h2c client in the sibling authhttp package.
+// Connection resilience (reconnect/backoff) is handled in internal/resilience.
 package nats
 
 import (

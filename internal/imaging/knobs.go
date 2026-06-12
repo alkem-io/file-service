@@ -1,3 +1,9 @@
+// Package imaging implements port.ImageProcessor: MIME detection, image
+// canonicalization (auto-rotate, strip EXIF/IPTC/XMP while preserving ICC,
+// re-encode), header-only dimension measurement, and the spec-020 streaming
+// transcode. Two build variants share this package: the `vips` build tag
+// selects the govips/libvips implementation; the default build is a stub
+// that detects MIME via the stdlib and passes bytes through untouched.
 package imaging
 
 import "sync/atomic"

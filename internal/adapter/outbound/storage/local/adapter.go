@@ -1,3 +1,9 @@
+// Package local implements port.StoragePort on the local filesystem with
+// content-addressed blobs: a file's name is the hash of its bytes, so
+// identical content dedups to one blob. Uploads stream through a staging
+// temp file that is hashed while written and published by rename on Commit
+// (spec 020); external IDs are allow-list validated to keep every path
+// inside the configured base directory.
 package local
 
 import (

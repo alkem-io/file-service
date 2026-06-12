@@ -1,3 +1,9 @@
+// Package http is the inbound HTTP adapter: chi routing, the internal
+// document CRUD + streaming-ingest endpoints, the public file-serve endpoint,
+// health/liveness probes, middleware (request ID, actor identity, logging),
+// and the expvar resilience metrics. It translates HTTP requests into domain
+// service calls and domain errors back into stable status codes and JSON
+// bodies; no business rules live here.
 package http
 
 import (

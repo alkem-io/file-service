@@ -1,3 +1,7 @@
+// Package main boots the Alkemio file-service: it wires the hexagonal core
+// (domain service + ports) to its adapters — pgx/sqlc repository, local
+// filesystem storage, NATS or h2c auth transport, imaging processor — and
+// serves the HTTP API until SIGINT/SIGTERM triggers a graceful shutdown.
 package main
 
 import (

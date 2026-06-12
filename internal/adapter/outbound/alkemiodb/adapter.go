@@ -1,3 +1,8 @@
+// Package alkemiodb implements port.DocumentRepo against Alkemio's shared
+// Postgres database using pgx and sqlc-generated queries. It owns the mapping
+// between domain models and the document table rows — including the JSONB
+// content_metadata serialization — and converts Postgres failure modes
+// (no rows, unique violations) into the domain's sentinel errors.
 package alkemiodb
 
 import (

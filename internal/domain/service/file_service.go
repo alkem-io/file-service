@@ -1,3 +1,8 @@
+// Package service is the domain core of the file-service: document upload
+// (buffered and streaming), content replacement with MIME guarding, copy,
+// metadata update, delete with blob refcounting, authorization checks, and
+// the lazy content-metadata backfill. It orchestrates everything through the
+// port interfaces and knows nothing about HTTP, Postgres, or libvips.
 package service
 
 import (

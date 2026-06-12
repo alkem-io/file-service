@@ -1,3 +1,8 @@
+// Package config loads and validates the service configuration from
+// environment variables — HTTP port, storage location, database and NATS
+// settings, circuit-breaker tuning, and the spec-020 streaming-ingest knobs —
+// and constructs the production zap logger. Invalid or missing required
+// values fail fast at startup with the offending variable named.
 package config
 
 import (
