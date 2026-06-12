@@ -65,8 +65,11 @@ func heicSupported(t *testing.T) bool {
 	if err != nil {
 		return false
 	}
-	img.Close()
-	return true
+	defer img.Close()
+	// Loads are lazy: the header parses even when the HEVC codec is absent
+	// (the failure only surfaces at pixel decode). Force a decode.
+	_, _, err = img.ExportJpeg(vips.NewJpegExportParams())
+	return err == nil
 }
 
 func requireHEIC(t *testing.T) {
