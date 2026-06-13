@@ -98,7 +98,10 @@ spec:
       volumes:
         - name: file-storage
           persistentVolumeClaim:
-            claimName: file-storage-pvc2
+            # TEST tracks the dev-orch base PVC (file-storage-pvc); only the
+            # dev overlay patches this to file-storage-pvc2, so dev and test
+            # differ solely on this claim name.
+            claimName: file-storage-pvc
       affinity:
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
