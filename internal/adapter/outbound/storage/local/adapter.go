@@ -1,16 +1,21 @@
 // Package local implements port.StoragePort on the local filesystem with
 // content-addressed blobs: a file's name is the hash of its bytes, so
 // identical content dedups to one blob. Uploads stream through a staging
-// temp file that is hashed while written and published by rename on Commit
-// (spec 020); external IDs are allow-list validated to keep every path
-// inside the configured base directory.
+// temp file that is hashed while written and atomically published under its
+// content hash on Commit (spec 020) — a no-overwrite link, so concurrent
+// commits of identical content can't race. External IDs are validated against
+// the exact canonical encodings to keep every path inside the base directory.
 package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -94,25 +99,50 @@ func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
 }
 
-// isValidExternalID rejects path-traversal attempts and other dangerous
-// characters in storage IDs. Accepts both formats produced across the
-// service's history:
-//   - SHA3-256 hex: 64 lowercase hex chars (current Go file-service format)
-//   - IPFS CIDv0:   46 base58btc chars starting with "Qm" (legacy TS file-service)
+// isValidExternalID validates a storage ID against the exact encodings the
+// service produces, so Read/Delete/Exists can only ever address canonical
+// content-addressed blobs — never an arbitrary filename under basePath. Two
+// formats are accepted:
+//   - SHA3-256 hex: exactly 64 lowercase hex chars (current Go file-service
+//     format; the output of service.Hasher.Sum).
+//   - IPFS CIDv0:   exactly 46 base58btc chars starting with "Qm" (legacy TS
+//     file-service).
 //
-// Conservative allow-list: alphanumeric only, length 32-128. This blocks
-// '/', '\', '.', '..', NUL, control chars, whitespace — anything that
-// could escape the basePath.
+// Restricting to these exact shapes blocks '/', '\', '.', '..', NUL, control
+// chars, whitespace, and any non-canonical filename — anything that could
+// escape basePath or read a non-blob file.
 func isValidExternalID(id string) bool {
-	if len(id) < 32 || len(id) > 128 {
+	if isSHA3Hex(id) {
+		return true
+	}
+	return isCIDv0(id)
+}
+
+// isSHA3Hex reports whether id is exactly 64 lowercase hex characters.
+func isSHA3Hex(id string) bool {
+	if len(id) != 64 {
 		return false
 	}
 	for _, c := range id {
-		switch {
-		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'z':
-		case c >= 'A' && c <= 'Z':
-		default:
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// base58btc is the Bitcoin base58 alphabet (excludes 0, O, I and l), used by
+// IPFS CIDv0 multihashes.
+const base58btc = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// isCIDv0 reports whether id is a 46-char IPFS CIDv0: the "Qm" multihash
+// prefix followed by 44 base58btc characters.
+func isCIDv0(id string) bool {
+	if len(id) != 46 || id[0] != 'Q' || id[1] != 'm' {
+		return false
+	}
+	for i := 2; i < len(id); i++ {
+		if strings.IndexByte(base58btc, id[i]) < 0 {
 			return false
 		}
 	}
@@ -120,7 +150,8 @@ func isValidExternalID(id string) bool {
 }
 
 // stage is the filesystem StageWriter: a temp file in the blob directory,
-// hashed while written, published by rename on Commit (spec 020).
+// hashed while written, atomically published under its content hash on Commit
+// (spec 020).
 type stage struct {
 	a         *Adapter
 	tmp       *os.File
@@ -159,10 +190,15 @@ func (s *stage) Write(p []byte) (int, error) {
 }
 
 // Commit closes the staging file and publishes it under its content hash.
-// Dedup hit (the hash already exists): the staging file is discarded and
-// Created=false is returned — the existing blob is byte-identical by
-// construction. Otherwise a rename makes the publish atomic on the same
-// filesystem. Calling Commit twice, or after Abort, is an error.
+// Publish is atomic and never overwrites an existing blob: os.Link creates
+// the content-addressed name in a single step that fails with os.IsExist when
+// the blob is already present. That collapses the previous stat+rename window
+// in which two concurrent commits of identical content could both observe a
+// stat miss and the second's rename would overwrite, wrongly returning
+// Created=true. With the link, exactly one commit wins (Created=true) and any
+// other observing os.IsExist takes the dedup path (Created=false) — the blob
+// is byte-identical by construction, so the loser's staging file is simply
+// discarded. Calling Commit twice, or after Abort, is an error.
 func (s *stage) Commit() (model.StoredFile, error) {
 	if s.committed {
 		return model.StoredFile{}, fmt.Errorf("stage: double commit")
@@ -177,22 +213,76 @@ func (s *stage) Commit() (model.StoredFile, error) {
 	externalID := s.hasher.Sum()
 	finalPath := s.a.filePath(externalID)
 
-	// Content-addressable dedup: blob already published → discard staging.
-	if _, err := os.Stat(finalPath); err == nil {
-		if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
-			// The blob is safe (finalPath exists) but the staging artifact
-			// leaked — surface it rather than accumulate orphans.
-			return model.StoredFile{}, fmt.Errorf("remove staging file on dedup: %w", rmErr)
-		}
-		s.committed = true
-		return model.StoredFile{ExternalID: externalID, Size: s.size, Created: false}, nil
-	}
-
-	if err := os.Rename(s.tmpName, finalPath); err != nil {
-		return model.StoredFile{}, fmt.Errorf("publish staged file: %w", err)
+	created, err := s.publish(finalPath)
+	if err != nil {
+		return model.StoredFile{}, err
 	}
 	s.committed = true
-	return model.StoredFile{ExternalID: externalID, Size: s.size, Created: true}, nil
+	return model.StoredFile{ExternalID: externalID, Size: s.size, Created: created}, nil
+}
+
+// publish atomically links the staging file to finalPath and removes the
+// staging file. It returns created=true when this commit created the blob and
+// created=false on a dedup hit (finalPath already existed). The staging file
+// is always removed on success.
+func (s *stage) publish(finalPath string) (created bool, err error) {
+	switch linkErr := os.Link(s.tmpName, finalPath); {
+	case linkErr == nil:
+		created = true
+	case os.IsExist(linkErr):
+		created = false
+	case errors.Is(linkErr, syscall.EXDEV):
+		// Staging dir and blob dir are on different filesystems (hard links
+		// can't cross devices). Fall back to an atomic O_EXCL create+copy,
+		// which preserves the same no-overwrite, race-safe semantics.
+		return s.publishCrossDevice(finalPath)
+	default:
+		return false, fmt.Errorf("publish staged file: %w", linkErr)
+	}
+
+	if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+		// The blob is safely published; only the staging artifact leaked.
+		// Surface it rather than accumulate orphans.
+		return created, fmt.Errorf("remove staging file after publish: %w", rmErr)
+	}
+	return created, nil
+}
+
+// publishCrossDevice handles the EXDEV fallback: copy the staging bytes into
+// an O_EXCL-created final file (so a concurrent commit cannot be overwritten),
+// treating an existing blob as a dedup hit. The staging file is removed on
+// success.
+func (s *stage) publishCrossDevice(finalPath string) (created bool, err error) {
+	src, err := os.Open(s.tmpName) //nolint:gosec // s.tmpName is created by OpenStage under basePath
+	if err != nil {
+		return false, fmt.Errorf("reopen staging file: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	dst, err := os.OpenFile(finalPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640) //nolint:gosec // finalPath = basePath + content hash (s.hasher.Sum); no caller input
+	if err != nil {
+		if os.IsExist(err) {
+			if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+				return false, fmt.Errorf("remove staging file on dedup: %w", rmErr)
+			}
+			return false, nil
+		}
+		return false, fmt.Errorf("create blob file: %w", err)
+	}
+
+	if _, copyErr := io.Copy(dst, src); copyErr != nil {
+		_ = dst.Close()
+		_ = os.Remove(finalPath)
+		return false, fmt.Errorf("copy staged file across devices: %w", copyErr)
+	}
+	if closeErr := dst.Close(); closeErr != nil {
+		_ = os.Remove(finalPath)
+		return false, fmt.Errorf("close blob file: %w", closeErr)
+	}
+	if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+		return true, fmt.Errorf("remove staging file after publish: %w", rmErr)
+	}
+	return true, nil
 }
 
 // Abort closes and removes the staging file. Safe to call at any point —
