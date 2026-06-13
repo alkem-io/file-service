@@ -425,14 +425,7 @@ func isClientStreamError(err error) bool {
 // (existing row is authoritative), matching the createDocument contract.
 func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	var body CopyDocumentRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return
-	}
-	if dec.More() {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 
@@ -557,9 +550,17 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strict decode is kept inline here (rather than via decodeStrictJSON,
+	// which Copy uses) on purpose: routing both endpoints' bodies through one
+	// shared decode helper makes the OpenAPI generator (go-apispec) collapse
+	// the two distinct request schemas — Copy's body would lose its own schema
+	// and UpdateDocumentRequest.storageBucketId would lose `format: uuid`.
+	// Until the generator disambiguates per-caller body types, Update decodes
+	// its own body. DisallowUnknownFields is load-bearing: immutable fields
+	// like mimeType must surface a 400, not silently no-op.
 	var body UpdateDocumentRequest
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields() // immutable fields like mimeType must not silently no-op
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
@@ -569,7 +570,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !hasUpdateFields(body) {
+	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
@@ -592,14 +593,10 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bucketID := doc.StorageBucketID
-	if body.StorageBucketID != nil {
-		parsed, perr := uuid.Parse(*body.StorageBucketID)
-		if perr != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid storageBucketId")
-			return
-		}
-		bucketID = parsed
+	bucketID, err := resolveBucketID(doc, body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
@@ -732,16 +729,46 @@ func parseDocID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "id"))
 }
 
-// hasUpdateFields reports whether the PATCH body carries at least one
-// updatable field — an empty body is a 400, not a no-op success.
-func hasUpdateFields(body UpdateDocumentRequest) bool {
-	return body.StorageBucketID != nil || body.TemporaryLocation != nil || body.DisplayName != nil
+// decodeStrictJSON decodes the request body into dst, rejecting unknown
+// fields and any trailing data after the first JSON object. It reports true
+// on success; on failure it returns false AFTER writing the 400 response
+// itself, so callers must simply return without touching w further.
+//
+// DisallowUnknownFields is load-bearing: immutable fields (e.g. mimeType on
+// PATCH) must surface as a 400 rather than silently no-op.
+func decodeStrictJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+		return false
+	}
+	return true
+}
+
+// resolveBucketID resolves the effective storage bucket for a PATCH: the
+// validated UUID from body.storageBucketId when present, otherwise the
+// document's current bucket. A malformed storageBucketId yields an error
+// whose message is safe to return verbatim as a 400 body.
+func resolveBucketID(doc model.Document, body UpdateDocumentRequest) (uuid.UUID, error) {
+	if body.StorageBucketID == nil {
+		return doc.StorageBucketID, nil
+	}
+	parsed, err := uuid.Parse(*body.StorageBucketID)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("invalid storageBucketId")
+	}
+	return parsed, nil
 }
 
 // mergeUpdateFallbacks merges the validation-free PATCH fields over the
 // row's current values: fields present in the body win, omitted fields keep
-// what the document already has. storageBucketId is merged in the handler
-// instead because it needs UUID validation first.
+// what the document already has. storageBucketId is resolved separately by
+// resolveBucketID because it needs UUID validation first.
 func mergeUpdateFallbacks(doc model.Document, body UpdateDocumentRequest) (tempLoc bool, displayName string) {
 	tempLoc = doc.TemporaryLocation
 	if body.TemporaryLocation != nil {
