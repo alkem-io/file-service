@@ -46,6 +46,11 @@ type TranscodeResult struct {
 // ImageProcessor abstracts image detection, canonicalization, and dimension
 // extraction.
 type ImageProcessor interface {
+	// DetectMIME sniffs the MIME type from the content bytes alone. Never
+	// fails: undetectable content comes back as a generic type (e.g.
+	// application/octet-stream). The vips build uses the mimetype library;
+	// the stub falls back to http.DetectContentType, which knows fewer
+	// formats — callers must not assume the two builds agree.
 	DetectMIME(content []byte) string
 
 	// TranscodeStream canonicalizes an image pulled from r and writes the

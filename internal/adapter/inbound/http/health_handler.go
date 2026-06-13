@@ -8,11 +8,16 @@ import (
 
 // Pinger can check if a connection is alive.
 type Pinger interface {
+	// Ping performs an active round-trip to the dependency (pgxpool.Pool
+	// satisfies this directly). The handler calls it under a 2-second
+	// timeout, so implementations must honor ctx cancellation.
 	Ping(ctx context.Context) error
 }
 
 // ConnectionChecker can report if it's connected.
 type ConnectionChecker interface {
+	// IsConnected reports the connection's last-known state without
+	// performing I/O — nats.Conn satisfies this directly.
 	IsConnected() bool
 }
 

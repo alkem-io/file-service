@@ -147,11 +147,16 @@ func RequestLogger(logger *zap.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// statusWriter wraps http.ResponseWriter to capture the status code for the
+// request log. Defaults to 200 because handlers that only Write never call
+// WriteHeader explicitly.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
 }
 
+// WriteHeader records the status code before delegating to the wrapped
+// ResponseWriter.
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)

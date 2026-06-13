@@ -20,7 +20,10 @@ import (
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if name != filepath.Base(name) {
+		t.Fatalf("fixture name %q must be a bare file name", name)
+	}
+	b, err := os.ReadFile(filepath.Clean(filepath.Join("testdata", name)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +82,15 @@ func requireHEIC(t *testing.T) {
 	}
 }
 
-func setBudget(t *testing.T, n int64) {
+// testPixelBudget (100 MP) is the budget every streaming test runs under:
+// generous for the real fixtures, while the 30000×30000 pixel bomb (900 MP)
+// still trips it.
+const testPixelBudget = 100_000_000
+
+func setBudget(t *testing.T) {
 	t.Helper()
 	prev := PixelBudget()
-	ConfigureStreaming(StreamingConfig{PixelBudget: n})
+	ConfigureStreaming(StreamingConfig{PixelBudget: testPixelBudget})
 	t.Cleanup(func() { ConfigureStreaming(StreamingConfig{PixelBudget: prev}) })
 }
 
@@ -97,7 +105,7 @@ func runTranscode(t *testing.T, content []byte, mimeType string) ([]byte, port.T
 // byte-identical to the buffered equivalent, dims recorded.
 func TestTranscodeStream_HEICToJPEG(t *testing.T) {
 	requireHEIC(t)
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "heic-24bit.heic")
 
 	out, res, err := runTranscode(t, content, "image/heic")
@@ -117,7 +125,7 @@ func TestTranscodeStream_HEICToJPEG(t *testing.T) {
 
 // (b) WebP → JPEG identity.
 func TestTranscodeStream_WebPToJPEG(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "webp+alpha.webp")
 
 	out, res, err := runTranscode(t, content, "image/webp")
@@ -135,7 +143,7 @@ func TestTranscodeStream_WebPToJPEG(t *testing.T) {
 // (c) Rotated real photo (EXIF 6): materialized path, dims swapped,
 // orientation cleared in the output.
 func TestTranscodeStream_RotatedJPEGMaterializes(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "jpg-orientation-6.jpg")
 
 	src, err := vips.NewImageFromBuffer(content)
@@ -170,7 +178,7 @@ func TestTranscodeStream_RotatedJPEGMaterializes(t *testing.T) {
 
 // (d) Pixel bomb: rejected from header metadata before any pixel decode.
 func TestTranscodeStream_PixelBombRejected(t *testing.T) {
-	setBudget(t, 100_000_000) // 100 MP; bomb declares 900 MP
+	setBudget(t)
 	content := fixture(t, "pixel-bomb-30000x30000.png")
 
 	var out bytes.Buffer
@@ -185,7 +193,7 @@ func TestTranscodeStream_PixelBombRejected(t *testing.T) {
 
 // (e) Truncated stream: load or save fails with the reader error surfaced.
 func TestTranscodeStream_TruncatedStream(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "jpg-orientation-6.jpg")
 	truncated := io.LimitReader(bytes.NewReader(content), int64(len(content)/3))
 
@@ -199,7 +207,7 @@ func TestTranscodeStream_TruncatedStream(t *testing.T) {
 // (f) Canonical JPEG: recompressed (no size guard — 2026-06-12
 // clarification), baseline output, byte-identical to buffered equivalent.
 func TestTranscodeStream_CanonicalJPEGRecompressed(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "jpg-24bit.jpg")
 
 	out, res, err := runTranscode(t, content, "image/jpeg")
@@ -220,7 +228,7 @@ func TestTranscodeStream_CanonicalJPEGRecompressed(t *testing.T) {
 // (c2) Rotated HEIC: whole-frame codec + rotation in one input.
 func TestTranscodeStream_RotatedHEIC(t *testing.T) {
 	requireHEIC(t)
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "heic-orientation-6.heic")
 
 	out, res, err := runTranscode(t, content, "image/heic")
@@ -237,7 +245,7 @@ func TestTranscodeStream_RotatedHEIC(t *testing.T) {
 
 // (f2) PNG stays PNG through the streaming encoder.
 func TestTranscodeStream_PNGStaysPNG(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "png-24bit.png")
 
 	out, res, err := runTranscode(t, content, "image/png")
@@ -255,7 +263,7 @@ func TestTranscodeStream_PNGStaysPNG(t *testing.T) {
 // Corrupt input: decoder failure propagates as an error (not a hang or
 // silent success).
 func TestTranscodeStream_CorruptJPEG(t *testing.T) {
-	setBudget(t, 100_000_000)
+	setBudget(t)
 	content := fixture(t, "jpg-corruption.jpg")
 
 	var out bytes.Buffer

@@ -1,3 +1,7 @@
+// Package resilience holds the connection-hardening glue around external
+// dependencies — currently the NATS connection factory with unlimited
+// reconnects and jittered exponential backoff. Circuit breaking for the auth
+// transports is configured where the clients are built (cmd/server).
 package resilience
 
 import (

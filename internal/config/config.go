@@ -1,3 +1,8 @@
+// Package config loads and validates the service configuration from
+// environment variables — HTTP port, storage location, database and NATS
+// settings, circuit-breaker tuning, and the spec-020 streaming-ingest knobs —
+// and constructs the production zap logger. Invalid or missing required
+// values fail fast at startup with the offending variable named.
 package config
 
 import (
@@ -8,6 +13,8 @@ import (
 	"time"
 )
 
+// Config is the complete runtime configuration of the service, assembled
+// from environment variables by Load.
 type Config struct {
 	Port           int
 	StoragePath    string
@@ -49,6 +56,9 @@ type BreakerConfig struct {
 	HalfOpenMaxRequests int
 }
 
+// DatabaseConfig holds the Postgres connection settings for Alkemio's
+// shared database. All fields are required; Load fails fast when any
+// ALKEMIO_DATABASE_* variable is missing.
 type DatabaseConfig struct {
 	Host     string
 	Port     int
@@ -57,6 +67,9 @@ type DatabaseConfig struct {
 	Name     string
 }
 
+// ConnString renders the pgx connection URL. Credentials are URL-escaped,
+// so passwords may contain reserved characters; sslmode=disable is fixed
+// because the database is only reachable inside the cluster network.
 func (d DatabaseConfig) ConnString() string {
 	u := url.URL{
 		Scheme:   "postgres",
@@ -68,6 +81,8 @@ func (d DatabaseConfig) ConnString() string {
 	return u.String()
 }
 
+// NATSConfig holds the NATS connection and reconnect-backoff settings.
+// Only populated (and only validated) when the auth transport is "nats".
 type NATSConfig struct {
 	URL                string
 	Subject            string
@@ -75,6 +90,12 @@ type NATSConfig struct {
 	ReconnectMaxWaitMS int
 }
 
+// Load assembles the Config from environment variables, applying defaults
+// for optional values and validating the rest. Returns an error naming the
+// offending variable on the first invalid or missing required value — the
+// process is expected to exit rather than run half-configured. The auth
+// transport is auto-detected: AUTH_SERVICE_URL selects h2c and wins over
+// NATS_URL; one of the two must be set.
 func Load() (*Config, error) {
 	natsURL := getenv("NATS_URL", "")
 	authServiceURL := getenv("AUTH_SERVICE_URL", "")

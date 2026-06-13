@@ -10,7 +10,13 @@ import (
 
 // DocumentRepo abstracts database access to the document table.
 type DocumentRepo interface {
+	// GetByID fetches the full document row. Returns
+	// model.ErrDocumentNotFound when no row has this id.
 	GetByID(ctx context.Context, id uuid.UUID) (model.Document, error)
+	// FindByExternalIDAndBucket looks up the row matching a content hash
+	// within one bucket — the (externalID, storageBucketID) pair that backs
+	// per-bucket dedup. Returns model.ErrDocumentNotFound when the bucket
+	// holds no row with this content.
 	FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error)
 	// Create inserts a new document row. contentMetadata is the typed view
 	// of the file.content_metadata JSONB column; the adapter owns the
@@ -19,6 +25,12 @@ type DocumentRepo interface {
 	// UpdateFile mutates content fields plus content_metadata in one
 	// statement (Replace flow). The new metadata replaces any prior value.
 	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
+	// UpdateMetadata mutates the non-content fields (bucket, temporary
+	// location, display name) under optimistic locking: the write applies
+	// only while the row's version still equals the given version, and bumps
+	// it by one. Returns model.ErrDocumentNotFound on 0 rows affected —
+	// which covers both "row gone" and "version mismatch"; the service layer
+	// translates that into its concurrency conflict.
 	UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error
 	// BackfillContentMetadata writes computed metadata atomically using
 	// compare-and-set: only succeeds if the row currently has empty
@@ -28,7 +40,15 @@ type DocumentRepo interface {
 	// signals "lost the race" — the helper returns nil (treats as success;
 	// the winner already wrote fresh metadata).
 	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error
+	// Delete removes the row and returns the identifiers the caller needs
+	// for cleanup: the content hash (to decide whether the blob is now
+	// orphaned) and the authorization/tagset ids (owned by alkemio-server,
+	// which deletes them). Returns model.ErrDocumentNotFound if the row
+	// does not exist — deletes are not idempotent at this layer.
 	Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error)
+	// CountByExternalID reports how many rows (across all buckets) still
+	// reference a content hash — the blob refcount that gates physical
+	// deletion from storage.
 	CountByExternalID(ctx context.Context, externalID string) (int, error)
 	// ListByMimeTypes returns documents whose stored MIME type is one of the
 	// given values (spec 019 repair-job scan). Only ID, ExternalID, MimeType,

@@ -8,12 +8,19 @@ import (
 var (
 	metricsOnce sync.Once
 
+	// NATSConnectionState exposes the NATS link state on the expvar
+	// endpoint; InitMetrics seeds it to "disconnected".
 	NATSConnectionState = expvar.NewString("resilience_nats_connection_state")
-	NATSReconnects      = expvar.NewInt("resilience_nats_reconnect_attempts")
-	NATSDisconnects     = expvar.NewInt("resilience_nats_disconnects")
-	BreakerState        = expvar.NewMap("resilience_breaker_state")
-	StorageOps          = expvar.NewMap("storage_operations_total")
-	DocumentOps         = expvar.NewMap("document_operations_total")
+	// NATSReconnects counts NATS reconnect attempts.
+	NATSReconnects = expvar.NewInt("resilience_nats_reconnect_attempts")
+	// NATSDisconnects counts NATS disconnect events.
+	NATSDisconnects = expvar.NewInt("resilience_nats_disconnects")
+	// BreakerState tracks circuit-breaker state, keyed by breaker name.
+	BreakerState = expvar.NewMap("resilience_breaker_state")
+	// StorageOps counts storage-backend operations, keyed by operation.
+	StorageOps = expvar.NewMap("storage_operations_total")
+	// DocumentOps counts document-table operations, keyed by operation.
+	DocumentOps = expvar.NewMap("document_operations_total")
 
 	// ReplaceOutcomes counts content-replace results by outcome:
 	// accepted | fallback_generic_sniff | rejected_empty | rejected_mismatch.

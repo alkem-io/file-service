@@ -8,10 +8,21 @@ import (
 )
 
 // StoragePort abstracts the file storage backend (local filesystem, S3, etc.).
+// Storage is content-addressed: externalID is the hash of the blob's bytes.
 type StoragePort interface {
+	// Save stores a complete in-memory buffer and returns its content
+	// identity. Saving bytes that already exist is not an error: the
+	// existing blob is reused and StoredFile.Created reports false.
 	Save(content []byte) (model.StoredFile, error)
+	// Read returns the whole blob. Wraps the backend's not-found error
+	// (os.ErrNotExist for the local adapter) when no blob has this id.
 	Read(externalID string) ([]byte, error)
+	// Delete removes the blob. Idempotent: deleting an id that does not
+	// exist returns nil, so refcount-driven cleanup can race harmlessly.
 	Delete(externalID string) error
+	// Exists reports whether a blob is present without reading its bytes.
+	// (false, nil) is a definitive "not there"; a non-nil error means the
+	// backend could not answer.
 	Exists(externalID string) (bool, error)
 	// OpenStage begins a streaming ingestion into not-yet-published storage
 	// (spec 020). Nothing is observable as a permanent object until Commit.

@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
@@ -236,22 +239,37 @@ func TestIsValidExternalID(t *testing.T) {
 		id   string
 		want bool
 	}{
-		// Accept: current SHA3-256 hex format
+		// The validator is deliberately permissive about hash encoding: it must
+		// accept both current SHA3-256 hex names and any legacy IPFS CID name
+		// (CIDv0/CIDv1, uppercase hex, etc.) the pre-migration TS file-service
+		// wrote to disk — see PR #13. Its real contract is rejecting
+		// path-traversal characters and bounding length, NOT pinning the
+		// encoding. Do NOT re-add "exact format" rejections here.
+
+		// Accept: current SHA3-256 hex format (64 lowercase hex chars).
 		{"sha3 lowercase hex", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", true},
-		// Accept: legacy IPFS CIDv0 (base58btc, starts with Qm)
+		// Accept: legacy IPFS CIDv0 (base58btc, starts with Qm).
 		{"ipfs CIDv0", "QmeNLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjhD", true},
 		{"ipfs CIDv0 mixed case", "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", true},
-		// Reject: path traversal & special chars
+		// Accept: legacy IPFS CIDv1 (base32 "bafy…").
+		{"ipfs CIDv1 base32", "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", true},
+		// Accept: uppercase hex (legacy externalIDs were not lowercase-pinned).
+		{"uppercase hex", "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", true},
+		// Accept: alphanumeric of various non-64-hex lengths within bounds.
+		{"alphanumeric 32 chars", "abcdef0123456789ABCDEF0123456789", true},
+		// Reject: path traversal & special chars (the real security boundary).
 		{"path traversal", "../etc/passwd", false},
 		{"forward slash", "abc/def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"backslash", "abc\\def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"dot", "abc.def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"nul byte", "abc\x00def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"control char", "abc\x01def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"hyphen", "abc-def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
-		// Reject: length bounds
+		{"whitespace", "abc def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		// Reject: length bounds (<32, >128).
 		{"too short", "abc", false},
 		{"empty", "", false},
-		{"too long", strings.Repeat("a", 129), false}, // valid chars, just exceeds max length 128
+		{"too long", strings.Repeat("a", 129), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -321,6 +339,65 @@ func TestStage_CommitDedupHit(t *testing.T) {
 	}
 	if entries := stagingArtifacts(t, dir); len(entries) != 0 {
 		t.Errorf("staging artifact left after dedup commit: %v", entries)
+	}
+}
+
+// TestStage_ConcurrentCommitsExactlyOneCreated defends the StageWriter
+// contract under concurrency: when several stages of byte-identical content
+// commit at once, the atomic publish must report Created=true exactly once and
+// Created=false for every dedup; all must agree on the externalID and leave a
+// single blob plus no staging artifacts.
+func TestStage_ConcurrentCommitsExactlyOneCreated(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	content := []byte("concurrent identical content")
+
+	const n = 8
+	stages := make([]port.StageWriter, n)
+	for i := range stages {
+		st, err := a.OpenStage(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Write(content); err != nil {
+			t.Fatal(err)
+		}
+		stages[i] = st
+	}
+
+	results := make([]model.StoredFile, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range stages {
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = stages[i].Commit()
+		}(i)
+	}
+	wg.Wait()
+
+	createdCount := 0
+	want := service.ComputeHash(content)
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("commit %d failed: %v", i, errs[i])
+		}
+		if results[i].ExternalID != want {
+			t.Errorf("commit %d externalID = %q, want %q", i, results[i].ExternalID, want)
+		}
+		if results[i].Created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Errorf("Created=true reported %d times, want exactly 1", createdCount)
+	}
+	if blobs := publishedBlobs(t, dir); len(blobs) != 1 {
+		t.Errorf("published blobs = %v, want exactly 1", blobs)
+	}
+	if arts := stagingArtifacts(t, dir); len(arts) != 0 {
+		t.Errorf("staging artifacts left after concurrent commits: %v", arts)
 	}
 }
 
