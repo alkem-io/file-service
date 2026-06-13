@@ -239,28 +239,34 @@ func TestIsValidExternalID(t *testing.T) {
 		id   string
 		want bool
 	}{
-		// Accept: current SHA3-256 hex format (exactly 64 lowercase hex chars)
+		// The validator is deliberately permissive about hash encoding: it must
+		// accept both current SHA3-256 hex names and any legacy IPFS CID name
+		// (CIDv0/CIDv1, uppercase hex, etc.) the pre-migration TS file-service
+		// wrote to disk — see PR #13. Its real contract is rejecting
+		// path-traversal characters and bounding length, NOT pinning the
+		// encoding. Do NOT re-add "exact format" rejections here.
+
+		// Accept: current SHA3-256 hex format (64 lowercase hex chars).
 		{"sha3 lowercase hex", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", true},
-		// Accept: legacy IPFS CIDv0 (base58btc, starts with Qm, 46 chars)
+		// Accept: legacy IPFS CIDv0 (base58btc, starts with Qm).
 		{"ipfs CIDv0", "QmeNLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjhD", true},
 		{"ipfs CIDv0 mixed case", "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", true},
-		// Reject: path traversal & special chars
+		// Accept: legacy IPFS CIDv1 (base32 "bafy…").
+		{"ipfs CIDv1 base32", "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", true},
+		// Accept: uppercase hex (legacy externalIDs were not lowercase-pinned).
+		{"uppercase hex", "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", true},
+		// Accept: alphanumeric of various non-64-hex lengths within bounds.
+		{"alphanumeric 32 chars", "abcdef0123456789ABCDEF0123456789", true},
+		// Reject: path traversal & special chars (the real security boundary).
 		{"path traversal", "../etc/passwd", false},
 		{"forward slash", "abc/def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"backslash", "abc\\def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"dot", "abc.def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"nul byte", "abc\x00def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		{"control char", "abc\x01def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
 		{"hyphen", "abc-def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
-		// Reject: alphanumeric but not a canonical encoding (the old 32-128
-		// allow-list accepted these; the exact-format check must not).
-		{"64 chars but uppercase hex", "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", false},
-		{"64 chars but non-hex letters", "ghijklmnopghijklmnopghijklmnopghijklmnopghijklmnopghijklmnopghij", false},
-		{"sha3 hex wrong length 63", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678", false},
-		{"sha3 hex wrong length 65", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567890", false},
-		{"CIDv0 wrong prefix", "ZzeNLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjhD", false},
-		{"CIDv0 invalid base58 char (0)", "Qm0NLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjhD", false},
-		{"CIDv0 wrong length", "QmeNLuvfd2yxaXRPDTSb2k9LxspUucqh7dSzJ7pttxKjh", false},
-		// Reject: length bounds
+		{"whitespace", "abc def0123456789abcdef0123456789abcdef0123456789abcdef0123456789", false},
+		// Reject: length bounds (<32, >128).
 		{"too short", "abc", false},
 		{"empty", "", false},
 		{"too long", strings.Repeat("a", 129), false},

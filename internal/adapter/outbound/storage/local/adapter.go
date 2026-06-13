@@ -4,7 +4,9 @@
 // temp file that is hashed while written and atomically published under its
 // content hash on Commit (spec 020) — a no-overwrite link, so concurrent
 // commits of identical content can't race. External IDs are validated against
-// the exact canonical encodings to keep every path inside the base directory.
+// a deliberately permissive allow-list (alphanumeric, bounded length) so that
+// both current SHA3-256 hex names and legacy IPFS CID names resolve, while
+// path-traversal characters are kept out of the base directory.
 package local
 
 import (
@@ -14,7 +16,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -99,50 +100,33 @@ func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
 }
 
-// isValidExternalID validates a storage ID against the exact encodings the
-// service produces, so Read/Delete/Exists can only ever address canonical
-// content-addressed blobs — never an arbitrary filename under basePath. Two
-// formats are accepted:
-//   - SHA3-256 hex: exactly 64 lowercase hex chars (current Go file-service
-//     format; the output of service.Hasher.Sum).
-//   - IPFS CIDv0:   exactly 46 base58btc chars starting with "Qm" (legacy TS
-//     file-service).
+// isValidExternalID rejects path-traversal attempts and other dangerous
+// characters in storage IDs. It is *deliberately* permissive about hash
+// encoding: it accepts any alphanumeric (ASCII) name of length 32–128, which
+// covers both externalID shapes the service must address:
+//   - SHA3-256 hex: 64 lowercase hex chars (current Go file-service format,
+//     the output of service.Hasher.Sum).
+//   - Legacy IPFS CIDs: the pre-migration TS file-service stored blobs under
+//     IPFS CID externalIDs — CIDv0 (base58btc "Qm…"), CIDv1 (base32 "bafy…"),
+//     uppercase hex, and other non-64-hex / non-CIDv0 forms all occur on disk.
 //
-// Restricting to these exact shapes blocks '/', '\', '.', '..', NUL, control
-// chars, whitespace, and any non-canonical filename — anything that could
-// escape basePath or read a non-blob file.
+// The security boundary here is rejecting path-traversal characters
+// ('/', '\', '.', '..', NUL, control chars, whitespace) and bounding length —
+// NOT pinning the hash encoding. Tightening this to exact canonical encodings
+// (e.g. 64-hex OR 46-char CIDv0 only) would reject legitimate pre-migration
+// externalIDs that exist on disk and break production reads (see PR #13,
+// "Accept legacy IPFS CID externalIDs in storage validator"). A future
+// lint/CodeRabbit pass should therefore NOT re-tighten this to exact formats.
 func isValidExternalID(id string) bool {
-	if isSHA3Hex(id) {
-		return true
-	}
-	return isCIDv0(id)
-}
-
-// isSHA3Hex reports whether id is exactly 64 lowercase hex characters.
-func isSHA3Hex(id string) bool {
-	if len(id) != 64 {
+	if len(id) < 32 || len(id) > 128 {
 		return false
 	}
 	for _, c := range id {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-// base58btc is the Bitcoin base58 alphabet (excludes 0, O, I and l), used by
-// IPFS CIDv0 multihashes.
-const base58btc = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-// isCIDv0 reports whether id is a 46-char IPFS CIDv0: the "Qm" multihash
-// prefix followed by 44 base58btc characters.
-func isCIDv0(id string) bool {
-	if len(id) != 46 || id[0] != 'Q' || id[1] != 'm' {
-		return false
-	}
-	for i := 2; i < len(id); i++ {
-		if strings.IndexByte(base58btc, id[i]) < 0 {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		default:
 			return false
 		}
 	}
