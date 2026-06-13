@@ -550,23 +550,8 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strict decode is kept inline here (rather than via decodeStrictJSON,
-	// which Copy uses) on purpose: routing both endpoints' bodies through one
-	// shared decode helper makes the OpenAPI generator (go-apispec) collapse
-	// the two distinct request schemas — Copy's body would lose its own schema
-	// and UpdateDocumentRequest.storageBucketId would lose `format: uuid`.
-	// Until the generator disambiguates per-caller body types, Update decodes
-	// its own body. DisallowUnknownFields is load-bearing: immutable fields
-	// like mimeType must surface a 400, not silently no-op.
 	var body UpdateDocumentRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return
-	}
-	if dec.More() {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 
@@ -736,7 +721,7 @@ func parseDocID(r *http.Request) (uuid.UUID, error) {
 //
 // DisallowUnknownFields is load-bearing: immutable fields (e.g. mimeType on
 // PATCH) must surface as a 400 rather than silently no-op.
-func decodeStrictJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
