@@ -1,5 +1,7 @@
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op h1:Z/MZK75wC/NSrkgqeNIa7jexam9uWzhLmFTSCPI/kn0=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
+github.com/antst/govips/v2 v2.0.0-20260331205515-1c56c968207c h1:ZpRQhEuZfCz1YePZSoiR40orq8I8AW+0tY9I3jxUL+g=
+github.com/antst/govips/v2 v2.0.0-20260331205515-1c56c968207c/go.mod h1:8+nst5zfMoats12PgmmAPh6p5OfjDaXK0BXMFl/vOcM=
 github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e h1:JmkerRVsVAWdQeyvZhMYRJIzV59RVGfvQuAh2WDEfvg=
 github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e/go.mod h1:8+nst5zfMoats12PgmmAPh6p5OfjDaXK0BXMFl/vOcM=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

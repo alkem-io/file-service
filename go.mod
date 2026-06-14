@@ -37,4 +37,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e
+replace github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 v2.0.0-20260331205515-1c56c968207c
