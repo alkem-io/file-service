@@ -173,6 +173,22 @@ func (s *stage) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// StagedReaderAt exposes the staging temp file for random-access inspection
+// before Commit. An *os.File already satisfies io.ReaderAt, and ReadAt is
+// offset-based so the file's seek position is irrelevant — the writer never
+// seeks it. The staged content is flushed to disk (Sync) before the reader is
+// returned. Calling this after Commit or Abort is an error: the temp file no
+// longer exists.
+func (s *stage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	if s.committed || s.aborted {
+		return nil, 0, fmt.Errorf("stage: reader after commit/abort")
+	}
+	if err := s.tmp.Sync(); err != nil {
+		return nil, 0, fmt.Errorf("sync staging file: %w", err)
+	}
+	return s.tmp, int64(s.size), nil
+}
+
 // Commit closes the staging file and publishes it under its content hash.
 // Publish is atomic and never overwrites an existing blob: os.Link creates
 // the content-addressed name in a single step that fails with os.IsExist when

@@ -155,6 +155,7 @@ type mockStorage struct {
 	openStageErr   error
 	stageWriteErr  error
 	stageCommitErr error
+	stageReaderErr error // StagedReaderAt failure (infra read error, e.g. FS sync / S3 ranged read)
 	stageDedupHit  bool
 	stageDiscard   bool // count writes without buffering (allocation tests)
 	stages         []*mockStage
@@ -1732,6 +1733,20 @@ func (s *mockStage) Commit() (model.StoredFile, error) {
 func (s *mockStage) Abort() error {
 	s.aborted = true
 	return nil
+}
+
+// StagedReaderAt exposes the staged bytes for pre-Commit inspection (the zip
+// central-directory recovery path). Backed by a bytes.Reader over the buffer,
+// which is an io.ReaderAt.
+func (s *mockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	if s.committed || s.aborted {
+		return nil, 0, errors.New("mockStage: reader after commit/abort")
+	}
+	if s.parent.stageReaderErr != nil {
+		return nil, 0, s.parent.stageReaderErr
+	}
+	b := s.buf.Bytes()
+	return bytes.NewReader(b), int64(len(b)), nil
 }
 
 func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
