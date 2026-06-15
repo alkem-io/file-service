@@ -65,6 +65,13 @@ type StagedUpload struct {
 	// DetectedMIME is the effective input type (declared for empty
 	// content, sniffed otherwise) — the value bucket allow-lists validate.
 	DetectedMIME string
+	// DeclaredMIME is the caller-asserted type (the multipart file part's
+	// Content-Type), normalized. It is consulted only by CompleteUpload, and
+	// only when the sniff degraded to a generic container type: an OOXML
+	// package whose [Content_Types].xml lands past the sniff window sniffs as
+	// application/zip, so the declared office type is the trustworthy one.
+	// This mirrors the replace path's reconcileReplaceMIME (spec 019).
+	DeclaredMIME string
 	Size         int64
 	ImageWidth   *int
 	ImageHeight  *int
@@ -130,6 +137,9 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 		return nil, err
 	}
 	su.DetectedMIME = detected
+	// Retain the caller's asserted type for the generic-sniff reconciliation
+	// in CompleteUpload (spec 019 mechanism on the create allow-list).
+	su.DeclaredMIME = normalizeMIME(declaredMIME)
 	return su, nil
 }
 
@@ -208,6 +218,12 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		for i, m := range allowedMimeTypes {
 			normalized[i] = normalizeMIME(m)
 		}
+		// reconcileCreateMIME may rewrite the detected/persisted type to the
+		// caller's declared office type when the sniff degraded to a generic
+		// container (the [Content_Types].xml-past-the-window case). Run it
+		// before the allow-list check so the office type, not application/zip,
+		// is what gets validated and stored.
+		reconcileCreateMIME(su, normalized)
 		if !slices.Contains(normalized, su.DetectedMIME) {
 			su.Discard()
 			return nil, ErrUnsupportedMediaType
@@ -247,6 +263,45 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return s.backfillIfNeeded(ctx, existing), nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
+}
+
+// reconcileCreateMIME applies the spec-019 generic-MIME tolerance to the
+// create allow-list (PR #13/#29). The detector reads only the first
+// sniffPrefixSize (3072) bytes; an OOXML package whose [Content_Types].xml
+// (and ppt/, word/, xl/ markers) sit past that window — e.g. a Collabora or
+// PowerPoint save that leads with docProps/_rels/customXml entries — sniffs
+// as application/zip. The bucket allow-lists the concrete office type, so the
+// degraded sniff would 415 a perfectly valid document.
+//
+// When the sniff is generic (application/zip, application/octet-stream,
+// text/plain — see model.IsGenericMIME) and the caller declared a concrete
+// type that the bucket already allows, that declared type is the trustworthy
+// one: rewrite both the value validated against the allow-list (DetectedMIME)
+// and the value persisted on the document (MimeType) to it. This is the
+// create-path twin of reconcileReplaceMIME's "sniff generic → keep the known
+// type" branch.
+//
+// The transcode path is deliberately untouched: there su.MimeType is the
+// encoder OUTPUT (e.g. image/jpeg) while su.DetectedMIME is the original input
+// (e.g. image/png), so su.MimeType != su.DetectedMIME and the guard below
+// skips reconciliation — a transcoded image's output MIME is never clobbered.
+// For a pptx no transcode runs, so su.MimeType == su.DetectedMIME ==
+// application/zip and the fallback is safe. Keep this guard and the declared-
+// type fallback intact: a strict-lint "simplification" that drops either
+// reintroduces the 415 (PR #29).
+func reconcileCreateMIME(su *StagedUpload, normalizedAllowed []string) {
+	if su.MimeType != su.DetectedMIME {
+		return // transcode happened: persisted output MIME must not change
+	}
+	if !model.IsGenericMIME(su.DetectedMIME) {
+		return // a concrete sniff carries its own identity; trust it
+	}
+	declared := su.DeclaredMIME
+	if declared == "" || !slices.Contains(normalizedAllowed, declared) {
+		return // nothing trustworthy to fall back to
+	}
+	su.DetectedMIME = declared
+	su.MimeType = declared
 }
 
 // logIngest emits the FR-008 structured failure log: outcome derivable from
