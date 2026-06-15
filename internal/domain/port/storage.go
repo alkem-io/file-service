@@ -43,4 +43,11 @@ type StageWriter interface {
 	// Abort destroys the staging artifact. Idempotent; safe after a failed
 	// Commit and after a successful one (no-op then).
 	Abort() error
+	// StagedReaderAt exposes the bytes written so far for random-access
+	// inspection before Commit (e.g. reading a zip central directory). Valid
+	// only after writes complete and before Commit/Abort. The local FS backend
+	// returns the staging temp file; an object-store backend would satisfy this
+	// with ranged reads of the staged object (zip.NewReader uses ReadAt on the
+	// tail, so ranged GETs suffice).
+	StagedReaderAt() (io.ReaderAt, int64, error)
 }

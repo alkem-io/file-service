@@ -1,7 +1,9 @@
 package local
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,6 +319,46 @@ func TestStage_CommitPublishesWithCorrectIdentity(t *testing.T) {
 	}
 	if entries := stagingArtifacts(t, dir); len(entries) != 0 {
 		t.Errorf("staging artifact left after Commit: %v", entries)
+	}
+}
+
+func TestStage_StagedReaderAtReturnsStagedBytes(t *testing.T) {
+	dir := t.TempDir()
+	a := New(dir)
+	content := []byte("staged bytes for random-access inspection")
+
+	st, err := a.OpenStage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Write(content[:10]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Write(content[10:]); err != nil {
+		t.Fatal(err)
+	}
+
+	ra, size, err := st.StagedReaderAt()
+	if err != nil {
+		t.Fatalf("StagedReaderAt: %v", err)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+	got := make([]byte, size)
+	if _, err := ra.ReadAt(got, 0); err != nil && err != io.EOF {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("staged bytes = %q, want %q", got, content)
+	}
+
+	// After Commit the staging artifact is gone: StagedReaderAt must error.
+	if _, err := st.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.StagedReaderAt(); err == nil {
+		t.Error("StagedReaderAt after Commit = nil error, want error")
 	}
 }
 

@@ -1,12 +1,14 @@
 package service
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -203,6 +205,25 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		su.Discard()
 		return nil, ErrPayloadTooLarge
 	}
+
+	// A front-window sniff (3072 bytes) degrades to application/zip when an
+	// OOXML package's [Content_Types].xml lands past that window — the cause
+	// of spurious 415s on reordered office zips (cf. spec 019 / PR #13). When
+	// the sniff is the generic application/zip (and was not overridden by a
+	// transcode, where MimeType is the encoder output), recover the real
+	// OOXML type from the staged file's central directory and validate THAT
+	// against the allow-list below. The su.MimeType == su.DetectedMIME guard
+	// keeps the image-transcode path untouched (images never sniff as zip).
+	if normalizeMIME(su.DetectedMIME) == "application/zip" && su.MimeType == su.DetectedMIME {
+		if ra, size, err := su.stage.StagedReaderAt(); err == nil {
+			if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
+				su.DetectedMIME = officeMIME // validated against the allow-list below
+				su.MimeType = officeMIME     // persisted as the real office type, not application/zip
+				s.logIngest("recovered office MIME from zip central directory", officeMIME, su.Size, nil)
+			}
+		}
+	}
+
 	if len(allowedMimeTypes) > 0 {
 		normalized := make([]string, len(allowedMimeTypes))
 		for i, m := range allowedMimeTypes {
@@ -247,6 +268,43 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return s.backfillIfNeeded(ctx, existing), nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
+}
+
+// detectZipOfficeMIME recovers the canonical OOXML MIME from a staged zip's
+// central directory when the 3072-byte front-window sniff degraded to
+// application/zip (the mechanism behind spurious 415s, cf. spec 019 / PR #13:
+// an office package whose [Content_Types].xml lands past the sniff window).
+// Reads only the central directory (cheap; no full decompression). Returns
+// the office MIME + true for an OOXML package, or "" / false for a plain
+// (non-office) or unreadable zip.
+func detectZipOfficeMIME(ra io.ReaderAt, size int64) (string, bool) {
+	zr, err := zip.NewReader(ra, size)
+	if err != nil {
+		return "", false
+	}
+
+	// An OOXML package is identified by [Content_Types].xml at the root plus
+	// a top-level marker directory naming the family. This mirrors mimetype's
+	// own msoxml heuristic — reliable and parse-free.
+	hasContentTypes := false
+	var ext string
+	for _, f := range zr.File {
+		switch {
+		case f.Name == "[Content_Types].xml":
+			hasContentTypes = true
+		case strings.HasPrefix(f.Name, "ppt/"):
+			ext = ".pptx"
+		case strings.HasPrefix(f.Name, "word/"):
+			ext = ".docx"
+		case strings.HasPrefix(f.Name, "xl/"):
+			ext = ".xlsx"
+		}
+	}
+	if !hasContentTypes || ext == "" {
+		return "", false
+	}
+	mime, ok := model.OfficeExtToMIME[ext]
+	return mime, ok
 }
 
 // logIngest emits the FR-008 structured failure log: outcome derivable from

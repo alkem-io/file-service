@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -311,6 +312,10 @@ func (s *httpMockStage) Commit() (model.StoredFile, error) {
 	return model.StoredFile{ExternalID: service.ComputeHash(content), Size: len(content), Created: true}, nil
 }
 func (s *httpMockStage) Abort() error { s.aborted = true; return nil }
+func (s *httpMockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	b := s.buf.Bytes()
+	return bytes.NewReader(b), int64(len(b)), nil
+}
 
 func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	st := &httpMockStage{parent: m}

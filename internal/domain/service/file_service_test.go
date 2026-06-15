@@ -1734,6 +1734,17 @@ func (s *mockStage) Abort() error {
 	return nil
 }
 
+// StagedReaderAt exposes the staged bytes for pre-Commit inspection (the zip
+// central-directory recovery path). Backed by a bytes.Reader over the buffer,
+// which is an io.ReaderAt.
+func (s *mockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	if s.committed || s.aborted {
+		return nil, 0, errors.New("mockStage: reader after commit/abort")
+	}
+	b := s.buf.Bytes()
+	return bytes.NewReader(b), int64(len(b)), nil
+}
+
 func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	if m.openStageErr != nil {
 		return nil, m.openStageErr
