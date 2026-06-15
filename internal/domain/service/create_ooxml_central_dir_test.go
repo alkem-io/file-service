@@ -213,6 +213,55 @@ func TestCompleteUpload_RecoveredOfficeNotAllowedRejected(t *testing.T) {
 	assertSingleAbortedStage(t, storage)
 }
 
+// When StagedReaderAt fails (an infrastructure read error — FS sync, or a
+// future object-store ranged read), OOXML recovery is skipped rather than
+// turned into a hard error: the upload falls through to plain application/zip
+// allow-list validation. An office package whose staged bytes are unreadable is
+// therefore treated as application/zip — accepted when zip is allowed, rejected
+// only by the ordinary allow-list, never by a synthesised inspection error.
+func TestCompleteUpload_StagedReaderErrorSkipsRecovery(t *testing.T) {
+	readErr := errors.New("staged reader unavailable")
+	content := buildOOXMLZipWithMarker(t, "ppt/") // would recover as pptx if readable
+
+	// application/zip allowed: recovery is skipped, content validates as zip.
+	t.Run("zip allowed → accepted as application/zip", func(t *testing.T) {
+		storage := &mockStorage{stageReaderErr: readErr}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: &mockProcessor{detectMIME: "application/zip"}}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+		if err != nil {
+			t.Fatalf("StageUpload: %v", err)
+		}
+		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+		doc, err := svc.CompleteUpload(context.Background(), su, input, []string{"application/zip"}, 0)
+		if err != nil {
+			t.Fatalf("CompleteUpload: %v, want accepted (recovery skipped, not a hard error)", err)
+		}
+		if doc.MimeType != "application/zip" {
+			t.Errorf("doc.MimeType = %q, want application/zip (recovery skipped on reader error)", doc.MimeType)
+		}
+	})
+
+	// office-only allow-list: recovery skipped, so the unrecovered application/zip
+	// is rejected by the ordinary allow-list — not by an inspection error.
+	t.Run("office-only allow-list → rejected by allow-list", func(t *testing.T) {
+		storage := &mockStorage{stageReaderErr: readErr}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: &mockProcessor{detectMIME: "application/zip"}}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+		if err != nil {
+			t.Fatalf("StageUpload: %v", err)
+		}
+		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+		doc, err := svc.CompleteUpload(context.Background(), su, input, []string{model.OfficeExtToMIME[".pptx"]}, 0)
+		if !errors.Is(err, ErrUnsupportedMediaType) {
+			t.Fatalf("err = %v, want ErrUnsupportedMediaType (allow-list rejects unrecovered zip)", err)
+		}
+		if doc != nil {
+			t.Errorf("doc = %+v, want nil on rejection", doc)
+		}
+		assertSingleAbortedStage(t, storage)
+	})
+}
+
 // The image-transcode path's persisted MIME is unaffected: when MimeType is the
 // transcode output (≠ DetectedMIME), the zip-recovery gate never fires. We
 // simulate it by leaving DetectedMIME generic but MimeType set to the transcode

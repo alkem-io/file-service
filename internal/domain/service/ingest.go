@@ -215,7 +215,17 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 	// against the allow-list below. The su.MimeType == su.DetectedMIME guard
 	// keeps the image-transcode path untouched (images never sniff as zip).
 	if normalizeMIME(su.DetectedMIME) == "application/zip" && su.MimeType == su.DetectedMIME {
-		if ra, size, err := su.stage.StagedReaderAt(); err == nil {
+		ra, size, err := su.stage.StagedReaderAt()
+		switch {
+		case err != nil:
+			// An infrastructure read failure (FS sync, or a future object-store
+			// ranged read) is not a verdict on the content: don't treat it as
+			// "not an office package". Recovery is skipped and the upload falls
+			// through to plain application/zip allow-list validation, but log it
+			// so a legitimate office file rejected only because its staged bytes
+			// were unreadable is diagnosable rather than silent.
+			s.logIngest("zip central-directory reader unavailable; skipping OOXML recovery", su.DetectedMIME, su.Size, err)
+		default:
 			if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
 				su.DetectedMIME = officeMIME // validated against the allow-list below
 				su.MimeType = officeMIME     // persisted as the real office type, not application/zip
