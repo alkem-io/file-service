@@ -200,6 +200,14 @@ openapi: 3.1.1
 paths:
   /internal/file:
     post:
+      description: |-
+        Create handles POST /internal/file — streaming ingest (spec 020): the
+        file part flows request → sniff → (transcode) → staged storage without
+        whole-file buffering. Parts are processed in whatever order they arrive;
+        metadata validation always happens after the loop, before the stage is
+        published. (The known caller sends the file part first — research R4 —
+        which is why bucket-level limits cannot gate the stream early; the
+        handler itself does not depend on any ordering.)
       operationId: DocumentHandler.Create
       responses:
         "201":
@@ -250,10 +258,23 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: |-
+        Create handles POST /internal/file — streaming ingest (spec 020): the
+        file part flows request → sniff → (transcode) → staged storage without
+        whole-file buffering.
       tags:
         - /internal
   /internal/file/copy:
     post:
+      description: |-
+        Copy handles POST /internal/file/copy.
+        Materializes a new file row in another bucket that references the same
+        content as the source. No bytes traverse the wire — content is
+        content-addressed, so the new row simply points at the existing blob.
+
+        Per-bucket dedup applies by default; SkipDedup=true forces a fresh row.
+        On dedup hit, caller-supplied authorizationId/tagsetId are ignored
+        (existing row is authoritative), matching the createDocument contract.
       operationId: DocumentHandler.Copy
       requestBody:
         content:
@@ -292,6 +313,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/internal-error'
           description: Internal Server Error
+      summary: Copy handles POST /internal/file/copy.
       tags:
         - /internal
   /internal/file/{id}:
@@ -323,9 +345,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: Delete handles DELETE /internal/document/{id}
       tags:
         - /internal
     patch:
+      description: |-
+        Update handles PATCH /internal/file/{id}.
+        Mutates storageBucketId, temporaryLocation, and/or displayName. Each
+        field is optional; at least one must be present. Omitted fields retain
+        their current value.
+
+        displayName notes:
+          - Validation rejects empty/whitespace-only, length > 512 (matches
+            the file."displayName" VARCHAR(512) column), path separators, and
+            control characters.
+          - mimeType is immutable on this endpoint, so callers renaming a file
+            are responsible for keeping the extension consistent with mimeType.
+            This service does not parse extensions or enforce mimeType matching.
+          - displayName is not part of any uniqueness/dedup index, so renames
+            never conflict at the DB level.
       operationId: DocumentHandler.Update
       parameters:
         - in: path
@@ -371,6 +409,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: Update handles PATCH /internal/file/{id}.
       tags:
         - /internal
   /internal/file/{id}/content:
@@ -403,6 +442,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: GetContent handles GET /internal/document/{id}/content
       tags:
         - /internal
     put:
@@ -463,6 +503,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: ReplaceContent handles PUT /internal/file/{id}/content (store-and-link)
       tags:
         - /internal
   /internal/file/{id}/meta:
@@ -494,6 +535,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+      summary: GetMeta handles GET /internal/document/{id}/meta
       tags:
         - /internal
   /live:
@@ -553,5 +595,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Service Unavailable
+      summary: ServeDocument handles GET /rest/storage/document/{id}
       tags:
         - /rest/storage
