@@ -345,7 +345,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
-      summary: Delete handles DELETE /internal/document/{id}
+      summary: Delete handles DELETE /internal/file/{id}
       tags:
         - /internal
     patch:
@@ -442,7 +442,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
-      summary: GetContent handles GET /internal/document/{id}/content
+      summary: GetContent handles GET /internal/file/{id}/content
       tags:
         - /internal
     put:
@@ -535,7 +535,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
-      summary: GetMeta handles GET /internal/document/{id}/meta
+      summary: GetMeta handles GET /internal/file/{id}/meta
       tags:
         - /internal
   /live:
@@ -595,6 +595,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Service Unavailable
-      summary: ServeDocument handles GET /rest/storage/document/{id}
+      summary: ServeDocument handles GET /rest/storage/file/{id} (and the /rest/storage/document/{id} back-compat alias)
       tags:
         - /rest/storage
