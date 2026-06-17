@@ -39,7 +39,7 @@ type DocumentHandler struct {
 	IdleTimeout   time.Duration
 }
 
-// GetMeta handles GET /internal/document/{id}/meta
+// GetMeta handles GET /internal/file/{id}/meta
 func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -61,7 +61,7 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	documentMetaResponse(doc).Render(w)
 }
 
-// GetContent handles GET /internal/document/{id}/content
+// GetContent handles GET /internal/file/{id}/content
 func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -500,7 +500,7 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	}.Render(w)
 }
 
-// Delete handles DELETE /internal/document/{id}
+// Delete handles DELETE /internal/file/{id}
 func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
