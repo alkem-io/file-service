@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -416,6 +418,185 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 }
 
+// Commit-visibility race: two requests upload identical content concurrently.
+// The loser's Create hits the unique violation (ErrDuplicateKey), but the
+// winner's INSERT is not yet visible on the loser's pooled connection, so the
+// first winner re-query returns ErrDocumentNotFound. The dedup recovery must
+// retry the re-query (bounded backoff) until the winner becomes visible and
+// return it as Reused — never surface a 500. Regression test for the
+// "dedup: unique violation but re-query failed … document not found" 500s
+// observed in the unified-collab empty-memo e2e (two collab clients snapshot
+// identical bytes → identical hash → same-bucket collision).
+func TestCreateDocument_Dedup_CreateRace_WinnerNotYetVisible_RetriesThenReturnsWinner(t *testing.T) {
+	winnerID := uuid.New()
+	winnerAuth := uuid.New()
+	bucket := uuid.New()
+
+	// find call #1 (pre-Create dedup check): no row → fall through to Create.
+	// find calls #2..#N (post-violation re-query): winner invisible for the
+	// first few attempts (visibility lag across pooled connections), then
+	// becomes visible. The fix must keep retrying past the not-found window.
+	const invisibleReQueries = 2 // re-query attempts that still see "not found"
+	callCount := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			callCount++
+			if callCount == 1 {
+				return model.Document{}, model.ErrDocumentNotFound
+			}
+			if callCount <= 1+invisibleReQueries {
+				// Winner committed but not yet visible to this connection.
+				return model.Document{}, model.ErrDocumentNotFound
+			}
+			return model.Document{
+				ID:              winnerID,
+				ExternalID:      "sha3-of-content",
+				StorageBucketID: bucket,
+				AuthorizationID: winnerAuth,
+			}, nil
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+	svc.sleep = func(time.Duration) {} // no real backoff sleeps in tests
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "empty-memo.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("dedup must recover from the visibility window, got 500-class error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true after losing the create race")
+	}
+	if doc.ID != winnerID {
+		t.Errorf("ID = %v, want winner %v", doc.ID, winnerID)
+	}
+	if doc.AuthorizationID != winnerAuth {
+		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+	// Pre-create check (1) + the invisible re-queries + the successful one.
+	wantMinFinds := 1 + invisibleReQueries + 1
+	if repo.findCalls < wantMinFinds {
+		t.Errorf("expected the winner re-query to be retried past the not-found window: findCalls = %d, want >= %d", repo.findCalls, wantMinFinds)
+	}
+}
+
+// Terminal case: Create hit ErrDuplicateKey but the winner is never visible
+// (genuinely missing row — e.g. winner rolled back, or visibility never
+// settles). The recovery must exhaust its bounded retries and then surface a
+// wrapped error rather than spin forever. The pre-create check is one find;
+// the re-query is then attempted multiple times.
+func TestCreateDocument_Dedup_CreateRace_WinnerNeverVisible_ExhaustsRetriesAndErrors(t *testing.T) {
+	bucket := uuid.New()
+	callCount := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			callCount++
+			// Always "not found": first call is the pre-create check, the rest
+			// are the re-query that never resolves.
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+	svc.sleep = func(time.Duration) {}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err == nil {
+		t.Fatal("expected an error when the race winner never becomes visible")
+	}
+	// Must have retried the re-query (more than the single pre-create find).
+	if repo.findCalls < 3 {
+		t.Errorf("expected the re-query to be retried before giving up: findCalls = %d, want >= 3", repo.findCalls)
+	}
+}
+
+// A real lookup failure (transport/DB) during the post-violation re-query
+// must NOT be retried as if it were a visibility lag: it fails fast and the
+// error is surfaced. Guards against the bounded retry masking genuine DB
+// outages.
+func TestCreateDocument_Dedup_CreateRace_ReQueryTransportError_FailsFast(t *testing.T) {
+	bucket := uuid.New()
+	transportErr := errors.New("connection reset by peer")
+	callCount := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			callCount++
+			if callCount == 1 {
+				return model.Document{}, model.ErrDocumentNotFound // pre-create check
+			}
+			return model.Document{}, transportErr // re-query: real DB failure
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+	svc.sleep = func(time.Duration) {}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err == nil {
+		t.Fatal("expected the transport error to surface")
+	}
+	if !errors.Is(err, transportErr) {
+		t.Errorf("expected wrapped transport error, got %v", err)
+	}
+	// Pre-create check (1) + exactly one re-query that fails fast (2). No retry.
+	if repo.findCalls != 2 {
+		t.Errorf("a real lookup failure must not be retried: findCalls = %d, want 2", repo.findCalls)
+	}
+}
+
+// A context cancelled during the dedup backoff window aborts the re-query loop
+// promptly rather than pinning the request thread for the full retry budget.
+// Exercises the production ctx-aware timer path (no injected sleep hook).
+func TestCreateDocument_Dedup_CreateRace_ContextCancelledDuringBackoff(t *testing.T) {
+	bucket := uuid.New()
+	callCount := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			callCount++
+			// Always not-found so the loop enters the backoff between attempts.
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	// No svc.sleep injected → real ctx-aware timer is used.
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel almost immediately so the first inter-attempt backoff observes it.
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "test.txt",
+		StorageBucketID: bucket,
+		AuthorizationID: uuid.New(),
+	}
+	_, err := svc.CreateDocument(ctx, input, []byte("content"), "", nil, 0)
+	if err == nil {
+		t.Fatal("expected an error after context cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled to propagate, got %v", err)
+	}
+}
+
 // SkipDedup: true → fresh row inserted even when an existing row matches.
 // Lookup must NOT be called; existing row must NOT be returned/mutated.
 func TestCreateDocument_SkipDedup_InsertsFreshRowWhenContentExists(t *testing.T) {
@@ -558,6 +739,7 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 type mockRepoRace struct {
 	find      func() (model.Document, error)
 	createErr error
+	findCalls int
 }
 
 var _ port.DocumentRepo = (*mockRepoRace)(nil)
@@ -566,6 +748,7 @@ func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 	return model.Document{}, nil
 }
 func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	m.findCalls++
 	return m.find()
 }
 func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
@@ -1784,4 +1967,170 @@ func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType strin
 
 func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
+}
+
+// concurrentDedupRepo is a thread-safe, stateful DocumentRepo that faithfully
+// simulates the production database for the dedup race: Create enforces a
+// unique(externalID, storageBucketID) index (first writer wins, the rest get
+// ErrDuplicateKey), and FindByExternalIDAndBucket reflects committed rows —
+// but only after a configurable visibility delay, modelling the brief window
+// where a winning INSERT on one pooled connection is not yet visible to a
+// loser re-querying on another. Used by the end-to-end concurrency regression
+// test. -race clean.
+type concurrentDedupRepo struct {
+	mu sync.Mutex
+	// rows keyed by (externalID, bucket) — the unique index.
+	rows map[string]model.Document
+	// committedAt records when each key became visible to re-queries.
+	committedAt map[string]time.Time
+	// visibilityLag delays when a freshly-inserted row is observable by
+	// FindByExternalIDAndBucket (the commit-visibility window).
+	visibilityLag time.Duration
+	now           func() time.Time
+}
+
+var _ port.DocumentRepo = (*concurrentDedupRepo)(nil)
+
+func newConcurrentDedupRepo(lag time.Duration) *concurrentDedupRepo {
+	return &concurrentDedupRepo{
+		rows:          map[string]model.Document{},
+		committedAt:   map[string]time.Time{},
+		visibilityLag: lag,
+		now:           time.Now,
+	}
+}
+
+func dedupKey(externalID string, bucket uuid.UUID) string {
+	return externalID + "|" + bucket.String()
+}
+
+func (m *concurrentDedupRepo) Create(_ context.Context, doc model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := dedupKey(doc.ExternalID, doc.StorageBucketID)
+	if _, exists := m.rows[k]; exists {
+		// Unique index violation — another writer already holds this content
+		// in this bucket.
+		return uuid.Nil, model.ErrDuplicateKey
+	}
+	m.rows[k] = doc
+	m.committedAt[k] = m.now().Add(m.visibilityLag)
+	return doc.ID, nil
+}
+
+func (m *concurrentDedupRepo) FindByExternalIDAndBucket(_ context.Context, externalID string, bucket uuid.UUID) (model.Document, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := dedupKey(externalID, bucket)
+	doc, exists := m.rows[k]
+	if !exists {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	if m.now().Before(m.committedAt[k]) {
+		// Row exists but is not yet visible on this connection.
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return doc, nil
+}
+
+func (m *concurrentDedupRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *concurrentDedupRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
+	return nil
+}
+func (m *concurrentDedupRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+	return nil
+}
+func (m *concurrentDedupRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
+	return nil
+}
+func (m *concurrentDedupRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
+	return model.DeletedDocument{}, nil
+}
+func (m *concurrentDedupRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
+func (m *concurrentDedupRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *concurrentDedupRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
+}
+
+// TestCreateDocument_ConcurrentIdenticalContent_BothDedupNo500 is the
+// end-to-end regression test for the dedup upsert race surfaced by the
+// unified-collab empty-memo e2e: two requests upload byte-identical content
+// (same content-hash externalID) into the same bucket at the same time. With a
+// commit-visibility lag in play, exactly one INSERT wins; the loser must
+// recover the winner via the bounded re-query and return it as a dedup hit.
+// Both requests must succeed, return the SAME document id, and produce ZERO
+// 500-class errors. Run under -race.
+func TestCreateDocument_ConcurrentIdenticalContent_BothDedupNo500(t *testing.T) {
+	bucket := uuid.New()
+	// Visibility lag longer than the first backoff so the loser's first
+	// re-query reliably misses and must retry — the exact failure mode.
+	repo := newConcurrentDedupRepo(5 * time.Millisecond)
+
+	content := []byte("") // empty memo snapshot: identical bytes, identical hash
+	const goroutines = 8
+
+	type result struct {
+		doc *model.Document
+		err error
+	}
+	results := make([]result, goroutines)
+
+	var start sync.WaitGroup
+	start.Add(1)
+	var done sync.WaitGroup
+	done.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer done.Done()
+			// Each goroutine gets its own storage/processor (one writer per
+			// instance) so only the shared repo exercises concurrency.
+			svc := &FileService{
+				Logger:    nopLogger,
+				Repo:      repo,
+				Storage:   &mockStorage{},
+				Processor: &mockProcessor{},
+			}
+			input := model.CreateDocumentInput{
+				DisplayName:     "empty-memo.txt",
+				StorageBucketID: bucket,
+				AuthorizationID: uuid.New(),
+			}
+			start.Wait() // release all goroutines together
+			doc, err := svc.CreateDocument(context.Background(), input, content, "", nil, 0)
+			results[idx] = result{doc: doc, err: err}
+		}(i)
+	}
+
+	start.Done()
+	done.Wait()
+
+	var winnerID uuid.UUID
+	reusedCount := 0
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("goroutine %d: identical-content upload must dedup, got error (500): %v", i, r.err)
+		}
+		if r.doc == nil {
+			t.Fatalf("goroutine %d: nil document with no error", i)
+		}
+		if winnerID == uuid.Nil {
+			winnerID = r.doc.ID
+		} else if r.doc.ID != winnerID {
+			t.Errorf("goroutine %d: doc ID = %v, want the single winner %v (dedup must converge on one row)", i, r.doc.ID, winnerID)
+		}
+		if r.doc.Reused {
+			reusedCount++
+		}
+	}
+	// Exactly one inserter wins; every other request is a dedup hit (Reused).
+	if reusedCount != goroutines-1 {
+		t.Errorf("expected %d dedup hits (Reused=true), got %d", goroutines-1, reusedCount)
+	}
 }

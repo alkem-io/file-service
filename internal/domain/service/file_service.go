@@ -58,6 +58,11 @@ type FileService struct {
 	Storage   port.StoragePort
 	Processor port.ImageProcessor
 	Logger    *zap.Logger
+
+	// sleep is the backoff hook for the dedup-race winner re-query. nil means
+	// time.Sleep (production); tests inject a no-op to run instantly. Optional
+	// so existing struct-literal constructions stay valid.
+	sleep func(time.Duration)
 }
 
 // ServeResult contains file content and metadata for serving.
@@ -299,9 +304,9 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 			return nil, ErrConflict
 		}
 		// Default path: another concurrent creator won the race on the
-		// unique(externalID, storageBucketID) index. Re-query and return
-		// the winner with Reused=true.
-		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		// unique(externalID, storageBucketID) index. Re-query and return the
+		// winner with Reused=true.
+		raced, findErr := s.reQueryRaceWinner(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
 			raced.Reused = true
 			return &raced, nil
@@ -311,6 +316,73 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
 	}
 	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// dedupReQueryAttempts and dedupReQueryBaseBackoff bound the winner re-query
+// after a unique-violation. The insert and the re-query use the same
+// (externalID, storageBucketID) scope and run as separate autocommit
+// statements on a pooled connection (no enclosing transaction), so the winning
+// INSERT is occasionally not yet visible to the loser's connection the instant
+// the violation fires — visibility settles a few milliseconds later. A single
+// re-query then spuriously returns ErrDocumentNotFound and the request 500s
+// ("dedup: unique violation but re-query failed … document not found").
+// Re-querying a few times with a short capped backoff turns that lost race
+// back into a successful dedup. Values are intentionally small: the contention
+// window is sub-millisecond and we must not stall the request thread.
+const (
+	dedupReQueryAttempts    = 5
+	dedupReQueryBaseBackoff = 2 * time.Millisecond
+	dedupReQueryMaxBackoff  = 20 * time.Millisecond
+)
+
+// reQueryRaceWinner re-reads the dedup winner after a unique-violation,
+// retrying with a short bounded backoff while the lookup still reports
+// ErrDocumentNotFound — the commit-visibility window. Any other lookup error
+// (or a hit) returns immediately; ErrDocumentNotFound is only returned after
+// the attempts are exhausted, so the caller can still surface a clear failure
+// if the winner genuinely never materializes.
+func (s *FileService) reQueryRaceWinner(ctx context.Context, externalID string, bucketID uuid.UUID) (model.Document, error) {
+	backoff := dedupReQueryBaseBackoff
+	var lastErr error
+	for attempt := 0; attempt < dedupReQueryAttempts; attempt++ {
+		if attempt > 0 {
+			if err := s.dedupBackoff(ctx, backoff); err != nil {
+				return model.Document{}, err
+			}
+			if backoff *= 2; backoff > dedupReQueryMaxBackoff {
+				backoff = dedupReQueryMaxBackoff
+			}
+		}
+		doc, err := s.Repo.FindByExternalIDAndBucket(ctx, externalID, bucketID)
+		if err == nil {
+			return doc, nil
+		}
+		if !errors.Is(err, model.ErrDocumentNotFound) {
+			// A real lookup failure (transport/DB) — don't mask it as a
+			// visibility lag; fail fast.
+			return model.Document{}, err
+		}
+		lastErr = err
+	}
+	return model.Document{}, lastErr
+}
+
+// dedupBackoff sleeps for d, honoring context cancellation so a client that
+// hangs up doesn't pin the request thread through the retry loop. Uses the
+// injected sleep hook when set (tests), else a ctx-aware timer.
+func (s *FileService) dedupBackoff(ctx context.Context, d time.Duration) error {
+	if s.sleep != nil {
+		s.sleep(d)
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // DeleteDocument removes a document record and its file (if not shared).
