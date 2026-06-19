@@ -1,8 +1,10 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setBaseEnv(t *testing.T) {
@@ -344,5 +346,77 @@ func TestGetenvInt_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid integer") {
 		t.Errorf("error = %q, want substring %q", err.Error(), "invalid integer")
+	}
+}
+
+func TestLoadIngestConfig_Defaults(t *testing.T) {
+	clearIngestEnv(t)
+	cfg, err := loadIngestConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxUploadSize != 32<<20 {
+		t.Errorf("MaxUploadSize = %d, want %d", cfg.MaxUploadSize, 32<<20)
+	}
+	if cfg.IdleTimeout != 30*time.Second {
+		t.Errorf("IdleTimeout = %v, want 30s", cfg.IdleTimeout)
+	}
+	if cfg.PixelBudget != 100_000_000 {
+		t.Errorf("PixelBudget = %d, want 100000000", cfg.PixelBudget)
+	}
+	if cfg.VipsDiscThreshold != 0 || cfg.VipsScratchDir != "" || cfg.VipsPipeReadLimit != 0 {
+		t.Errorf("vips knobs should default to library defaults: %+v", cfg)
+	}
+}
+
+func TestLoadIngestConfig_OverridesAndValidation(t *testing.T) {
+	clearIngestEnv(t)
+	t.Setenv("MAX_UPLOAD_SIZE", "1073741824")
+	t.Setenv("UPLOAD_IDLE_TIMEOUT_MS", "5000")
+	t.Setenv("IMAGE_PIXEL_BUDGET", "50000000")
+	t.Setenv("VIPS_STREAM_DISC_THRESHOLD", "67108864")
+	t.Setenv("VIPS_SCRATCH_DIR", "/var/scratch")
+	t.Setenv("VIPS_PIPE_READ_LIMIT", "134217728")
+	cfg, err := loadIngestConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxUploadSize != 1<<30 || cfg.IdleTimeout != 5*time.Second ||
+		cfg.PixelBudget != 50_000_000 || cfg.VipsDiscThreshold != 64<<20 ||
+		cfg.VipsScratchDir != "/var/scratch" || cfg.VipsPipeReadLimit != 128<<20 {
+		t.Errorf("overrides not applied: %+v", cfg)
+	}
+
+	t.Run("MAX_UPLOAD_SIZE_ExceedsValidatedCeiling", func(t *testing.T) {
+		clearIngestEnv(t)
+		t.Setenv("MAX_UPLOAD_SIZE", "1073741825") // 1 GiB + 1
+		if _, err := loadIngestConfig(); err == nil {
+			t.Error("expected validation error for MAX_UPLOAD_SIZE > 1 GiB")
+		}
+	})
+
+	for env, bad := range map[string]string{
+		"MAX_UPLOAD_SIZE":            "0",
+		"UPLOAD_IDLE_TIMEOUT_MS":     "-1",
+		"IMAGE_PIXEL_BUDGET":         "0",
+		"VIPS_STREAM_DISC_THRESHOLD": "-5",
+		"VIPS_PIPE_READ_LIMIT":       "notanumber",
+	} {
+		t.Run(env, func(t *testing.T) {
+			clearIngestEnv(t)
+			t.Setenv(env, bad)
+			if _, err := loadIngestConfig(); err == nil {
+				t.Errorf("%s=%s: expected validation error", env, bad)
+			}
+		})
+	}
+}
+
+func clearIngestEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"MAX_UPLOAD_SIZE", "UPLOAD_IDLE_TIMEOUT_MS", "IMAGE_PIXEL_BUDGET",
+		"VIPS_STREAM_DISC_THRESHOLD", "VIPS_SCRATCH_DIR", "VIPS_PIPE_READ_LIMIT"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
 	}
 }

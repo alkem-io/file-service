@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/google/uuid"
@@ -36,6 +38,19 @@ type mockRepo struct {
 	// Captured args from Create / UpdateFile content_metadata params.
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
+
+	// Replace-path capture (spec 019): persisted MIME and call count.
+	updateFileCalls    int
+	lastUpdateFileMime string
+
+	// MIME-repair capture (spec 019).
+	suspects           []model.Document
+	listErr            error
+	lastListMimeTypes  []string
+	relabeled          map[uuid.UUID]string
+	relabelExternalIDs map[uuid.UUID]string
+	updateMimeErr      error
+	updateMimeLostRace bool
 
 	// Lazy-backfill capture (US1).
 	backfillCalls          int
@@ -71,7 +86,9 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata
 	}
 	return doc.ID, m.createErr
 }
-func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
+func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, mimeType string, _ int, contentMetadata model.ContentMetadata) error {
+	m.updateFileCalls++
+	m.lastUpdateFileMime = mimeType
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
@@ -91,6 +108,27 @@ func (m *mockRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument
 func (m *mockRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
 	return m.count, m.countErr
 }
+func (m *mockRepo) ListByMimeTypes(_ context.Context, mimeTypes []string) ([]model.Document, error) {
+	m.lastListMimeTypes = mimeTypes
+	return m.suspects, m.listErr
+}
+func (m *mockRepo) UpdateMimeType(_ context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error) {
+	if m.updateMimeErr != nil {
+		return false, m.updateMimeErr
+	}
+	if m.relabelExternalIDs == nil {
+		m.relabelExternalIDs = map[uuid.UUID]string{}
+	}
+	m.relabelExternalIDs[id] = expectedExternalID
+	if m.updateMimeLostRace {
+		return false, nil
+	}
+	if m.relabeled == nil {
+		m.relabeled = map[uuid.UUID]string{}
+	}
+	m.relabeled[id] = mimeType
+	return true, nil
+}
 
 type mockAuth struct {
 	allowed bool
@@ -108,6 +146,19 @@ type mockStorage struct {
 	saveErr   error
 	readErr   error
 	deleteErr error
+
+	// dataByID serves per-externalID content (MIME-repair tests). When nil,
+	// Read falls back to the flat data/readErr pair.
+	dataByID map[string][]byte
+
+	// Streaming-stage controls (spec 020).
+	openStageErr   error
+	stageWriteErr  error
+	stageCommitErr error
+	stageReaderErr error // StagedReaderAt failure (infra read error, e.g. FS sync / S3 ranged read)
+	stageDedupHit  bool
+	stageDiscard   bool // count writes without buffering (allocation tests)
+	stages         []*mockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -118,7 +169,15 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	hash := ComputeHash(content)
 	return model.StoredFile{ExternalID: hash, Size: len(content), Created: true}, nil
 }
-func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.readErr }
+func (m *mockStorage) Read(externalID string) ([]byte, error) {
+	if m.dataByID != nil {
+		if d, ok := m.dataByID[externalID]; ok {
+			return d, nil
+		}
+		return nil, m.readErr
+	}
+	return m.data, m.readErr
+}
 func (m *mockStorage) Delete(_ string) error         { m.deleted = true; return m.deleteErr }
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
@@ -138,9 +197,23 @@ type mockProcessor struct {
 	measureDimsW   *int
 	measureDimsH   *int
 	measureDimsErr error
+
+	// detectMIME override — when non-empty, replaces the default
+	// application/octet-stream (replace-path reconciliation tests).
+	detectMIME string
+
+	// Streaming-transcode overrides (spec 020).
+	transcodeErr   error
+	transcodeMIME  string
+	transcodeCalls int
 }
 
-func (m *mockProcessor) DetectMIME(_ []byte) string { return "application/octet-stream" }
+func (m *mockProcessor) DetectMIME(_ []byte) string {
+	if m.detectMIME != "" {
+		return m.detectMIME
+	}
+	return "application/octet-stream"
+}
 func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
 	if m.processErr != nil {
 		return port.ProcessResult{}, m.processErr
@@ -513,6 +586,12 @@ func (m *mockRepoRace) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocu
 func (m *mockRepoRace) CountByExternalID(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+func (m *mockRepoRace) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockRepoRace) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
+}
 
 func TestCreateDocument_TooLarge(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
@@ -847,6 +926,12 @@ func (m *copyRaceRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocu
 func (m *copyRaceRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+func (m *copyRaceRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *copyRaceRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
+}
 
 func TestDeleteDocument_UniqueFile_DeletesFromStorage(t *testing.T) {
 	authID := uuid.New()
@@ -1060,9 +1145,11 @@ func TestStoreAndLink_StorageFails(t *testing.T) {
 
 func TestCreateDocument_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{},
-		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		Repo:    &mockRepo{},
+		Storage: &mockStorage{},
+		// spec 020: only transcodable images touch the processor, so the
+		// failure test must sniff as an image to exercise the route.
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/png"},
 	}
 
 	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
@@ -1074,9 +1161,11 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 
 func TestStoreAndLink_ProcessorFails(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
-		Repo:      &mockRepo{doc: model.Document{ID: uuid.New()}},
+		// spec 020: only transcodable images route through the processor on
+		// replace; the stored type must be an image so the failure path runs.
+		Repo:      &mockRepo{doc: model.Document{ID: uuid.New(), MimeType: "image/jpeg"}},
 		Storage:   &mockStorage{},
-		Processor: &mockProcessor{processErr: errors.New("corrupt image")},
+		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/jpeg"},
 	}
 
 	_, err := svc.StoreAndLink(context.Background(), uuid.New(), []byte("content"))
@@ -1602,4 +1691,97 @@ func TestProcessResultToContentMetadata_AllBranches(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Spec 020: streaming stage mock ---
+
+type mockStage struct {
+	parent    *mockStorage
+	buf       bytes.Buffer
+	n         int64
+	writeErr  error
+	commitErr error
+	committed bool
+	aborted   bool
+}
+
+func (s *mockStage) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	s.n += int64(len(p))
+	if s.parent.stageDiscard {
+		return len(p), nil
+	}
+	return s.buf.Write(p)
+}
+
+func (s *mockStage) Commit() (model.StoredFile, error) {
+	if s.commitErr != nil {
+		return model.StoredFile{}, s.commitErr
+	}
+	s.committed = true
+	content := s.buf.Bytes()
+	s.parent.saved = content
+	return model.StoredFile{
+		ExternalID: ComputeHash(content),
+		Size:       len(content),
+		Created:    !s.parent.stageDedupHit,
+	}, nil
+}
+
+func (s *mockStage) Abort() error {
+	s.aborted = true
+	return nil
+}
+
+// StagedReaderAt exposes the staged bytes for pre-Commit inspection (the zip
+// central-directory recovery path). Backed by a bytes.Reader over the buffer,
+// which is an io.ReaderAt.
+func (s *mockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	if s.committed || s.aborted {
+		return nil, 0, errors.New("mockStage: reader after commit/abort")
+	}
+	if s.parent.stageReaderErr != nil {
+		return nil, 0, s.parent.stageReaderErr
+	}
+	b := s.buf.Bytes()
+	return bytes.NewReader(b), int64(len(b)), nil
+}
+
+func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	if m.openStageErr != nil {
+		return nil, m.openStageErr
+	}
+	commitErr := m.stageCommitErr
+	if commitErr == nil {
+		commitErr = m.saveErr
+	}
+	st := &mockStage{parent: m, writeErr: m.stageWriteErr, commitErr: commitErr}
+	m.stages = append(m.stages, st)
+	return st, nil
+}
+
+// TranscodeStream (mock): pass-through copy; honors transcodeErr and reports
+// transcodeMIME/dims overrides for ingest-path tests.
+func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	m.transcodeCalls++
+	if m.transcodeErr != nil {
+		return port.TranscodeResult{}, m.transcodeErr
+	}
+	if m.processErr != nil {
+		return port.TranscodeResult{}, m.processErr
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	out := mimeType
+	if m.transcodeMIME != "" {
+		out = m.transcodeMIME
+	}
+	return port.TranscodeResult{MimeType: out, ImageWidth: m.processDimsW, ImageHeight: m.processDimsH, Measured: m.processDimsW != nil}, nil
+}
+
+func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
 }

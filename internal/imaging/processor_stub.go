@@ -3,6 +3,7 @@
 package imaging
 
 import (
+	"io"
 	"net/http"
 
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -16,22 +17,38 @@ import (
 // _decodeFailed sentinel) so a future vips environment can retry.
 type Processor struct{}
 
+// New returns the stub processor. Unlike the vips build, no library startup
+// happens here.
 func New() *Processor {
 	return &Processor{}
 }
 
+// DetectMIME sniffs via the stdlib's http.DetectContentType, which knows
+// fewer formats than the vips build's mimetype library (e.g. HEIC comes
+// back as application/octet-stream).
 func (p *Processor) DetectMIME(content []byte) string {
 	return http.DetectContentType(content)
 }
 
+// Process passes content through unchanged with Measured=false — no image
+// processing without libvips — so insertDocument's marshaling skips the
+// _decodeFailed sentinel.
 func (p *Processor) Process(content []byte, mimeType string) (port.ProcessResult, error) {
-	// No image processing without libvips — pass through with Measured=false
-	// so insertDocument's marshaling skips the _decodeFailed sentinel.
 	return port.ProcessResult{Content: content, MimeType: mimeType, Measured: false}, nil
 }
 
+// MeasureDims reports "no decoder available" as (nil, nil, nil);
+// backfillIfNeeded skips the persist so legacy rows remain {} and a future
+// vips environment can retry.
 func (p *Processor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
-	// No decoder available; backfillIfNeeded skips persist on (nil, nil, nil)
-	// so legacy rows remain {} and a future vips environment can retry.
 	return nil, nil, nil
+}
+
+// TranscodeStream (no-vips stub): pass-through copy, no decoding available.
+// Dims unreported (Measured=false) per the lazy-backfill convention.
+func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	if _, err := io.Copy(w, r); err != nil {
+		return port.TranscodeResult{}, err
+	}
+	return port.TranscodeResult{MimeType: mimeType, Measured: false}, nil
 }

@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestComputeHash_NodeJSCompatibility(t *testing.T) {
 	// Reference values from Node.js:
@@ -46,5 +49,41 @@ func TestComputeHash_Deterministic(t *testing.T) {
 	h2 := ComputeHash(content)
 	if h1 != h2 {
 		t.Errorf("non-deterministic: %q != %q", h1, h2)
+	}
+}
+
+// Spec 020 T004 — the streaming hasher must be digest-identical to
+// ComputeHash for any input and any write segmentation.
+func TestNewHasher_MatchesComputeHash(t *testing.T) {
+	inputs := [][]byte{
+		nil,
+		{},
+		[]byte("a"),
+		[]byte("hello world"),
+		bytes.Repeat([]byte{0xA5, 0x5A, 0x00, 0xFF}, 1<<20), // 4 MiB
+	}
+	for i, in := range inputs {
+		want := ComputeHash(in)
+
+		// single write
+		h := NewHasher()
+		_, _ = h.Write(in)
+		if got := h.Sum(); got != want {
+			t.Errorf("input %d single write: %s != %s", i, got, want)
+		}
+
+		// arbitrary segmentation
+		h2 := NewHasher()
+		for off := 0; off < len(in); {
+			n := 1 + (off*7+13)%4096
+			if off+n > len(in) {
+				n = len(in) - off
+			}
+			_, _ = h2.Write(in[off : off+n])
+			off += n
+		}
+		if got := h2.Sum(); got != want {
+			t.Errorf("input %d segmented writes: %s != %s", i, got, want)
+		}
 	}
 }

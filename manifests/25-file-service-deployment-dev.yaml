@@ -1,5 +1,5 @@
-apiVersion: apps/v1
 kind: Deployment
+apiVersion: apps/v1
 metadata:
   name: alkemio-file-service-deployment
   labels:
@@ -15,9 +15,16 @@ spec:
       labels:
         app: alkemio-file-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: alkemio-file-service
-          image: alkemio/file-service:v0.1.0
+          # Placeholder image; the deploy workflow overwrites this via
+          # `kubectl set image` with the freshly built, SHA-tagged image.
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:latest
           imagePullPolicy: Always
           ports:
             - name: http
@@ -46,9 +53,15 @@ spec:
             - name: ALKEMIO_DATABASE_NAME
               value: "alkemio"
             - name: AUTH_SERVICE_URL
-              value: "http://alkemio-authorization-evaluation-service:6060"
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: AUTH_SERVICE_URL
             - name: LOCAL_STORAGE_PATH
-              value: "/storage"
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: LOCAL_STORAGE_PATH
             - name: STORAGE_TYPE
               value: "local"
             - name: LOG_LEVEL
@@ -63,7 +76,7 @@ spec:
               path: /health
               port: 4003
             initialDelaySeconds: 5
-            periodSeconds: 30
+            periodSeconds: 15
             failureThreshold: 3
           # Liveness: process-alive check only, no deps. Restarting the pod
           # when the DB is down would not fix anything and would amplify an
@@ -73,7 +86,7 @@ spec:
               path: /live
               port: 4003
             initialDelaySeconds: 5
-            periodSeconds: 30
+            periodSeconds: 60
             failureThreshold: 3
           resources:
             requests:
@@ -85,7 +98,7 @@ spec:
       volumes:
         - name: file-storage
           persistentVolumeClaim:
-            claimName: file-storage-pvc
+            claimName: file-storage-pvc2
       affinity:
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

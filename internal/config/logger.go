@@ -5,6 +5,8 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// NewLogger builds the production zap logger: JSON to stdout at info level
+// with ISO-8601 timestamps — the shape the cluster's log pipeline ingests.
 func NewLogger() (*zap.Logger, error) {
 	cfg := zap.Config{
 		Level:       zap.NewAtomicLevelAt(zapcore.InfoLevel),

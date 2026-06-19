@@ -1,3 +1,7 @@
+// Package main boots the Alkemio file-service: it wires the hexagonal core
+// (domain service + ports) to its adapters — pgx/sqlc repository, local
+// filesystem storage, NATS or h2c auth transport, imaging processor — and
+// serves the HTTP API until SIGINT/SIGTERM triggers a graceful shutdown.
 package main
 
 import (
@@ -51,6 +55,11 @@ func run() int {
 	logger.Info("auth transport configured", zap.String("transport", cfg.AuthTransport))
 
 	fileSvc := buildFileService(pool, auth, cfg, logger)
+
+	// Boot-time MIME repair (spec 019 FR-006): heal documents corrupted by
+	// the pre-fix replace path. Idempotent; runs concurrently with serving.
+	go runMimeRepair(context.Background(), fileSvc, logger)
+
 	router := buildRouter(pool, nc, cfg, fileSvc, logger)
 	srv := newHTTPServer(cfg.Port, router)
 

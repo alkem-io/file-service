@@ -1,3 +1,8 @@
+// Package config loads and validates the service configuration from
+// environment variables — HTTP port, storage location, database and NATS
+// settings, circuit-breaker tuning, and the spec-020 streaming-ingest knobs —
+// and constructs the production zap logger. Invalid or missing required
+// values fail fast at startup with the offending variable named.
 package config
 
 import (
@@ -8,6 +13,8 @@ import (
 	"time"
 )
 
+// Config is the complete runtime configuration of the service, assembled
+// from environment variables by Load.
 type Config struct {
 	Port           int
 	StoragePath    string
@@ -18,6 +25,28 @@ type Config struct {
 	Breaker        BreakerConfig
 	AuthServiceURL string // h2c URL for auth-evaluation-service (e.g., "http://auth-service:6060")
 	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
+	Ingest         IngestConfig
+}
+
+// IngestConfig governs the streaming upload pipeline (spec 020).
+type IngestConfig struct {
+	// MaxUploadSize is the hard incremental cap on any single upload body,
+	// in bytes. Default keeps today's 32 MiB behavior; validated to 1 GiB.
+	MaxUploadSize int64
+	// IdleTimeout aborts an upload after this long without receiving bytes
+	// (progress-based — a slow-but-moving upload is never killed).
+	IdleTimeout time.Duration
+	// PixelBudget rejects images whose header-declared width×height exceeds
+	// it, before any pixel decode (FR-010).
+	PixelBudget int64
+	// VipsDiscThreshold (bytes) spills decoded frames above it to scratch
+	// disc instead of RAM. 0 = library default (VIPS_DISC_THRESHOLD/100MB).
+	VipsDiscThreshold int64
+	// VipsScratchDir hosts materialized frames. Empty = os.TempDir().
+	VipsScratchDir string
+	// VipsPipeReadLimit (bytes) bounds compressed-input accumulation for
+	// non-seekable seek-needing loads. 0 = library default.
+	VipsPipeReadLimit int64
 }
 
 // BreakerConfig is shared circuit breaker settings for any auth transport.
@@ -27,6 +56,9 @@ type BreakerConfig struct {
 	HalfOpenMaxRequests int
 }
 
+// DatabaseConfig holds the Postgres connection settings for Alkemio's
+// shared database. All fields are required; Load fails fast when any
+// ALKEMIO_DATABASE_* variable is missing.
 type DatabaseConfig struct {
 	Host     string
 	Port     int
@@ -35,6 +67,9 @@ type DatabaseConfig struct {
 	Name     string
 }
 
+// ConnString renders the pgx connection URL. Credentials are URL-escaped,
+// so passwords may contain reserved characters; sslmode=disable is fixed
+// because the database is only reachable inside the cluster network.
 func (d DatabaseConfig) ConnString() string {
 	u := url.URL{
 		Scheme:   "postgres",
@@ -46,6 +81,8 @@ func (d DatabaseConfig) ConnString() string {
 	return u.String()
 }
 
+// NATSConfig holds the NATS connection and reconnect-backoff settings.
+// Only populated (and only validated) when the auth transport is "nats".
 type NATSConfig struct {
 	URL                string
 	Subject            string
@@ -53,6 +90,12 @@ type NATSConfig struct {
 	ReconnectMaxWaitMS int
 }
 
+// Load assembles the Config from environment variables, applying defaults
+// for optional values and validating the rest. Returns an error naming the
+// offending variable on the first invalid or missing required value — the
+// process is expected to exit rather than run half-configured. The auth
+// transport is auto-detected: AUTH_SERVICE_URL selects h2c and wins over
+// NATS_URL; one of the two must be set.
 func Load() (*Config, error) {
 	natsURL := getenv("NATS_URL", "")
 	authServiceURL := getenv("AUTH_SERVICE_URL", "")
@@ -93,6 +136,11 @@ func Load() (*Config, error) {
 		}
 	}
 
+	ingestCfg, err := loadIngestConfig()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		Port:           port,
 		StoragePath:    getenv("LOCAL_STORAGE_PATH", "../server/.storage"),
@@ -103,6 +151,63 @@ func Load() (*Config, error) {
 		Breaker:        breakerCfg,
 		AlkemioDB:      dbCfg,
 		NATS:           natsCfg,
+		Ingest:         ingestCfg,
+	}, nil
+}
+
+func loadIngestConfig() (IngestConfig, error) {
+	maxUpload, err := getenvInt("MAX_UPLOAD_SIZE", 32<<20)
+	if err != nil {
+		return IngestConfig{}, fmt.Errorf("MAX_UPLOAD_SIZE: %w", err)
+	}
+	if maxUpload <= 0 {
+		return IngestConfig{}, fmt.Errorf("MAX_UPLOAD_SIZE must be positive")
+	}
+	if maxUpload > 1<<30 {
+		// 1 GiB is the validated ceiling of the streaming pipeline
+		// (spec 020 FR-005/SC-001); larger values are unproven territory.
+		return IngestConfig{}, fmt.Errorf("MAX_UPLOAD_SIZE must be <= 1073741824 (1 GiB, the validated ceiling)")
+	}
+
+	idleMS, err := getenvInt("UPLOAD_IDLE_TIMEOUT_MS", 30000)
+	if err != nil {
+		return IngestConfig{}, fmt.Errorf("UPLOAD_IDLE_TIMEOUT_MS: %w", err)
+	}
+	if idleMS <= 0 {
+		return IngestConfig{}, fmt.Errorf("UPLOAD_IDLE_TIMEOUT_MS must be positive")
+	}
+
+	pixelBudget, err := getenvInt("IMAGE_PIXEL_BUDGET", 100_000_000)
+	if err != nil {
+		return IngestConfig{}, fmt.Errorf("IMAGE_PIXEL_BUDGET: %w", err)
+	}
+	if pixelBudget <= 0 {
+		return IngestConfig{}, fmt.Errorf("IMAGE_PIXEL_BUDGET must be positive")
+	}
+
+	discThreshold, err := getenvInt("VIPS_STREAM_DISC_THRESHOLD", 0)
+	if err != nil {
+		return IngestConfig{}, fmt.Errorf("VIPS_STREAM_DISC_THRESHOLD: %w", err)
+	}
+	if discThreshold < 0 {
+		return IngestConfig{}, fmt.Errorf("VIPS_STREAM_DISC_THRESHOLD must be >= 0")
+	}
+
+	pipeLimit, err := getenvInt("VIPS_PIPE_READ_LIMIT", 0)
+	if err != nil {
+		return IngestConfig{}, fmt.Errorf("VIPS_PIPE_READ_LIMIT: %w", err)
+	}
+	if pipeLimit < 0 {
+		return IngestConfig{}, fmt.Errorf("VIPS_PIPE_READ_LIMIT must be >= 0")
+	}
+
+	return IngestConfig{
+		MaxUploadSize:     int64(maxUpload),
+		IdleTimeout:       time.Duration(idleMS) * time.Millisecond,
+		PixelBudget:       int64(pixelBudget),
+		VipsDiscThreshold: int64(discThreshold),
+		VipsScratchDir:    getenv("VIPS_SCRATCH_DIR", ""),
+		VipsPipeReadLimit: int64(pipeLimit),
 	}, nil
 }
 

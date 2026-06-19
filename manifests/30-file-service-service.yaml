@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: alkemio-file-service-service
+spec:
+  ports:
+    - protocol: TCP
+      name: http
+      port: 4003
+      appProtocol: h2c
+  selector:
+    app: alkemio-file-service

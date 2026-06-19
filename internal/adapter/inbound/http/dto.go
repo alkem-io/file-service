@@ -26,6 +26,8 @@ type CreateDocumentResponse struct {
 	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
+// Render writes the response as JSON with HTTP 201 (always — see the type
+// comment for why dedup reuse is not a 200).
 func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -38,6 +40,7 @@ type DeleteDocumentResponse struct {
 	TagsetID        *string `json:"tagsetId,omitempty"`
 }
 
+// Render writes the response as JSON with HTTP 200.
 func (r DeleteDocumentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -57,6 +60,7 @@ type UpdateDocumentResponse struct {
 	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
+// Render writes the response as JSON with HTTP 200.
 func (r UpdateDocumentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -75,9 +79,33 @@ type ReplaceContentResponse struct {
 	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
+// Render writes the response as JSON with HTTP 200.
 func (r ReplaceContentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(r)
+}
+
+// MimeMismatchDetail carries the MIME pair behind a MIME_MISMATCH rejection.
+type MimeMismatchDetail struct {
+	KnownMime    string `json:"knownMime"`
+	DetectedMime string `json:"detectedMime"`
+}
+
+// RejectedContentResponse is the 422 body for content-replace rejections
+// (spec 019). Code is machine-readable and stable: EMPTY_CONTENT or
+// MIME_MISMATCH. Detail is present only for MIME_MISMATCH.
+type RejectedContentResponse struct {
+	Code   string              `json:"code"`
+	Error  string              `json:"error"`
+	Detail *MimeMismatchDetail `json:"detail,omitempty"`
+}
+
+// Render writes the rejection as JSON with HTTP 422 Unprocessable Entity —
+// the request was well-formed; the content itself was refused.
+func (r RejectedContentResponse) Render(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
 	_ = json.NewEncoder(w).Encode(r)
 }
 
@@ -97,6 +125,7 @@ type DocumentMetaResponse struct {
 	UpdatedDate       time.Time `json:"updatedDate"`
 }
 
+// Render writes the response as JSON with HTTP 200.
 func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -131,6 +160,8 @@ type HealthResponse struct {
 	Details map[string]string `json:"details"`
 }
 
+// Render writes the response as JSON with the caller-chosen status code —
+// 200 when healthy, 503 when a dependency check failed.
 func (r HealthResponse) Render(w http.ResponseWriter, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

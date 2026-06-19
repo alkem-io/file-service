@@ -1,10 +1,17 @@
+// Package service is the domain core of the file-service: document upload
+// (buffered and streaming), content replacement with MIME guarding, copy,
+// metadata update, delete with blob refcounting, authorization checks, and
+// the lazy content-metadata backfill. It orchestrates everything through the
+// port interfaces and knows nothing about HTTP, Postgres, or libvips.
 package service
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	"io"
 	"strings"
 	"time"
 
@@ -87,59 +94,26 @@ func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actor
 	}, nil
 }
 
-// CreateDocument processes a file, stores it, and creates a document record.
+// CreateDocument ingests a complete buffer through the streaming pipeline
+// (spec 020): stage → validate → publish. Kept for buffer-shaped callers;
+// the HTTP handler streams the request directly via StageUpload +
+// CompleteUpload. One pipeline, no buffered twin (constitution X).
+//
+// Note: the buffered implementation rejected over-limit/disallowed uploads
+// before any storage work; the pipeline rejects them before *publish*
+// (validation order is a documented consequence of the multipart field
+// order, research R4). Observable outcomes are identical.
 func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
-	if maxFileSize > 0 && len(content) > maxFileSize {
-		return nil, ErrPayloadTooLarge
-	}
-
-	mimeType, err := resolveMIME(s.Processor, content, declaredMIME, allowedMimeTypes)
+	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME)
 	if err != nil {
 		return nil, err
 	}
-
-	result, err := s.Processor.Process(content, mimeType)
+	doc, err := s.CompleteUpload(ctx, su, input, allowedMimeTypes, maxFileSize)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
-	}
-
-	stored, err := s.Storage.Save(result.Content)
-	if err != nil {
-		return nil, fmt.Errorf("store file: %w", err)
-	}
-
-	contentMetadata := processResultToContentMetadata(result, result.MimeType)
-
-	// Caller opt-out: skip the dedup lookup and force a fresh row insert
-	// even when an existing row in this bucket has the same externalID.
-	// Used by placeholder flows (e.g., Collabora documents) where two
-	// logical documents must NOT share a backing row even if their content
-	// hashes collide. The caller-supplied AuthorizationID / TagsetID are
-	// honored on the new row.
-	if input.SkipDedup {
-		return s.insertDocument(ctx, input, stored, result.MimeType, contentMetadata, result.ImageWidth, result.ImageHeight)
-	}
-
-	// Row-level dedup: if a file row already exists for (externalID, storageBucketID),
-	// return it as-is. The caller-supplied AuthorizationID / TagsetID are ignored —
-	// the existing row's values are authoritative. Caller must use Reused=true to
-	// clean up the auth/tagset rows it pre-created.
-	//
-	// Lookup failure (non-not-found): another row may already reference this
-	// blob — deleting it would orphan that row, which is worse than orphaning
-	// a blob (blobs are GC-able). Leave the blob in place.
-	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)
-	if err != nil {
+		su.Discard()
 		return nil, err
 	}
-	if found {
-		existing.Reused = true
-		// Lazy-backfill: legacy image rows may have empty content_metadata.
-		// Best-effort dim measurement so the response carries imageWidth/Height.
-		return s.backfillIfNeeded(ctx, existing), nil
-	}
-
-	return s.insertDocument(ctx, input, stored, result.MimeType, contentMetadata, result.ImageWidth, result.ImageHeight)
+	return doc, nil
 }
 
 // findDedupDocument looks up an existing file row for (externalID, bucketID).
@@ -215,30 +189,65 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }
 
-// resolveMIME determines the effective MIME type and validates it against the allow-list.
-// Empty content: trust declaredMIME (no bytes to detect from).
-// Non-empty: detect from content bytes.
-func resolveMIME(p port.ImageProcessor, content []byte, declaredMIME string, allowedMimeTypes []string) (string, error) {
-	var mimeType string
-	if len(content) == 0 {
-		mimeType = normalizeMIME(declaredMIME)
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
-	} else {
-		mimeType = normalizeMIME(p.DetectMIME(content))
-	}
+// MimeMismatchError reports a content replacement whose detected type is
+// unambiguously different from the document's stored type (FR-004). It
+// matches ErrMimeMismatch via errors.Is.
+type MimeMismatchError struct {
+	Known    string
+	Detected string
+}
 
-	if len(allowedMimeTypes) > 0 {
-		normalized := make([]string, len(allowedMimeTypes))
-		for i, m := range allowedMimeTypes {
-			normalized[i] = normalizeMIME(m)
-		}
-		if !slices.Contains(normalized, mimeType) {
-			return "", ErrUnsupportedMediaType
-		}
+func (e *MimeMismatchError) Error() string {
+	return fmt.Sprintf("content type %q does not match the document's stored type %q", e.Detected, e.Known)
+}
+
+// Is makes every MimeMismatchError match the ErrMimeMismatch sentinel, so
+// callers can branch with errors.Is and only reach for errors.As when they
+// need the concrete MIME pair.
+func (e *MimeMismatchError) Is(target error) bool { return target == ErrMimeMismatch }
+
+// Replace outcomes, persisted on model.StoredFile.ReplaceOutcome so the HTTP
+// adapter can count them (content_replace_outcomes_total) without the domain
+// importing adapter metrics.
+const (
+	ReplaceOutcomeAccepted         = "accepted"
+	ReplaceOutcomeFallback         = "fallback_generic_sniff"
+	ReplaceOutcomeRejectedEmpty    = "rejected_empty"
+	ReplaceOutcomeRejectedMismatch = "rejected_mismatch"
+)
+
+// reconcileReplaceMIME decides the MIME type to persist when replacing a
+// document's content. Unlike resolveMIME (create path), the question here is
+// not "what is this content?" but "is this content compatible with the type
+// this document already has?" — the stored type is authoritative, content
+// detection is only a guard (FR-001..004):
+//
+//	empty content              → ErrEmptyContent (a valid save is never 0 bytes)
+//	known type empty/generic   → accept the sniff (legacy/corrupted rows may
+//	                             self-heal to a concrete type, never downgrade
+//	                             below what they already are)
+//	sniff generic              → keep the known type (container formats and
+//	                             degenerate bodies can't carry their identity)
+//	sniff == known             → keep the known type
+//	concrete sniff ≠ known     → MimeMismatchError (silent relabeling forbidden)
+func (s *FileService) reconcileReplaceMIME(knownMIME string, content []byte) (mimeType, detected, outcome string, err error) {
+	if len(content) == 0 {
+		return "", "", ReplaceOutcomeRejectedEmpty, ErrEmptyContent
 	}
-	return mimeType, nil
+	known := normalizeMIME(knownMIME)
+	detected = normalizeMIME(s.Processor.DetectMIME(content))
+
+	switch {
+	case known == "" || model.IsGenericMIME(known):
+		// No trustworthy stored type to defend; behave like before.
+		return detected, detected, ReplaceOutcomeAccepted, nil
+	case model.IsGenericMIME(detected):
+		return known, detected, ReplaceOutcomeFallback, nil
+	case detected == known:
+		return known, detected, ReplaceOutcomeAccepted, nil
+	default:
+		return "", detected, ReplaceOutcomeRejectedMismatch, &MimeMismatchError{Known: known, Detected: detected}
+	}
 }
 
 // insertDocument builds the Document, attempts a Create, and handles the
@@ -341,26 +350,81 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // is violated. This can't be auto-merged without losing distinct document
 // identity, so we surface it as ErrConflict (HTTP 409). The caller should
 // delete one of the conflicting rows or abort the operation.
+// StoreAndLink stores new content for an existing document from a complete
+// buffer; delegates to the streaming pipeline (spec 020).
 func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, content []byte) (*model.StoredFile, error) {
+	return s.StoreAndLinkStream(ctx, documentID, bytes.NewReader(content))
+}
+
+// StoreAndLinkStream replaces a document's content from a one-pass stream
+// (spec 020 US3) while preserving every 019 semantic: the stored type is
+// authoritative (the sniff — now on the bounded prefix — is only a guard),
+// rejections happen before any storage side effect, and the outcome matrix
+// is unchanged.
+func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UUID, r io.Reader) (*model.StoredFile, error) {
 	doc, err := s.Repo.GetByID(ctx, documentID)
 	if err != nil {
 		return nil, err
 	}
 	oldExternalID := doc.ExternalID
 
-	mimeType := normalizeMIME(s.Processor.DetectMIME(content))
-	result, err := s.Processor.Process(content, mimeType)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrImageProcessing, err)
+	br := bufio.NewReaderSize(r, sniffPrefixSize)
+	prefix, perr := br.Peek(sniffPrefixSize)
+	if perr != nil && !errors.Is(perr, io.EOF) && !errors.Is(perr, bufio.ErrBufferFull) {
+		s.logIngest("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
+		return nil, fmt.Errorf("read replacement prefix: %w", perr)
 	}
 
-	stored, err := s.Storage.Save(result.Content)
+	// The stored type is authoritative across content edits (FR-001); the
+	// content sniff is a guard, never the source of truth. All validation
+	// happens before the stage opens, so a rejection has zero side effects
+	// (FR-007). Empty content = empty prefix (019 FR-003a unchanged).
+	mimeType, detected, outcome, err := s.reconcileReplaceMIME(doc.MimeType, prefix)
 	if err != nil {
+		s.Logger.Warn("content replace rejected",
+			zap.String("documentID", documentID.String()),
+			zap.String("knownMime", normalizeMIME(doc.MimeType)),
+			zap.String("detectedMime", detected),
+			zap.String("outcome", outcome),
+			zap.Error(err))
+		return nil, err
+	}
+	if outcome == ReplaceOutcomeFallback {
+		s.Logger.Info("content replace: generic sniff, keeping stored type",
+			zap.String("documentID", documentID.String()),
+			zap.String("knownMime", mimeType),
+			zap.String("detectedMime", detected),
+			zap.String("outcome", outcome))
+	}
+
+	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0)
+	if err != nil {
+		return nil, err
+	}
+
+	stored, err := su.stage.Commit()
+	if err != nil {
+		su.Discard()
+		s.logIngest("replace stage commit failed", su.MimeType, su.Size, err)
 		return nil, fmt.Errorf("store file: %w", err)
 	}
+	su.done = true
 
-	contentMetadata := processResultToContentMetadata(result, result.MimeType)
-	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, result.MimeType, stored.Size, contentMetadata)
+	// Persist su.MimeType (the transcode output), not the reconciled
+	// mimeType: the streaming transcode may canonicalize the encoding
+	// (HEIC/WebP → JPEG) and the staged bytes ARE that new format. The two
+	// values are identical on every other path (office and non-image types
+	// pass through), and stored types are always post-canonicalization, so
+	// the type-stability invariant (FR-001/FR-005) is preserved: a stored
+	// type can never regress to a generic or mismatched value here.
+	result := port.ProcessResult{
+		MimeType:    su.MimeType,
+		ImageWidth:  su.ImageWidth,
+		ImageHeight: su.ImageHeight,
+		Measured:    su.Measured,
+	}
+	contentMetadata := processResultToContentMetadata(result, su.MimeType)
+	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
 	if err != nil {
 		// Never delete the newly-stored blob on failure: another concurrent
 		// request in any bucket may have already linked this externalID
@@ -386,11 +450,12 @@ func (s *FileService) StoreAndLink(ctx context.Context, documentID uuid.UUID, co
 	}
 
 	return &model.StoredFile{
-		ExternalID:  stored.ExternalID,
-		MimeType:    result.MimeType,
-		Size:        stored.Size,
-		ImageWidth:  result.ImageWidth,
-		ImageHeight: result.ImageHeight,
+		ExternalID:     stored.ExternalID,
+		MimeType:       su.MimeType,
+		Size:           stored.Size,
+		ImageWidth:     su.ImageWidth,
+		ImageHeight:    su.ImageHeight,
+		ReplaceOutcome: outcome,
 	}, nil
 }
 
@@ -422,16 +487,36 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 }
 
 var (
-	ErrForbidden            = errors.New("forbidden")
-	ErrConflict             = errors.New("conflict: document was modified concurrently")
-	ErrPayloadTooLarge      = errors.New("payload too large")
+	// ErrForbidden is returned when the auth evaluation explicitly denies
+	// the actor the required privilege. An evaluation that could not run at
+	// all surfaces as a wrapped transport error instead.
+	ErrForbidden = errors.New("forbidden")
+	// ErrConflict covers both flavors of write conflict: an optimistic-lock
+	// version mismatch on metadata updates, and a content-hash collision
+	// when SkipDedup forbids reusing the existing row.
+	ErrConflict = errors.New("conflict: document was modified concurrently")
+	// ErrPayloadTooLarge rejects an upload exceeding the bucket's maxFileSize
+	// policy (distinct from the transport-level ErrOverLimit cap).
+	ErrPayloadTooLarge = errors.New("payload too large")
+	// ErrUnsupportedMediaType rejects an upload whose detected MIME type is
+	// not in the bucket's allowedMimeTypes policy.
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
-	ErrImageProcessing      = errors.New("image processing failed")
+	// ErrImageProcessing wraps a canonicalization failure for content that
+	// claims to be an image but cannot be processed as one.
+	ErrImageProcessing = errors.New("image processing failed")
+
+	// ErrEmptyContent rejects 0-byte content replacement: a valid office file
+	// is never empty, so an empty body always signals a failed save (FR-003a).
+	ErrEmptyContent = errors.New("empty content: replacement bodies must not be 0 bytes")
+
+	// ErrMimeMismatch is the sentinel for errors.Is matching; the concrete
+	// error carrying the MIME pair is MimeMismatchError (errors.As).
+	ErrMimeMismatch = errors.New("content type does not match the document's stored type")
 )
 
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
-	return strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+	return model.NormalizeMIME(mimeType)
 }
 
 // BackfillIfNeeded is the public entry point for handlers that read a

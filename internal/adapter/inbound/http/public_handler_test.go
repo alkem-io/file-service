@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +15,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 type mockDocRepo struct {
@@ -120,9 +125,12 @@ type mockStorage struct {
 	data    []byte
 	err     error
 	saveErr error
+	saved   []byte // captures the last Save/stage payload (replace-path rejection tests)
+	stages  []*httpMockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
+	m.saved = content
 	if m.saveErr != nil {
 		return model.StoredFile{}, m.saveErr
 	}
@@ -279,4 +287,48 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 	if rr.Code != http.StatusNotModified {
 		t.Fatalf("status = %d, want 304", rr.Code)
 	}
+}
+
+func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {
+	return true, nil
+}
+
+// httpMockStage backs mockStorage.OpenStage for handler-level tests (spec 020).
+type httpMockStage struct {
+	parent    *mockStorage
+	buf       bytes.Buffer
+	committed bool
+	aborted   bool
+}
+
+func (s *httpMockStage) Write(p []byte) (int, error) { return s.buf.Write(p) }
+func (s *httpMockStage) Commit() (model.StoredFile, error) {
+	if s.parent.saveErr != nil {
+		return model.StoredFile{}, s.parent.saveErr
+	}
+	content := s.buf.Bytes()
+	s.parent.saved = content
+	s.committed = true
+	return model.StoredFile{ExternalID: service.ComputeHash(content), Size: len(content), Created: true}, nil
+}
+func (s *httpMockStage) Abort() error { s.aborted = true; return nil }
+
+// StagedReaderAt mirrors the real StageWriter contract: the staging artifact is
+// only readable before Commit/Abort (the local adapter's temp file is gone
+// afterwards), so reading post-lifecycle is an error rather than a stale buffer.
+func (s *httpMockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
+	if s.committed || s.aborted {
+		return nil, 0, errors.New("httpMockStage: reader after commit/abort")
+	}
+	b := s.buf.Bytes()
+	return bytes.NewReader(b), int64(len(b)), nil
+}
+
+func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
+	st := &httpMockStage{parent: m}
+	m.stages = append(m.stages, st)
+	return st, nil
 }

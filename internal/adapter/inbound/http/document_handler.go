@@ -1,3 +1,9 @@
+// Package http is the inbound HTTP adapter: chi routing, the internal
+// document CRUD + streaming-ingest endpoints, the public file-serve endpoint,
+// health/liveness probes, middleware (request ID, actor identity, logging),
+// and the expvar resilience metrics. It translates HTTP requests into domain
+// service calls and domain errors back into stable status codes and JSON
+// bodies; no business rules live here.
 package http
 
 import (
@@ -5,16 +11,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
@@ -23,9 +32,14 @@ type DocumentHandler struct {
 	Service *service.FileService
 	MaxAge  int
 	Logger  *zap.Logger
+
+	// Streaming-ingest guards (spec 020). Zero values fall back to the
+	// historical defaults (32 MiB cap, 30 s idle).
+	MaxUploadSize int64
+	IdleTimeout   time.Duration
 }
 
-// GetMeta handles GET /internal/document/{id}/meta
+// GetMeta handles GET /internal/file/{id}/meta
 func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -47,7 +61,7 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	documentMetaResponse(doc).Render(w)
 }
 
-// GetContent handles GET /internal/document/{id}/content
+// GetContent handles GET /internal/file/{id}/content
 func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -82,73 +96,110 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// parseCreateForm extracts and validates all fields from the multipart create request.
-func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
-	file, header, err := r.FormFile("file")
+// createFields collects the multipart metadata fields by name (spec 020:
+// the fields trail the file part — research R4). Typed struct rather than a
+// map: direct field reads keep generated API docs clean (map-index string
+// literals are misinferred as path parameters by the spec generator).
+type createFields struct {
+	displayName       string
+	storageBucketID   string
+	authorizationID   string
+	tagsetID          string
+	createdBy         string
+	temporaryLocation string
+	skipDedup         string
+	allowedMimeTypes  string
+	maxFileSize       string
+}
+
+func (f *createFields) set(name, value string) {
+	switch name {
+	case "displayName":
+		f.displayName = value
+	case "storageBucketId":
+		f.storageBucketID = value
+	case "authorizationId":
+		f.authorizationID = value
+	case "tagsetId":
+		f.tagsetID = value
+	case "createdBy":
+		f.createdBy = value
+	case "temporaryLocation":
+		f.temporaryLocation = value
+	case "skipDedup":
+		f.skipDedup = value
+	case "allowedMimeTypes":
+		f.allowedMimeTypes = value
+	case "maxFileSize":
+		f.maxFileSize = value
+	}
+}
+
+// parseOptionalUUID parses an optional UUID form field: empty means absent
+// (nil, nil). The error names the field so it can serve directly as a 400
+// body.
+func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(value)
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("missing file part")
+		return nil, fmt.Errorf("invalid %s", field)
 	}
-	defer func() { _ = file.Close() }()
+	return &parsed, nil
+}
 
-	declaredMIME = header.Header.Get("Content-Type")
-
-	content, err = io.ReadAll(file)
+// parseOptionalBool parses an optional boolean form field: empty means
+// false. The error names the field so it can serve directly as a 400 body.
+func parseOptionalBool(value, field string) (bool, error) {
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("failed to read file")
+		return false, fmt.Errorf("invalid %s: must be true or false", field)
+	}
+	return parsed, nil
+}
+
+// buildCreateInput validates the collected metadata fields after the upload
+// has been staged (research R4).
+func buildCreateInput(fields createFields) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
+	if err := validateDisplayName(fields.displayName); err != nil {
+		return input, nil, 0, err
 	}
 
-	displayName := r.FormValue("displayName")
-	if err := validateDisplayName(displayName); err != nil {
-		return nil, "", input, nil, 0, err
-	}
-
-	storageBucketID, err := uuid.Parse(r.FormValue("storageBucketId"))
+	storageBucketID, err := uuid.Parse(fields.storageBucketID)
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("invalid storageBucketId")
+		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(r.FormValue("authorizationId"))
+	authorizationID, err := uuid.Parse(fields.authorizationID)
 	if err != nil {
-		return nil, "", input, nil, 0, fmt.Errorf("invalid authorizationId")
+		return input, nil, 0, fmt.Errorf("invalid authorizationId")
 	}
 
-	var tagsetID *uuid.UUID
-	if v := r.FormValue("tagsetId"); v != "" {
-		parsed, err := uuid.Parse(v)
-		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid tagsetId")
-		}
-		tagsetID = &parsed
+	tagsetID, err := parseOptionalUUID(fields.tagsetID, "tagsetId")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	var createdBy *uuid.UUID
-	if v := r.FormValue("createdBy"); v != "" {
-		parsed, err := uuid.Parse(v)
-		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid createdBy")
-		}
-		createdBy = &parsed
+	createdBy, err := parseOptionalUUID(fields.createdBy, "createdBy")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	temporaryLocation := false
-	if v := r.FormValue("temporaryLocation"); v != "" {
-		parsed, err := strconv.ParseBool(v)
-		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid temporaryLocation: must be true or false")
-		}
-		temporaryLocation = parsed
+	temporaryLocation, err := parseOptionalBool(fields.temporaryLocation, "temporaryLocation")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	skipDedup := false
-	if v := r.FormValue("skipDedup"); v != "" {
-		parsed, err := strconv.ParseBool(v)
-		if err != nil {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid skipDedup: must be true or false")
-		}
-		skipDedup = parsed
+	skipDedup, err := parseOptionalBool(fields.skipDedup, "skipDedup")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	if v := r.FormValue("allowedMimeTypes"); v != "" {
+	if v := fields.allowedMimeTypes; v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
 			if trimmed := strings.TrimSpace(p); trimmed != "" {
@@ -157,16 +208,16 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		}
 	}
 
-	if v := r.FormValue("maxFileSize"); v != "" {
+	if v := fields.maxFileSize; v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil || parsed < 0 {
-			return nil, "", input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
+			return input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
 		}
 		maxFileSize = parsed
 	}
 
 	input = model.CreateDocumentInput{
-		DisplayName:       displayName,
+		DisplayName:       fields.displayName,
 		CreatedBy:         createdBy,
 		TemporaryLocation: temporaryLocation,
 		StorageBucketID:   storageBucketID,
@@ -174,54 +225,109 @@ func parseCreateForm(r *http.Request) (content []byte, declaredMIME string, inpu
 		TagsetID:          tagsetID,
 		SkipDedup:         skipDedup,
 	}
-
-	return content, declaredMIME, input, allowedMimeTypes, maxFileSize, nil
+	return input, allowedMimeTypes, maxFileSize, nil
 }
 
-// Create handles POST /internal/document
+// writeIngestTransportError maps a streaming transport failure to its HTTP
+// response and outcome counter (spec 020 FR-008).
+func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrOverLimit):
+		IngestOutcomes.Add("rejected_over_limit", 1)
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "upload exceeds the configured size limit")
+	case errors.Is(err, service.ErrStalled):
+		IngestOutcomes.Add("stalled", 1)
+		writeJSONError(w, http.StatusRequestTimeout, "upload stalled: no bytes received within the idle timeout")
+	case errors.As(err, new(*service.MimeMismatchError)), errors.Is(err, service.ErrEmptyContent):
+		// replace-path semantics handled by the caller; not transport
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+	default:
+		// Client went away (connection reset, unexpected EOF, multipart
+		// truncation): nothing useful to send, but try.
+		IngestOutcomes.Add("client_abort", 1)
+		writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
+	}
+}
+
+// Create handles POST /internal/file — streaming ingest (spec 020): the
+// file part flows request → sniff → (transcode) → staged storage without
+// whole-file buffering. Parts are processed in whatever order they arrive;
+// metadata validation always happens after the loop, before the stage is
+// published. (The known caller sends the file part first — research R4 —
+// which is why bucket-level limits cannot gate the stream early; the
+// handler itself does not depend on any ordering.)
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
+	capBytes := h.MaxUploadSize
+	if capBytes <= 0 {
+		capBytes = 32 << 20
+	}
+	idle := h.IdleTimeout
+	if idle <= 0 {
+		idle = 30 * time.Second
+	}
+	pr := newProgressReader(w, r.Body, capBytes, idle)
+	defer func() { _ = pr.Close() }()
+	r.Body = pr
+
+	mr, err := r.MultipartReader()
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
+
+	var fields createFields
+	var staged *service.StagedUpload
 	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
+		// Any non-success exit path discards the stage (FR-006); Discard
+		// after CompleteUpload is a no-op.
+		staged.Discard()
 	}()
 
-	content, declaredMIME, input, allowedMimeTypes, maxFileSize, err := parseCreateForm(r)
+	for {
+		part, perr := mr.NextPart()
+		if errors.Is(perr, io.EOF) {
+			break
+		}
+		if perr != nil {
+			h.writeIngestTransportError(w, perr)
+			return
+		}
+
+		if part.FormName() == "file" {
+			if staged != nil {
+				writeJSONError(w, http.StatusBadRequest, "duplicate file part")
+				return
+			}
+			declaredMIME := part.Header.Get("Content-Type")
+			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME)
+			if err != nil {
+				h.writeStageError(w, err)
+				return
+			}
+		} else if !h.readMetadataField(w, &fields, part) {
+			return
+		}
+		_ = part.Close()
+	}
+
+	if staged == nil {
+		writeJSONError(w, http.StatusBadRequest, "missing file part")
+		return
+	}
+
+	input, allowedMimeTypes, maxFileSize, err := buildCreateInput(fields)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	doc, err := h.Service.CreateDocument(r.Context(), input, content, declaredMIME, allowedMimeTypes, maxFileSize)
+	doc, err := h.Service.CompleteUpload(r.Context(), staged, input, allowedMimeTypes, maxFileSize)
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrPayloadTooLarge):
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
-		case errors.Is(err, service.ErrUnsupportedMediaType):
-			writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
-		case errors.Is(err, service.ErrImageProcessing):
-			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
-		case errors.Is(err, service.ErrConflict):
-			// Reachable only when SkipDedup=true and a row with this
-			// (externalID, storageBucketID) already exists.
-			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
-		default:
-			h.Logger.Error("failed to create document", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		h.writeCompleteUploadError(w, err)
 		return
 	}
 
+	IngestOutcomes.Add("accepted", 1)
 	CreateDocumentResponse{
 		ID:          doc.ID.String(),
 		ExternalID:  doc.ExternalID,
@@ -231,6 +337,82 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ImageWidth:  doc.ImageWidth,
 		ImageHeight: doc.ImageHeight,
 	}.Render(w)
+}
+
+// readMetadataField reads one trailing (non-file) multipart part into
+// fields, enforcing the per-field size cap. 16 KiB is ample for every
+// metadata field (the largest legit value, a long allowedMimeTypes list, is
+// ~2.5 KiB) and bounds per-request abuse surface. It reads one byte past
+// the cap so an oversized field is REJECTED rather than silently truncated
+// into a different request. Reports false after writing the error response
+// itself.
+func (h *DocumentHandler) readMetadataField(w http.ResponseWriter, fields *createFields, part *multipart.Part) bool {
+	const maxCreateFieldBytes = 16 << 10
+	b, err := io.ReadAll(io.LimitReader(part, maxCreateFieldBytes+1))
+	if err != nil {
+		h.writeIngestTransportError(w, err)
+		return false
+	}
+	if len(b) > maxCreateFieldBytes {
+		writeJSONError(w, http.StatusBadRequest, part.FormName()+" exceeds the 16 KiB field limit")
+		return false
+	}
+	fields.set(part.FormName(), string(b))
+	return true
+}
+
+// writeCompleteUploadError maps a CompleteUpload failure to its HTTP
+// response and outcome counter (spec 020 FR-008): bucket-policy rejections
+// (size, MIME) are 413/415, a SkipDedup content collision is 409, anything
+// else is a logged 500.
+func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrPayloadTooLarge):
+		IngestOutcomes.Add("rejected_bucket_policy", 1)
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "file too large")
+	case errors.Is(err, service.ErrUnsupportedMediaType):
+		IngestOutcomes.Add("rejected_bucket_policy", 1)
+		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
+	case errors.Is(err, service.ErrConflict):
+		writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
+	default:
+		IngestOutcomes.Add("failed_mid_stream", 1)
+		h.Logger.Error("failed to create document", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// writeStageError maps a StageUpload failure to its HTTP response and
+// outcome counter (spec 020 FR-008).
+func (h *DocumentHandler) writeStageError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
+		h.writeIngestTransportError(w, err)
+	case errors.Is(err, port.ErrPixelBudgetExceeded):
+		IngestOutcomes.Add("rejected_pixel_budget", 1)
+		RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
+	case errors.Is(err, service.ErrImageProcessing):
+		IngestOutcomes.Add("failed_mid_stream", 1)
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		if isClientStreamError(err) {
+			IngestOutcomes.Add("client_abort", 1)
+			writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
+		} else {
+			IngestOutcomes.Add("failed_mid_stream", 1)
+			h.Logger.Error("failed to stage upload", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+		}
+	}
+}
+
+// isClientStreamError reports request-stream failures attributable to the
+// client (abort, reset, truncated multipart) rather than to the service.
+func isClientStreamError(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		strings.Contains(err.Error(), "connection reset") ||
+		strings.Contains(err.Error(), "client disconnected") ||
+		strings.Contains(err.Error(), "multipart")
 }
 
 // Copy handles POST /internal/file/copy.
@@ -243,14 +425,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 // (existing row is authoritative), matching the createDocument contract.
 func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	var body CopyDocumentRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return
-	}
-	if dec.More() {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 
@@ -325,7 +500,7 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	}.Render(w)
 }
 
-// Delete handles DELETE /internal/document/{id}
+// Delete handles DELETE /internal/file/{id}
 func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -376,14 +551,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body UpdateDocumentRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields() // immutable fields like mimeType must not silently no-op
-	if err := dec.Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return
-	}
-	if dec.More() {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 
@@ -410,25 +578,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bucketID := doc.StorageBucketID
-	if body.StorageBucketID != nil {
-		parsed, err := uuid.Parse(*body.StorageBucketID)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid storageBucketId")
-			return
-		}
-		bucketID = parsed
+	bucketID, err := resolveBucketID(doc, body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-
-	tempLoc := doc.TemporaryLocation
-	if body.TemporaryLocation != nil {
-		tempLoc = *body.TemporaryLocation
-	}
-
-	displayName := doc.DisplayName
-	if body.DisplayName != nil {
-		displayName = *body.DisplayName
-	}
+	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
 	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
 	if err != nil {
@@ -485,7 +640,7 @@ func validateDisplayName(name string) error {
 	return nil
 }
 
-// ReplaceContent handles PUT /internal/document/{id}/content (store-and-link)
+// ReplaceContent handles PUT /internal/file/{id}/content (store-and-link)
 func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -493,27 +648,45 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20) // 32MB limit
-	content, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "failed to read request body")
-		return
+	capBytes := h.MaxUploadSize
+	if capBytes <= 0 {
+		capBytes = 32 << 20
 	}
+	idle := h.IdleTimeout
+	if idle <= 0 {
+		idle = 30 * time.Second
+	}
+	pr := newProgressReader(w, r.Body, capBytes, idle)
+	defer func() { _ = pr.Close() }()
 
 	// ReplaceContent note: if the new content's hash matches another file row in
 	// the same bucket, the unique(externalID, storageBucketID) index is violated.
 	// The service returns ErrConflict → 409 in that case. UpdateFile (PATCH) does
 	// not touch externalID, so it cannot trigger this.
-	result, err := h.Service.StoreAndLink(r.Context(), docID, content)
+	result, err := h.Service.StoreAndLinkStream(r.Context(), docID, pr)
 	if err != nil {
+		var mismatch *service.MimeMismatchError
 		switch {
+		case errors.Is(err, service.ErrOverLimit), errors.Is(err, service.ErrStalled):
+			h.writeIngestTransportError(w, err)
+		case errors.Is(err, port.ErrPixelBudgetExceeded):
+			IngestOutcomes.Add("rejected_pixel_budget", 1)
+			RejectedContentResponse{Code: "PIXEL_BUDGET_EXCEEDED", Error: err.Error()}.Render(w)
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "document not found")
+		case errors.Is(err, service.ErrEmptyContent):
+			ReplaceOutcomes.Add(service.ReplaceOutcomeRejectedEmpty, 1)
+			RejectedContentResponse{Code: "EMPTY_CONTENT", Error: err.Error()}.Render(w)
+		case errors.As(err, &mismatch):
+			ReplaceOutcomes.Add(service.ReplaceOutcomeRejectedMismatch, 1)
+			RejectedContentResponse{
+				Code:  "MIME_MISMATCH",
+				Error: err.Error(),
+				Detail: &MimeMismatchDetail{
+					KnownMime:    mismatch.Known,
+					DetectedMime: mismatch.Detected,
+				},
+			}.Render(w)
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, service.ErrConflict):
@@ -523,6 +696,9 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
 		return
+	}
+	if result.ReplaceOutcome != "" {
+		ReplaceOutcomes.Add(result.ReplaceOutcome, 1)
 	}
 
 	ReplaceContentResponse{
@@ -536,6 +712,58 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 
 func parseDocID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "id"))
+}
+
+// decodeStrictJSON decodes the request body into dst, rejecting unknown
+// fields and any trailing data after the first JSON object. It reports true
+// on success; on failure it returns false AFTER writing the 400 response
+// itself, so callers must simply return without touching w further.
+//
+// DisallowUnknownFields is load-bearing: immutable fields (e.g. mimeType on
+// PATCH) must surface as a 400 rather than silently no-op.
+func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) bool {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+		return false
+	}
+	return true
+}
+
+// resolveBucketID resolves the effective storage bucket for a PATCH: the
+// validated UUID from body.storageBucketId when present, otherwise the
+// document's current bucket. A malformed storageBucketId yields an error
+// whose message is safe to return verbatim as a 400 body.
+func resolveBucketID(doc model.Document, body UpdateDocumentRequest) (uuid.UUID, error) {
+	if body.StorageBucketID == nil {
+		return doc.StorageBucketID, nil
+	}
+	parsed, err := uuid.Parse(*body.StorageBucketID)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("invalid storageBucketId")
+	}
+	return parsed, nil
+}
+
+// mergeUpdateFallbacks merges the validation-free PATCH fields over the
+// row's current values: fields present in the body win, omitted fields keep
+// what the document already has. storageBucketId is resolved separately by
+// resolveBucketID because it needs UUID validation first.
+func mergeUpdateFallbacks(doc model.Document, body UpdateDocumentRequest) (tempLoc bool, displayName string) {
+	tempLoc = doc.TemporaryLocation
+	if body.TemporaryLocation != nil {
+		tempLoc = *body.TemporaryLocation
+	}
+	displayName = doc.DisplayName
+	if body.DisplayName != nil {
+		displayName = *body.DisplayName
+	}
+	return tempLoc, displayName
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {

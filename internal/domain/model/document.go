@@ -1,3 +1,8 @@
+// Package model holds the domain types of the file-service core — documents,
+// content metadata, MIME classification helpers, auth results — plus the
+// sentinel errors adapters translate their backend failures into. It depends
+// on nothing but the standard library and uuid, so every other layer can
+// import it freely.
 package model
 
 import (
@@ -113,6 +118,11 @@ type StoredFile struct {
 	// surface dims on ReplaceContentResponse without re-reading the row.
 	ImageWidth  *int
 	ImageHeight *int
+
+	// ReplaceOutcome reports how StoreAndLink reconciled the MIME type
+	// (accepted | fallback_generic_sniff). The HTTP adapter counts it in
+	// content_replace_outcomes_total; empty for non-replace flows.
+	ReplaceOutcome string
 }
 
 // AuthResult represents the outcome of an authorization check.

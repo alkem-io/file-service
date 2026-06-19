@@ -8,11 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
-	"go.uber.org/zap"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	gobreaker "github.com/sony/gobreaker/v2"
+	"go.uber.org/zap"
 
 	httpAdapter "github.com/alkem-io/file-service/internal/adapter/inbound/http"
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb"
@@ -67,11 +64,20 @@ func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port
 }
 
 func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) *service.FileService {
+	// imaging.New runs vips.Startup (vips build); the streaming knobs must
+	// be applied to an initialized libvips, so configure AFTER New.
+	processor := imaging.New()
+	imaging.ConfigureStreaming(imaging.StreamingConfig{
+		DiscThreshold: cfg.Ingest.VipsDiscThreshold,
+		ScratchDir:    cfg.Ingest.VipsScratchDir,
+		PipeReadLimit: cfg.Ingest.VipsPipeReadLimit,
+		PixelBudget:   cfg.Ingest.PixelBudget,
+	})
 	return &service.FileService{
 		Repo:      alkemiodb.New(pool),
 		Auth:      auth,
 		Storage:   local.New(cfg.StoragePath),
-		Processor: imaging.New(),
+		Processor: processor,
 		Logger:    logger,
 	}
 }
@@ -90,9 +96,11 @@ func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc 
 			Logger:  logger,
 		},
 		DocumentHandler: &httpAdapter.DocumentHandler{
-			Service: fileSvc,
-			MaxAge:  maxAge,
-			Logger:  logger,
+			Service:       fileSvc,
+			MaxAge:        maxAge,
+			Logger:        logger,
+			MaxUploadSize: cfg.Ingest.MaxUploadSize,
+			IdleTimeout:   cfg.Ingest.IdleTimeout,
 		},
 		HealthHandler: newHealthHandler(pool, nc),
 		Logger:        logger,
@@ -108,17 +116,26 @@ func newHealthHandler(pool *pgxpool.Pool, nc *nats.Conn) *httpAdapter.HealthHand
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {
-	h2s := &http2.Server{
-		MaxConcurrentStreams: 100,
-		IdleTimeout:          120 * time.Second,
-	}
+	// Native unencrypted HTTP/2 (Go ≥1.24) replaces the deprecated
+	// x/net h2c wrapper; in-cluster clients (server adapter, wopi) speak
+	// h2c to this service.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 	return &http.Server{
-		Addr:           fmt.Sprintf(":%d", port),
-		Handler:        h2c.NewHandler(handler, h2s),
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   60 * time.Second,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 1 << 20, // 1MB
+		Addr:      fmt.Sprintf(":%d", port),
+		Handler:   handler,
+		Protocols: protocols,
+		HTTP2:     &http.HTTP2Config{MaxConcurrentStreams: 100},
+		// Spec 020 (FR-009): the global ReadTimeout is replaced by a header
+		// deadline + per-request read deadlines. Upload handlers extend the
+		// deadline on progress (progressReader); every other route gets a
+		// fixed 30 s read deadline from the router middleware, preserving
+		// the pre-020 behavior.
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 }
 
@@ -128,4 +145,22 @@ func shutdownServer(srv *http.Server, logger *zap.Logger) {
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("shutdown error", zap.Error(err))
 	}
+}
+
+// runMimeRepair executes the boot-time MIME repair (spec 019 FR-006) and
+// feeds the summary into the mime_repair_total metric. Failures are logged,
+// never fatal — the job is independent of request serving and reruns on the
+// next boot.
+func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *zap.Logger) {
+	httpAdapter.InitMetrics()
+	sum := fileSvc.RunMimeRepair(ctx)
+	httpAdapter.MimeRepairOps.Add("relabeled", int64(sum.Relabeled))
+	httpAdapter.MimeRepairOps.Add("unrecoverable", int64(sum.Unrecoverable))
+	httpAdapter.MimeRepairOps.Add("skipped_not_office", int64(sum.SkippedNotOffice))
+	httpAdapter.MimeRepairOps.Add("errors", int64(sum.Errors))
+	logger.Info("mime-repair metrics recorded",
+		zap.Int("relabeled", sum.Relabeled),
+		zap.Int("unrecoverable", sum.Unrecoverable),
+		zap.Int("skipped_not_office", sum.SkippedNotOffice),
+		zap.Int("errors", sum.Errors))
 }

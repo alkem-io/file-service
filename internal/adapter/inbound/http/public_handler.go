@@ -24,7 +24,7 @@ type PublicHandler struct {
 	Logger  *zap.Logger
 }
 
-// ServeDocument handles GET /rest/storage/document/{id}
+// ServeDocument handles GET /rest/storage/file/{id} (and the /rest/storage/document/{id} back-compat alias)
 func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	docID, err := uuid.Parse(idStr)
