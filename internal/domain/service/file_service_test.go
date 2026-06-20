@@ -18,6 +18,10 @@ import (
 
 var nopLogger = zap.NewNop()
 
+// ptrUUID returns the address of u, for fields like
+// model.CreateDocumentInput.AuthorizationID which are *uuid.UUID.
+func ptrUUID(u uuid.UUID) *uuid.UUID { return &u }
+
 // --- Mocks ---
 
 type mockRepo struct {
@@ -40,6 +44,11 @@ type mockRepo struct {
 	// Captured args from Create / UpdateFile content_metadata params.
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
+
+	// lastCreateDoc captures the full document passed to Create so tests can
+	// assert how the service maps input fields (e.g. a nil AuthorizationID
+	// must reach the repo as uuid.Nil → NULL authz column).
+	lastCreateDoc model.Document
 
 	// Replace-path capture (spec 019): persisted MIME and call count.
 	updateFileCalls    int
@@ -83,6 +92,7 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
 	m.lastCreateContentMetadata = contentMetadata
+	m.lastCreateDoc = doc
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
 	}
@@ -273,7 +283,7 @@ func TestCreateDocument_Happy(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
@@ -288,6 +298,37 @@ func TestCreateDocument_Happy(t *testing.T) {
 	}
 	if doc.Reused {
 		t.Error("expected Reused=false for new content")
+	}
+}
+
+// A nil AuthorizationID (an internal caller — e.g. the collaboration snapshot
+// store — that omits authz so the row's authz column is NULL) must reach the
+// repository as uuid.Nil, which the adapter maps to a NULL column. UNIQUE on
+// authorizationId then permits any number of such rows, so many snapshots can
+// coexist in one bucket.
+func TestCreateDocument_NilAuthorization_PersistsAsNil(t *testing.T) {
+	repo := &mockRepo{}
+	svc := &FileService{Logger: nopLogger,
+		Repo:      repo,
+		Storage:   &mockStorage{},
+		Processor: &mockProcessor{},
+	}
+
+	input := model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: nil, // internal snapshot blob → NULL authz
+	}
+
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.Reused {
+		t.Error("expected Reused=false for new content")
+	}
+	if repo.lastCreateDoc.AuthorizationID != uuid.Nil {
+		t.Errorf("persisted AuthorizationID = %v, want uuid.Nil (→ NULL column)", repo.lastCreateDoc.AuthorizationID)
 	}
 }
 
@@ -318,7 +359,7 @@ func TestCreateDocument_Dedup_SameContentSameBucket_ReturnsExisting(t *testing.T
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: callerAuth,
+		AuthorizationID: ptrUUID(callerAuth),
 		TagsetID:        &callerTagset,
 	}
 
@@ -355,7 +396,7 @@ func TestCreateDocument_Dedup_SameContentDifferentBucket_InsertsNew(t *testing.T
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -401,7 +442,7 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -463,7 +504,7 @@ func TestCreateDocument_Dedup_CreateRace_WinnerNotYetVisible_RetriesThenReturnsW
 	input := model.CreateDocumentInput{
 		DisplayName:     "empty-memo.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -485,12 +526,13 @@ func TestCreateDocument_Dedup_CreateRace_WinnerNotYetVisible_RetriesThenReturnsW
 	}
 }
 
-// Terminal case: Create hit ErrDuplicateKey but the winner is never visible
-// (genuinely missing row — e.g. winner rolled back, or visibility never
-// settles). The recovery must exhaust its bounded retries and then surface a
-// wrapped error rather than spin forever. The pre-create check is one find;
-// the re-query is then attempted multiple times.
-func TestCreateDocument_Dedup_CreateRace_WinnerNeverVisible_ExhaustsRetriesAndErrors(t *testing.T) {
+// Terminal case: Create hit ErrDuplicateKey but no (externalID, bucket) winner
+// ever materializes. After exhausting its bounded retries the service concludes
+// this was NOT the content-dedup race but a UNIQUE(authorizationId)/
+// UNIQUE(tagsetId) collision — a client conflict — and surfaces ErrConflict
+// (409) rather than a phantom 500. The pre-create check is one find; the
+// re-query is then attempted multiple times before the classification fires.
+func TestCreateDocument_Dedup_CreateRace_WinnerNeverVisible_ClassifiesAsConflict(t *testing.T) {
 	bucket := uuid.New()
 	callCount := 0
 	repo := &mockRepoRace{
@@ -508,13 +550,14 @@ func TestCreateDocument_Dedup_CreateRace_WinnerNeverVisible_ExhaustsRetriesAndEr
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
-	if err == nil {
-		t.Fatal("expected an error when the race winner never becomes visible")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict (authz/tagset collision, not a 500)", err)
 	}
-	// Must have retried the re-query (more than the single pre-create find).
+	// Must have retried the re-query (more than the single pre-create find)
+	// before classifying the violation.
 	if repo.findCalls < 3 {
 		t.Errorf("expected the re-query to be retried before giving up: findCalls = %d, want >= 3", repo.findCalls)
 	}
@@ -544,7 +587,7 @@ func TestCreateDocument_Dedup_CreateRace_ReQueryTransportError_FailsFast(t *test
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
@@ -586,7 +629,7 @@ func TestCreateDocument_Dedup_CreateRace_ContextCancelledDuringBackoff(t *testin
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	_, err := svc.CreateDocument(ctx, input, []byte("content"), "", nil, 0)
 	if err == nil {
@@ -617,7 +660,7 @@ func TestCreateDocument_SkipDedup_InsertsFreshRowWhenContentExists(t *testing.T)
 	input := model.CreateDocumentInput{
 		DisplayName:     "placeholder.docx",
 		StorageBucketID: bucket,
-		AuthorizationID: callerAuth,
+		AuthorizationID: ptrUUID(callerAuth),
 		TagsetID:        &callerTagset,
 		SkipDedup:       true,
 	}
@@ -661,7 +704,7 @@ func TestCreateDocument_SkipDedup_EmptyContent_GetsFreshRow(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "doc.docx",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 		SkipDedup:       true,
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}, 0)
@@ -694,7 +737,7 @@ func TestCreateDocument_SkipDedupOmitted_DedupStillApplies(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.txt",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 		// SkipDedup omitted → defaults to false
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
@@ -725,7 +768,7 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "test.docx",
 		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 		SkipDedup:       true,
 	}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
@@ -783,7 +826,7 @@ func TestCreateDocument_TooLarge(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "big.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "big.bin", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 3)
 	if !errors.Is(err, ErrPayloadTooLarge) {
 		t.Errorf("expected ErrPayloadTooLarge, got %v", err)
@@ -797,7 +840,7 @@ func TestCreateDocument_UnsupportedMIME(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "test.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "test.bin", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", []string{"image/jpeg"}, 0)
 	if !errors.Is(err, ErrUnsupportedMediaType) {
 		t.Errorf("expected ErrUnsupportedMediaType, got %v", err)
@@ -811,7 +854,7 @@ func TestCreateDocument_EmptyContent_UsesDeclaredMIME(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "new.docx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "new.docx", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -828,7 +871,7 @@ func TestCreateDocument_EmptyContent_RejectsDisallowedMIME(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "bad.exe", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "bad.exe", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte{}, "application/x-executable", []string{"image/png", "image/jpeg"}, 0)
 	if !errors.Is(err, ErrUnsupportedMediaType) {
 		t.Errorf("expected ErrUnsupportedMediaType, got %v", err)
@@ -848,7 +891,7 @@ func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error")
@@ -1295,7 +1338,7 @@ func TestCreateDocument_StorageFails(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error for storage failure")
@@ -1335,7 +1378,7 @@ func TestCreateDocument_ProcessorFails(t *testing.T) {
 		Processor: &mockProcessor{processErr: errors.New("corrupt image"), detectMIME: "image/png"},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "bad.jpg", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error for processor failure")
@@ -1462,7 +1505,7 @@ func TestCreateDocument_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 		Processor: &mockProcessor{},
 	}
 
-	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "test.txt", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err == nil {
 		t.Fatal("expected error")
@@ -1533,7 +1576,7 @@ func TestCreateDocument_DedupHitOnLegacyImageRow_TriggersBackfill(t *testing.T) 
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1579,7 +1622,7 @@ func TestCreateDocument_DedupHitOnNonImage_NoBackfill(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "doc.pdf",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1611,7 +1654,7 @@ func TestCreateDocument_DedupHit_MeasureDimsFails_PersistsSentinel(t *testing.T)
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1653,7 +1696,7 @@ func TestCreateDocument_DedupHit_NoDecoderAvailable_SkipsPersist(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.png",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1688,7 +1731,7 @@ func TestCreateDocument_DedupHit_StorageReadFails_GracefulDegrade(t *testing.T) 
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1723,7 +1766,7 @@ func TestCreateDocument_DedupHit_PersistFails_ResponseStillCarriesDims(t *testin
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1763,7 +1806,7 @@ func TestCreateDocument_DedupHit_AlreadyMeasured_SkipsBackfill(t *testing.T) {
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -1801,7 +1844,7 @@ func TestCreateDocument_DedupHit_DecodeFailedSentinel_SkipsBackfill(t *testing.T
 	input := model.CreateDocumentInput{
 		DisplayName:     "img.jpg",
 		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
+		AuthorizationID: ptrUUID(uuid.New()),
 	}
 	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if err != nil {
@@ -2100,7 +2143,7 @@ func TestCreateDocument_ConcurrentIdenticalContent_BothDedupNo500(t *testing.T) 
 			input := model.CreateDocumentInput{
 				DisplayName:     "empty-memo.txt",
 				StorageBucketID: bucket,
-				AuthorizationID: uuid.New(),
+				AuthorizationID: ptrUUID(uuid.New()),
 			}
 			start.Wait() // release all goroutines together
 			doc, err := svc.CreateDocument(context.Background(), input, content, "", nil, 0)

@@ -78,8 +78,12 @@ type CreateDocumentInput struct {
 	CreatedBy         *uuid.UUID
 	TemporaryLocation bool
 	StorageBucketID   uuid.UUID
-	AuthorizationID   uuid.UUID
-	TagsetID          *uuid.UUID
+	// AuthorizationID is optional (nil = NULL authz column). file's
+	// authorizationId is UNIQUE, so callers needing many rows in one bucket
+	// (e.g. collaboration snapshots) leave it nil; the standard server upload
+	// path always supplies a freshly-minted authorization_policy id.
+	AuthorizationID *uuid.UUID
+	TagsetID        *uuid.UUID
 
 	// SkipDedup, when true, bypasses the per-bucket content-hash dedup
 	// lookup and forces a fresh row insert even if an existing row in the

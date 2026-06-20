@@ -174,9 +174,14 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(fields.authorizationID)
+	// authorizationId is OPTIONAL: an internal caller (e.g. the collaboration
+	// snapshot store) omits it so the row's authz column is NULL. file's
+	// authorizationId carries a UNIQUE constraint, so callers that need many
+	// rows in one bucket (snapshots) MUST leave it empty rather than reuse a
+	// single fixed id.
+	authorizationID, err := parseOptionalUUID(fields.authorizationID, "authorizationId")
 	if err != nil {
-		return input, nil, 0, fmt.Errorf("invalid authorizationId")
+		return input, nil, 0, err
 	}
 
 	tagsetID, err := parseOptionalUUID(fields.tagsetID, "tagsetId")

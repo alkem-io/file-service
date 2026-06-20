@@ -35,6 +35,27 @@ func TestUuidToPgxNullable_NonNil(t *testing.T) {
 	}
 }
 
+func TestUuidToPgxNullableNil_Nil(t *testing.T) {
+	// uuid.Nil (the value-typed zero) MUST map to a NULL column so an absent
+	// authorizationId persists as NULL — UNIQUE(authorizationId) permits any
+	// number of NULLs, which is what lets many snapshots coexist in one bucket.
+	pgxID := uuidToPgxNullableNil(uuid.Nil)
+	if pgxID.Valid {
+		t.Error("expected Valid=false (NULL) for uuid.Nil")
+	}
+}
+
+func TestUuidToPgxNullableNil_NonNil(t *testing.T) {
+	id := uuid.New()
+	pgxID := uuidToPgxNullableNil(id)
+	if !pgxID.Valid {
+		t.Error("expected Valid=true for a real id")
+	}
+	if pgxID.Bytes != id {
+		t.Error("bytes mismatch")
+	}
+}
+
 func TestPgxToUUID_Valid(t *testing.T) {
 	id := uuid.New()
 	pgxID := pgtype.UUID{Bytes: id, Valid: true}

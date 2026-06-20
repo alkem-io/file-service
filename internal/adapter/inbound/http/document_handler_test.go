@@ -256,6 +256,35 @@ func TestDocumentHandler_Create_Success(t *testing.T) {
 	}
 }
 
+// An internal caller (e.g. the collaboration snapshot store) may omit the
+// authorizationId multipart field entirely. The create MUST accept it (the row
+// gets NULL authz) rather than reject it as "invalid authorizationId" — that
+// rejection is what previously crashed snapshot persistence.
+func TestDocumentHandler_Create_Success_OmittedAuthorizationId(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "snapshot.ybin")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "collaboration-snapshot")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	// authorizationId deliberately omitted → NULL authz column.
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (omitted authz accepted), body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestDocumentHandler_Create_Success_NotReused(t *testing.T) {
 	h, _, _ := newDocHandler()
 

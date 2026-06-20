@@ -82,7 +82,7 @@ func TestStageUpload_PassThroughEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	doc, err := svc.CompleteUpload(context.Background(), su, input, nil, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestStageUpload_ClientAbortAborts(t *testing.T) {
 func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
 	storage := &mockStorage{}
 	svc := newIngestService(storage, &mockRepo{})
-	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 
 	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("plain text body")), "")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestCompleteUpload_DedupAtEnd(t *testing.T) {
 	storage := &mockStorage{stageDedupHit: true}
 	repo := &mockRepo{findDoc: &existing}
 	svc := newIngestService(storage, repo)
-	input := model.CreateDocumentInput{DisplayName: "dup.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "dup.bin", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 
 	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("dup content")), "")
 	if err != nil {
@@ -253,7 +253,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 			name: "accepted",
 			run: func(svc *FileService) {
 				su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("ok")), "")
-				input := model.CreateDocumentInput{DisplayName: "a", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+				input := model.CreateDocumentInput{DisplayName: "a", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 				_, _ = svc.CompleteUpload(context.Background(), su, input, nil, 0)
 			},
 			wantMsg: "ingest accepted",

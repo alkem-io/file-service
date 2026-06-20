@@ -176,7 +176,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		CreatedBy:         input.CreatedBy,
 		TemporaryLocation: false,
 		StorageBucketID:   input.DestinationBucketID,
-		AuthorizationID:   input.AuthorizationID,
+		AuthorizationID:   &input.AuthorizationID,
 		TagsetID:          input.TagsetID,
 		SkipDedup:         input.SkipDedup,
 	}
@@ -281,7 +281,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		CreatedBy:         input.CreatedBy,
 		TemporaryLocation: input.TemporaryLocation,
 		StorageBucketID:   input.StorageBucketID,
-		AuthorizationID:   input.AuthorizationID,
+		AuthorizationID:   derefUUID(input.AuthorizationID),
 		TagsetID:          input.TagsetID,
 		CreatedDate:       now,
 		UpdatedDate:       now,
@@ -303,13 +303,28 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Default path: another concurrent creator won the race on the
-		// unique(externalID, storageBucketID) index. Re-query and return the
-		// winner with Reused=true.
+		// A unique violation here is one of two things, and the constraint name
+		// is schema-dependent (TypeORM emits opaque REL_* hashes; the standalone
+		// schema emits file_*_key), so we cannot reliably classify by name.
+		// Instead we probe by intent: the ONLY violation we can recover from is
+		// the per-bucket content-dedup race on (externalID, storageBucketID) —
+		// re-query that scope and, if a winner exists, return it as a dedup hit.
 		raced, findErr := s.reQueryRaceWinner(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
 			raced.Reused = true
 			return &raced, nil
+		}
+		// No (externalID, bucket) winner ever materialized. This was therefore
+		// NOT the content-dedup race — it was a UNIQUE(authorizationId) or
+		// UNIQUE(tagsetId) violation: the caller supplied an id already held by
+		// another row (e.g. a snapshot reusing one fixed authorizationId). That
+		// is a client conflict (409), not a server fault: surface ErrConflict
+		// instead of 500-ing as a phantom dedup-race re-query failure.
+		if errors.Is(findErr, model.ErrDocumentNotFound) {
+			s.Logger.Warn("create: unique violation with no (externalID, bucket) winner — "+
+				"authorizationId/tagsetId already in use by another row",
+				zap.String("externalID", stored.ExternalID))
+			return nil, ErrConflict
 		}
 		s.Logger.Warn("dedup: unique violation but re-query failed",
 			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
@@ -589,6 +604,17 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
+}
+
+// derefUUID returns the pointed-to UUID, or uuid.Nil when the pointer is nil.
+// The adapter maps uuid.Nil to a NULL authorizationId column, so an optional
+// (nil) authz persists as NULL — which UNIQUE(authorizationId) permits any
+// number of (unlike a reused fixed id, which collides after the first row).
+func derefUUID(p *uuid.UUID) uuid.UUID {
+	if p == nil {
+		return uuid.Nil
+	}
+	return *p
 }
 
 // BackfillIfNeeded is the public entry point for handlers that read a

@@ -79,11 +79,15 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadat
 		CreatedBy:         uuidToPgxNullable(doc.CreatedBy),
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketId:   uuidToPgx(doc.StorageBucketID),
-		AuthorizationId:   uuidToPgx(doc.AuthorizationID),
-		TagsetId:          uuidToPgxNullable(doc.TagsetID),
-		CreatedDate:       timeToPgx(doc.CreatedDate),
-		UpdatedDate:       timeToPgx(doc.UpdatedDate),
-		ContentMetadata:   raw,
+		// uuid.Nil authz → NULL column (no authorization_policy row to reference;
+		// the FK requires a real id or NULL). Multiple NULLs are permitted by
+		// UNIQUE(authorizationId), which is what lets many snapshots coexist in
+		// one bucket. A real (non-nil) authz writes through unchanged.
+		AuthorizationId: uuidToPgxNullableNil(doc.AuthorizationID),
+		TagsetId:        uuidToPgxNullable(doc.TagsetID),
+		CreatedDate:     timeToPgx(doc.CreatedDate),
+		UpdatedDate:     timeToPgx(doc.UpdatedDate),
+		ContentMetadata: raw,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError

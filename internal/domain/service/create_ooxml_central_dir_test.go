@@ -152,7 +152,7 @@ func completeStagedZip(t *testing.T, content []byte, allowed []string) (*model.D
 	if su.DetectedMIME != "application/zip" {
 		t.Fatalf("precondition: DetectedMIME = %q, want application/zip", su.DetectedMIME)
 	}
-	input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	doc, err := svc.CompleteUpload(context.Background(), su, input, allowed, 0)
 	return doc, storage, err
 }
@@ -231,7 +231,7 @@ func TestCompleteUpload_StagedReaderErrorSkipsRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("StageUpload: %v", err)
 		}
-		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 		doc, err := svc.CompleteUpload(context.Background(), su, input, []string{"application/zip"}, 0)
 		if err != nil {
 			t.Fatalf("CompleteUpload: %v, want accepted (recovery skipped, not a hard error)", err)
@@ -250,7 +250,7 @@ func TestCompleteUpload_StagedReaderErrorSkipsRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("StageUpload: %v", err)
 		}
-		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+		input := model.CreateDocumentInput{DisplayName: "deck.pptx", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 		doc, err := svc.CompleteUpload(context.Background(), su, input, []string{model.OfficeExtToMIME[".pptx"]}, 0)
 		if !errors.Is(err, ErrUnsupportedMediaType) {
 			t.Fatalf("err = %v, want ErrUnsupportedMediaType (allow-list rejects unrecovered zip)", err)
@@ -281,7 +281,7 @@ func TestCompleteUpload_TranscodePathMIMEUnaffected(t *testing.T) {
 	su.DetectedMIME = "application/zip"
 	su.MimeType = "image/jpeg"
 
-	input := model.CreateDocumentInput{DisplayName: "photo.jpg", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
+	input := model.CreateDocumentInput{DisplayName: "photo.jpg", StorageBucketID: uuid.New(), AuthorizationID: ptrUUID(uuid.New())}
 	doc, err := svc.CompleteUpload(context.Background(), su, input, []string{"application/zip"}, 0)
 	if err != nil {
 		t.Fatalf("CompleteUpload: %v", err)

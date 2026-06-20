@@ -50,6 +50,18 @@ func uuidToPgxNullable(id *uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: *id, Valid: true}
 }
 
+// uuidToPgxNullableNil maps a value-typed UUID to a nullable column, treating
+// uuid.Nil (the zero value) as SQL NULL. Used for authorizationId: the model
+// carries it as a value, but an absent authz must persist as NULL (the FK
+// to authorization_policy forbids a dangling all-zero id, and UNIQUE permits
+// multiple NULLs).
+func uuidToPgxNullableNil(id uuid.UUID) pgtype.UUID {
+	if id == uuid.Nil {
+		return pgtype.UUID{Valid: false}
+	}
+	return pgtype.UUID{Bytes: id, Valid: true}
+}
+
 func pgxToUUID(id pgtype.UUID) uuid.UUID {
 	if !id.Valid {
 		return uuid.Nil
