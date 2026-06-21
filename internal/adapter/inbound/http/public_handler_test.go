@@ -30,6 +30,13 @@ type mockDocRepo struct {
 	deleteErr    error
 	count        int
 
+	// docsByID, when non-nil, makes GetByID id-aware: it returns the mapped
+	// document for a known id and model.ErrDocumentNotFound for an unknown
+	// one. Used by the batched-read tests, which need several distinct rows
+	// in one request. When nil, GetByID falls back to the single doc/err
+	// pair above so every existing single-document test is unaffected.
+	docsByID map[uuid.UUID]model.Document
+
 	// Captured args from the most recent UpdateMetadata call.
 	updateMetadataCalls   int
 	lastUpdateBucketID    uuid.UUID
@@ -49,7 +56,13 @@ type mockDocRepo struct {
 	backfillErr            error
 }
 
-func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+func (m *mockDocRepo) GetByID(_ context.Context, id uuid.UUID) (model.Document, error) {
+	if m.docsByID != nil {
+		if doc, ok := m.docsByID[id]; ok {
+			return doc, nil
+		}
+		return model.Document{}, model.ErrDocumentNotFound
+	}
 	return m.doc, m.err
 }
 func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
@@ -127,6 +140,14 @@ type mockStorage struct {
 	saveErr error
 	saved   []byte // captures the last Save/stage payload (replace-path rejection tests)
 	stages  []*httpMockStage
+
+	// blobsByExternalID, when non-nil, makes Read externalID-aware: it returns
+	// the mapped bytes for a known externalID and os.ErrNotExist for an
+	// unknown one. Used by the batched-read tests so distinct documents map to
+	// distinct blobs (and a "missing blob" case is expressible). When nil,
+	// Read falls back to the single data/err pair so existing tests are
+	// unaffected.
+	blobsByExternalID map[string][]byte
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -136,7 +157,15 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	}
 	return model.StoredFile{ExternalID: "hash", Size: len(content), Created: true}, nil
 }
-func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
+func (m *mockStorage) Read(externalID string) ([]byte, error) {
+	if m.blobsByExternalID != nil {
+		if b, ok := m.blobsByExternalID[externalID]; ok {
+			return b, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	return m.data, m.err
+}
 func (m *mockStorage) Delete(_ string) error         { return nil }
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 

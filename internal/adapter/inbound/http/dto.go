@@ -143,6 +143,44 @@ type UpdateDocumentRequest struct {
 	DisplayName       *string `json:"displayName,omitempty"`
 }
 
+// ContentBatchRequest is the JSON body for POST /internal/file/content-batch.
+// Ids is a list (not a set): order is significant and duplicates are honored,
+// so the response items line up positionally with what the caller sent.
+type ContentBatchRequest struct {
+	Ids []string `json:"ids"`
+}
+
+// ContentBatchItem is one entry of a ContentBatchResponse, positionally aligned
+// with the requested ids. Found reports whether the document's content was
+// retrieved: when true, MimeType + ContentBase64 carry the blob; when false,
+// Error gives the non-fatal reason (malformed id, document not found, blob
+// missing) and the content fields are empty. Id echoes the requested value
+// verbatim — including a syntactically invalid one — so the caller can
+// correlate by value as well as by position.
+type ContentBatchItem struct {
+	ID            string `json:"id"`
+	Found         bool   `json:"found"`
+	MimeType      string `json:"mimeType,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+// ContentBatchResponse is returned by POST /internal/file/content-batch: one
+// item per requested id, in request order. The endpoint returns 200 even when
+// every item is a miss — a partial or total miss is reported per item, not as
+// an HTTP error (the request itself was well-formed). Blobs are base64-encoded
+// so binary content (e.g. Yjs-V2 snapshots) rides safely in JSON.
+type ContentBatchResponse struct {
+	Items []ContentBatchItem `json:"items"`
+}
+
+// Render writes the response as JSON with HTTP 200.
+func (r ContentBatchResponse) Render(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(r)
+}
+
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.
 // Reuses CreateDocumentResponse for the response shape.
 type CopyDocumentRequest struct {

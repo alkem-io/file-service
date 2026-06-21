@@ -99,6 +99,55 @@ func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actor
 	}, nil
 }
 
+// BatchContentResult is one entry of a ReadContentBatch response, positionally
+// aligned with the requested id slice. Found reports whether the document's
+// content was retrieved: when true, Content + MimeType are populated; when
+// false, Err records the per-id reason (row missing, blob gone) without
+// failing the whole batch.
+type BatchContentResult struct {
+	ID       uuid.UUID
+	Found    bool
+	Content  []byte
+	MimeType string
+	Err      error
+}
+
+// ReadContentBatch resolves the content blob for each requested document id in
+// one call, preserving order (result[i] corresponds to ids[i], duplicates
+// included). It reuses the single-document read path — GetByID then
+// Storage.Read — per id, mirroring the internal /internal/file/{id}/content
+// endpoint, and applies no per-file authorization (these are internal,
+// NULL-authz snapshot blobs governed by the owning document's authorization).
+//
+// Failures are per-id and non-fatal: a missing row or a missing blob yields
+// Found=false with Err set for that position; the remaining ids still resolve.
+// This is what lets the server's derived-text resolvers fan a list of snapshot
+// pointers into a single request without an N+1 of HTTP round trips, and treat
+// individual misses as best-effort.
+func (s *FileService) ReadContentBatch(ctx context.Context, ids []uuid.UUID) []BatchContentResult {
+	results := make([]BatchContentResult, 0, len(ids))
+	for _, id := range ids {
+		results = append(results, s.readOneContent(ctx, id))
+	}
+	return results
+}
+
+// readOneContent resolves a single document's content for the batch read,
+// translating a missing row or unreadable blob into a non-fatal result rather
+// than an error return. Kept separate from GetContent's HTTP handler so the
+// domain owns the lookup-then-read sequence once.
+func (s *FileService) readOneContent(ctx context.Context, id uuid.UUID) BatchContentResult {
+	doc, err := s.Repo.GetByID(ctx, id)
+	if err != nil {
+		return BatchContentResult{ID: id, Found: false, Err: err}
+	}
+	content, err := s.Storage.Read(doc.ExternalID)
+	if err != nil {
+		return BatchContentResult{ID: id, Found: false, Err: fmt.Errorf("read file: %w", err)}
+	}
+	return BatchContentResult{ID: id, Found: true, Content: content, MimeType: doc.MimeType}
+}
+
 // CreateDocument ingests a complete buffer through the streaming pipeline
 // (spec 020): stage → validate → publish. Kept for buffer-shaped callers;
 // the HTTP handler streams the request directly via StageUpload +

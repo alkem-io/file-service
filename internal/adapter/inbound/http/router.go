@@ -66,6 +66,7 @@ func NewRouter(deps Deps) *chi.Mux {
 	r.Route("/internal", func(r chi.Router) {
 		r.Post("/file", deps.DocumentHandler.Create)
 		r.Post("/file/copy", deps.DocumentHandler.Copy)
+		r.Post("/file/content-batch", deps.DocumentHandler.ContentBatch)
 		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
 		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
 		r.Put("/file/{id}/content", deps.DocumentHandler.ReplaceContent)

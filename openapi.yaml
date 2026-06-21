@@ -1,5 +1,39 @@
 components:
   schemas:
+    http.ContentBatchItem:
+      properties:
+        contentBase64:
+          type: string
+        error:
+          type: string
+        found:
+          type: boolean
+        id:
+          type: string
+        mimeType:
+          type: string
+      required:
+        - id
+        - found
+      type: object
+    http.ContentBatchRequest:
+      properties:
+        ids:
+          items:
+            type: string
+          type: array
+      required:
+        - ids
+      type: object
+    http.ContentBatchResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/http.ContentBatchItem'
+          type: array
+      required:
+        - items
+      type: object
     http.CopyDocumentRequest:
       properties:
         authorizationId:
@@ -262,6 +296,46 @@ paths:
         Create handles POST /internal/file — streaming ingest (spec 020): the
         file part flows request → sniff → (transcode) → staged storage without
         whole-file buffering.
+      tags:
+        - /internal
+  /internal/file/content-batch:
+    post:
+      description: |-
+        ContentBatch handles POST /internal/file/content-batch — the batched
+        counterpart to GET /internal/file/{id}/content. It takes N document ids and
+        returns N content blobs (base64) in request order, so the server's
+        derived-text resolvers can read a list of snapshot pointers in one round trip
+        instead of an N+1 of single reads.
+
+        Per-id failures are non-fatal: a malformed id, a missing document, or a
+        missing blob is reported as found=false on that item while the rest of the
+        batch still resolves — the endpoint returns 200 as long as the request itself
+        is well-formed. Wired with the same internal (no-auth) middleware as the
+        other /internal/file routes; per-blob authorization does not apply (these are
+        NULL-authz internal snapshot blobs governed by the owning document).
+      operationId: DocumentHandler.ContentBatch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/http.ContentBatchRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ContentBatchResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
+      summary: |-
+        ContentBatch handles POST /internal/file/content-batch — the batched
+        counterpart to GET /internal/file/{id}/content.
       tags:
         - /internal
   /internal/file/copy:
