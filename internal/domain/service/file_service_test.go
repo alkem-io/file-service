@@ -26,8 +26,16 @@ func (f *faultyReadCloser) Close() error             { return nil }
 // --- Mocks ---
 
 type mockRepo struct {
-	doc           model.Document
-	getErr        error
+	doc    model.Document
+	getErr error
+
+	// docsByID, when non-nil, makes GetByID id-aware: it returns the mapped
+	// document for a known id and model.ErrDocumentNotFound for an unknown
+	// one. Used by the batched-read tests, which need several distinct rows in
+	// one call. When nil, GetByID falls back to the doc/getErr pair so existing
+	// single-document tests are unaffected.
+	docsByID map[uuid.UUID]model.Document
+
 	findDoc       *model.Document // nil means "not found"
 	findErr       error           // if set, overrides findDoc
 	findCalls     int
@@ -76,7 +84,13 @@ type mockRepo struct {
 // Ensure mockRepo implements the full interface at compile time.
 var _ port.DocumentRepo = (*mockRepo)(nil)
 
-func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+func (m *mockRepo) GetByID(_ context.Context, id uuid.UUID) (model.Document, error) {
+	if m.docsByID != nil {
+		if doc, ok := m.docsByID[id]; ok {
+			return doc, nil
+		}
+		return model.Document{}, model.ErrDocumentNotFound
+	}
 	return m.doc, m.getErr
 }
 func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {

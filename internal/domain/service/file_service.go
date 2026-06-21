@@ -137,6 +137,76 @@ func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Dura
 	return n, err
 }
 
+// BatchContentResult is one entry of a ReadContentBatch response, positionally
+// aligned with the requested id slice. Found reports whether the document's
+// content was retrieved: when true, Content + MimeType are populated; when
+// false, Err records the per-id reason (row missing, blob gone) without
+// failing the whole batch.
+type BatchContentResult struct {
+	ID       uuid.UUID
+	Found    bool
+	Content  []byte
+	MimeType string
+	Err      error
+}
+
+// ErrBatchContentLimit means the next blob would exceed the caller's aggregate
+// response budget. Callers can retry that item in a smaller batch.
+var ErrBatchContentLimit = errors.New("batch content limit exceeded")
+
+// ReadContentBatch resolves the content blob for each requested document id in
+// one call, preserving order (result[i] corresponds to ids[i], duplicates
+// included). maxTotalBytes bounds the raw content retained across successful
+// results; an item that would exceed the remaining budget is returned with
+// ErrBatchContentLimit.
+//
+// Failures are per-id and non-fatal: a missing row or a missing blob yields
+// Found=false with Err set for that position; the remaining ids still resolve.
+func (s *FileService) ReadContentBatch(ctx context.Context, ids []uuid.UUID, maxTotalBytes int64) []BatchContentResult {
+	results := make([]BatchContentResult, 0, len(ids))
+	remaining := maxTotalBytes
+	for _, id := range ids {
+		result := s.readOneContent(ctx, id, remaining)
+		if result.Found {
+			remaining -= int64(len(result.Content))
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func (s *FileService) readOneContent(ctx context.Context, id uuid.UUID, remaining int64) BatchContentResult {
+	doc, err := s.Repo.GetByID(ctx, id)
+	if err != nil {
+		return BatchContentResult{ID: id, Found: false, Err: err}
+	}
+	if remaining <= 0 {
+		return BatchContentResult{ID: id, Found: false, Err: ErrBatchContentLimit}
+	}
+	rc, size, err := s.Storage.ReadStream(doc.ExternalID)
+	if err != nil {
+		return BatchContentResult{ID: id, Found: false, Err: fmt.Errorf("open file stream: %w", err)}
+	}
+	if size > remaining {
+		_ = rc.Close()
+		return BatchContentResult{ID: id, Found: false, Err: ErrBatchContentLimit}
+	}
+
+	content, readErr := io.ReadAll(io.LimitReader(rc, remaining+1))
+	closeErr := rc.Close()
+	switch {
+	case readErr != nil:
+		return BatchContentResult{ID: id, Found: false, Err: fmt.Errorf("read file stream: %w", readErr)}
+	case closeErr != nil:
+		return BatchContentResult{ID: id, Found: false, Err: fmt.Errorf("close file stream: %w", closeErr)}
+	case int64(len(content)) > remaining:
+		return BatchContentResult{ID: id, Found: false, Err: ErrBatchContentLimit}
+	case size >= 0 && int64(len(content)) != size:
+		return BatchContentResult{ID: id, Found: false, Err: fmt.Errorf("read file stream: expected %d bytes, got %d", size, len(content))}
+	}
+	return BatchContentResult{ID: id, Found: true, Content: content, MimeType: doc.MimeType}
+}
+
 // CreateDocument ingests a complete buffer through the streaming pipeline
 // (spec 020): stage → validate → publish. Kept for buffer-shaped callers;
 // the HTTP handler streams the request directly via StageUpload +

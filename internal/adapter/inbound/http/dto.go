@@ -143,6 +143,32 @@ type UpdateDocumentRequest struct {
 	DisplayName       *string `json:"displayName,omitempty"`
 }
 
+// ContentBatchRequest preserves id order and duplicates.
+type ContentBatchRequest struct {
+	Ids []string `json:"ids"`
+}
+
+// ContentBatchItem is the positional outcome for one requested id.
+type ContentBatchItem struct {
+	ID            string `json:"id"`
+	Found         bool   `json:"found"`
+	MimeType      string `json:"mimeType,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+// ContentBatchResponse preserves request order, including duplicate ids.
+type ContentBatchResponse struct {
+	Items []ContentBatchItem `json:"items"`
+}
+
+// Render writes the response as JSON with HTTP 200.
+func (r ContentBatchResponse) Render(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(r)
+}
+
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.
 // Reuses CreateDocumentResponse for the response shape.
 type CopyDocumentRequest struct {
