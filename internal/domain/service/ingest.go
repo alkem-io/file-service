@@ -107,7 +107,12 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 // is a transcodable image, otherwise copy with a fixed buffer. The returned
 // upload is NOT yet published — callers validate and then CompleteUpload,
 // or Discard on any failure.
-func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME string) (*StagedUpload, error) {
+//
+// skipImageProcessing forces the verbatim pass-through arm even for a
+// transcodable image type: the staged bytes are byte-identical to the input
+// (no transcode, no rotate, no dimension measure). Used by the Synapse media
+// provider so its read-back stays byte-exact.
+func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME string, skipImageProcessing bool) (*StagedUpload, error) {
 	br := bufio.NewReaderSize(r, sniffPrefixSize)
 	prefix, err := br.Peek(sniffPrefixSize)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
@@ -127,7 +132,7 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 		detected = normalizeMIME(s.Processor.DetectMIME(prefix))
 	}
 
-	su, err := s.stageContent(ctx, br, detected, len(prefix) > 0)
+	su, err := s.stageContent(ctx, br, detected, len(prefix) > 0, skipImageProcessing)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +143,12 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 // stageContent opens a stage and streams br into it under the already-
 // decided MIME type — the shared back half of the create (StageUpload) and
 // replace (StoreAndLinkStream) pipelines.
-func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeType string, hasContent bool) (*StagedUpload, error) {
+//
+// skipImageProcessing forces the verbatim pass-through arm even when the type
+// is transcodable: the bytes are stored exactly as received (no transcode /
+// rotate / measure). Only the create path sets it (the provider's raw store);
+// the replace path always passes false.
+func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeType string, hasContent, skipImageProcessing bool) (*StagedUpload, error) {
 	stage, err := s.Storage.OpenStage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open storage stage: %w", err)
@@ -146,7 +156,7 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	su := &StagedUpload{stage: stage, MimeType: mimeType, DetectedMIME: mimeType}
 	cw := &countingWriter{w: stage}
 
-	if hasContent && transcodableMIME(mimeType) {
+	if hasContent && !skipImageProcessing && transcodableMIME(mimeType) {
 		result, terr := s.Processor.TranscodeStream(br, cw, mimeType)
 		if terr != nil {
 			su.Discard()

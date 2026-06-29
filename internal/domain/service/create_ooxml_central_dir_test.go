@@ -145,7 +145,7 @@ func completeStagedZip(t *testing.T, content []byte, allowed []string) (*model.D
 	repo := &mockRepo{}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{detectMIME: "application/zip"}}
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "", false)
 	if err != nil {
 		t.Fatalf("StageUpload: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestCompleteUpload_StagedReaderErrorSkipsRecovery(t *testing.T) {
 	t.Run("zip allowed → accepted as application/zip", func(t *testing.T) {
 		storage := &mockStorage{stageReaderErr: readErr}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: &mockProcessor{detectMIME: "application/zip"}}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "", false)
 		if err != nil {
 			t.Fatalf("StageUpload: %v", err)
 		}
@@ -246,7 +246,7 @@ func TestCompleteUpload_StagedReaderErrorSkipsRecovery(t *testing.T) {
 	t.Run("office-only allow-list → rejected by allow-list", func(t *testing.T) {
 		storage := &mockStorage{stageReaderErr: readErr}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: &mockProcessor{detectMIME: "application/zip"}}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "", false)
 		if err != nil {
 			t.Fatalf("StageUpload: %v", err)
 		}
@@ -272,7 +272,7 @@ func TestCompleteUpload_TranscodePathMIMEUnaffected(t *testing.T) {
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
 
 	// Stage some bytes via a normal pass-through to get a usable stage.
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("transcoded jpeg bytes")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("transcoded jpeg bytes")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -78,7 +78,7 @@ func TestStageUpload_PassThroughEquivalence(t *testing.T) {
 	repo := &mockRepo{}
 	svc := newIngestService(storage, repo)
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestStageUpload_OverLimitAborts(t *testing.T) {
 	storage := &mockStorage{}
 	svc := newIngestService(storage, &mockRepo{})
 
-	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "")
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "", false)
 	if !errors.Is(err, ErrOverLimit) {
 		t.Fatalf("err = %v, want ErrOverLimit", err)
 	}
@@ -119,7 +119,7 @@ func TestStageUpload_ClientAbortAborts(t *testing.T) {
 	storage := &mockStorage{}
 	svc := newIngestService(storage, &mockRepo{})
 
-	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "", false)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want ErrUnexpectedEOF", err)
 	}
@@ -133,7 +133,7 @@ func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
 	svc := newIngestService(storage, &mockRepo{})
 	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("plain text body")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("plain text body")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
 	}
 	assertSingleAbortedStage(t, storage)
 
-	su2, err := svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("z"), 2048)), "")
+	su2, err := svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("z"), 2048)), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestCompleteUpload_DedupAtEnd(t *testing.T) {
 	svc := newIngestService(storage, repo)
 	input := model.CreateDocumentInput{DisplayName: "dup.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("dup content")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("dup content")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestStageUpload_AllocationBound(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	su, err := svc.StageUpload(context.Background(), &patternReader{size: 64 << 20}, "")
+	su, err := svc.StageUpload(context.Background(), &patternReader{size: 64 << 20}, "", false)
 	runtime.ReadMemStats(&after)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestStageUpload_ConcurrentAllocationBound(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			su, err := services[i].StageUpload(context.Background(), &patternReader{size: 32 << 20}, "")
+			su, err := services[i].StageUpload(context.Background(), &patternReader{size: 32 << 20}, "", false)
 			if err == nil {
 				su.Discard()
 			}
@@ -252,7 +252,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "accepted",
 			run: func(svc *FileService) {
-				su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("ok")), "")
+				su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("ok")), "", false)
 				input := model.CreateDocumentInput{DisplayName: "a", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 				_, _ = svc.CompleteUpload(context.Background(), su, input, nil, 0)
 			},
@@ -261,7 +261,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "over-limit is transport",
 			run: func(svc *FileService) {
-				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "")
+				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(true),
@@ -269,7 +269,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "client abort is service-distinguishable",
 			run: func(svc *FileService) {
-				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(false),
@@ -278,7 +278,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 			name: "stage write failure is service-side",
 			run: func(svc *FileService) {
 				svc.Storage.(*mockStorage).stageWriteErr = errors.New("disk gone")
-				_, _ = svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("y"), 8192)), "")
+				_, _ = svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("y"), 8192)), "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(false),
@@ -342,7 +342,7 @@ func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
 	for _, mime := range []string{"image/gif", "image/svg+xml", "application/pdf", "image/bmp", "image/avif"} {
 		proc := &mockProcessor{detectMIME: mime}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "", false)
 		if err != nil {
 			t.Fatalf("%s: %v", mime, err)
 		}
@@ -354,9 +354,66 @@ func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
 	// control: a transcodable type does route
 	proc := &mockProcessor{detectMIME: "image/jpeg"}
 	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-	su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "", false)
 	su.Discard()
 	if proc.transcodeCalls != 1 {
 		t.Errorf("jpeg transcodeCalls = %d, want 1", proc.transcodeCalls)
 	}
+}
+
+// T007 (013): a skipImageProcessing=true upload of a transcodable image type
+// (HEIC/PNG/JPEG) is stored byte-identical — no transcode, no MIME
+// canonicalization, no dimension measure. Synapse's read-back must be exact.
+func TestStageUpload_SkipImageProcessing_StoresVerbatim(t *testing.T) {
+	// Bytes a transcode WOULD rewrite. transcodeMIME proves the transcoder, if
+	// invoked, would canonicalize image/png → image/jpeg; the verbatim arm must
+	// keep both the bytes and the MIME type unchanged.
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte("verbatim-heic-or-png-payload"), 256)...)
+
+	t.Run("verbatim when skip=true", func(t *testing.T) {
+		storage := &mockStorage{}
+		proc := &mockProcessor{detectMIME: "image/png", transcodeMIME: "image/jpeg", processDimsW: intpService(640), processDimsH: intpService(480)}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
+
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(raw), "image/png", true)
+		if err != nil {
+			t.Fatalf("StageUpload: %v", err)
+		}
+		if _, err := su.stage.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if proc.transcodeCalls != 0 {
+			t.Errorf("transcodeCalls = %d, want 0 (verbatim must not transcode)", proc.transcodeCalls)
+		}
+		if !bytes.Equal(storage.saved, raw) {
+			t.Errorf("stored bytes are not byte-identical to the upload")
+		}
+		if su.MimeType != "image/png" {
+			t.Errorf("MimeType = %q, want image/png (no canonicalization on verbatim)", su.MimeType)
+		}
+		if su.Measured {
+			t.Error("Measured = true, want false (no dimension measure on verbatim)")
+		}
+		if su.ImageWidth != nil || su.ImageHeight != nil {
+			t.Error("dims populated on verbatim store; want nil")
+		}
+	})
+
+	t.Run("transcodes when skip=false", func(t *testing.T) {
+		storage := &mockStorage{}
+		proc := &mockProcessor{detectMIME: "image/png", transcodeMIME: "image/jpeg", processDimsW: intpService(640), processDimsH: intpService(480)}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
+
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader(raw), "image/png", false)
+		if err != nil {
+			t.Fatalf("StageUpload: %v", err)
+		}
+		su.Discard()
+		if proc.transcodeCalls != 1 {
+			t.Errorf("transcodeCalls = %d, want 1 (normal path transcodes)", proc.transcodeCalls)
+		}
+		if su.MimeType != "image/jpeg" {
+			t.Errorf("MimeType = %q, want image/jpeg (canonicalized)", su.MimeType)
+		}
+	})
 }
