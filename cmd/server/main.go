@@ -54,7 +54,11 @@ func run() int {
 	auth := buildAuthClient(cfg, nc, logger)
 	logger.Info("auth transport configured", zap.String("transport", cfg.AuthTransport))
 
-	fileSvc := buildFileService(pool, auth, cfg, logger)
+	fileSvc, err := buildFileService(pool, auth, cfg, logger)
+	if err != nil {
+		logger.Error("failed to build file service", zap.Error(err))
+		return 1
+	}
 
 	// Boot-time MIME repair (spec 019 FR-006): heal documents corrupted by
 	// the pre-fix replace path. Idempotent; runs concurrently with serving.

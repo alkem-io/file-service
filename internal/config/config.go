@@ -19,6 +19,7 @@ type Config struct {
 	Port           int
 	StoragePath    string
 	StorageType    string
+	S3             S3Config
 	DocumentMaxAge time.Duration
 	AlkemioDB      DatabaseConfig
 	NATS           NATSConfig
@@ -26,6 +27,18 @@ type Config struct {
 	AuthServiceURL string // h2c URL for auth-evaluation-service (e.g., "http://auth-service:6060")
 	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
 	Ingest         IngestConfig
+}
+
+// S3Config holds the S3-compatible object-store settings. Only populated (and
+// only validated) when STORAGE_TYPE=s3.
+type S3Config struct {
+	Endpoint  string // host[:port], no scheme
+	AccessKey string
+	SecretKey string
+	Bucket    string
+	Region    string
+	UseSSL    bool
+	StageDir  string // local hash-while-upload staging dir; empty = os.TempDir()
 }
 
 // IngestConfig governs the streaming upload pipeline (spec 020).
@@ -141,10 +154,20 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	storageType := getenv("STORAGE_TYPE", "local")
+	var s3Cfg S3Config
+	if storageType == "s3" {
+		s3Cfg, err = loadS3Config()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &Config{
 		Port:           port,
 		StoragePath:    getenv("LOCAL_STORAGE_PATH", "../server/.storage"),
-		StorageType:    getenv("STORAGE_TYPE", "local"),
+		StorageType:    storageType,
+		S3:             s3Cfg,
 		DocumentMaxAge: time.Duration(maxAgeSecs) * time.Second,
 		AuthTransport:  authTransport,
 		AuthServiceURL: authServiceURL,
@@ -152,6 +175,43 @@ func Load() (*Config, error) {
 		AlkemioDB:      dbCfg,
 		NATS:           natsCfg,
 		Ingest:         ingestCfg,
+	}, nil
+}
+
+// loadS3Config reads and validates the S3 backend settings. Required:
+// S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET. S3_USE_SSL defaults to
+// true; S3_REGION and S3_STAGE_DIR are optional.
+func loadS3Config() (S3Config, error) {
+	endpoint := getenv("S3_ENDPOINT", "")
+	if endpoint == "" {
+		return S3Config{}, fmt.Errorf("S3_ENDPOINT is required when STORAGE_TYPE=s3")
+	}
+	accessKey := getenv("S3_ACCESS_KEY", "")
+	if accessKey == "" {
+		return S3Config{}, fmt.Errorf("S3_ACCESS_KEY is required when STORAGE_TYPE=s3")
+	}
+	secretKey := getenv("S3_SECRET_KEY", "")
+	if secretKey == "" {
+		return S3Config{}, fmt.Errorf("S3_SECRET_KEY is required when STORAGE_TYPE=s3")
+	}
+	bucket := getenv("S3_BUCKET", "")
+	if bucket == "" {
+		return S3Config{}, fmt.Errorf("S3_BUCKET is required when STORAGE_TYPE=s3")
+	}
+
+	useSSL, err := getenvBool("S3_USE_SSL", true)
+	if err != nil {
+		return S3Config{}, fmt.Errorf("S3_USE_SSL: %w", err)
+	}
+
+	return S3Config{
+		Endpoint:  endpoint,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+		Bucket:    bucket,
+		Region:    getenv("S3_REGION", ""),
+		UseSSL:    useSSL,
+		StageDir:  getenv("S3_STAGE_DIR", ""),
 	}, nil
 }
 
@@ -345,4 +405,16 @@ func getenvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid integer %q", v)
 	}
 	return n, nil
+}
+
+func getenvBool(key string, fallback bool) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean %q", v)
+	}
+	return b, nil
 }
