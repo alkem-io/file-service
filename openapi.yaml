@@ -11,6 +11,9 @@ components:
         destinationBucketId:
           format: uuid
           type: string
+        externalReference:
+          description: Opaque caller reference set on the copied row (e.g. the Synapse media_id for a re-share). Never parsed by file-service.
+          type: string
         skipDedup:
           type: boolean
         sourceId:
@@ -68,6 +71,9 @@ components:
         displayName:
           type: string
         externalID:
+          type: string
+        externalReference:
+          description: Opaque caller reference (e.g. the Synapse media_id). Null when unset. Never parsed by file-service.
           type: string
         id:
           type: string
@@ -143,8 +149,24 @@ components:
         - size
       type: object
     http.UpdateDocumentRequest:
+      description: |-
+        Body for PATCH /internal/file/{id} — the "move + re-attribute" primitive.
+        All fields optional; at least one must be present. Omitted fields keep
+        their current value. externalReference is tri-state: omitted → keep, a
+        string → set, explicit JSON null → clear.
       properties:
+        authorizationId:
+          description: Re-point the document to a new (server-minted) authorization policy.
+          format: uuid
+          type: string
+        createdBy:
+          description: Set the owning actor (the message sender on inbound re-home).
+          format: uuid
+          type: string
         displayName:
+          type: string
+        externalReference:
+          description: Set or clear the opaque caller reference (e.g. the Synapse media_id). Never parsed by file-service.
           type: string
         storageBucketId:
           format: uuid
@@ -208,6 +230,12 @@ paths:
         published. (The known caller sends the file part first — research R4 —
         which is why bucket-level limits cannot gate the stream early; the
         handler itself does not depend on any ordering.)
+
+        Optional multipart metadata fields (013): externalReference (opaque
+        caller reference, e.g. the Synapse media_id — never parsed) and
+        skipImageProcessing (when "true", store the bytes VERBATIM: no transcode,
+        rotate, or measure — so a provider's read-back is byte-exact). The
+        skipImageProcessing field MUST precede the file part to take effect.
       operationId: DocumentHandler.Create
       responses:
         "201":
@@ -262,6 +290,57 @@ paths:
         Create handles POST /internal/file — streaming ingest (spec 020): the
         file part flows request → sniff → (transcode) → staged storage without
         whole-file buffering.
+      tags:
+        - /internal
+  /internal/file/by-reference:
+    get:
+      description: |-
+        ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
+        ref is required. bucketId omitted → GLOBAL resolution (any document
+        carrying the opaque reference, all sharing one blob — the provider's
+        fetch). bucketId present → bucket-SCOPED resolution (the document in
+        that bucket — read resolution). externalReference is opaque; never parsed.
+      operationId: DocumentHandler.ByReference
+      parameters:
+        - in: query
+          name: ref
+          required: true
+          description: Opaque external reference (e.g. the Synapse media_id).
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          required: false
+          description: When present, scope resolution to this storage bucket; when omitted, resolve globally.
+          schema:
+            format: uuid
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.DocumentMetaResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Internal Server Error
+      summary: ByReference resolves a document by its opaque externalReference (global or bucket-scoped).
       tags:
         - /internal
   /internal/file/copy:
