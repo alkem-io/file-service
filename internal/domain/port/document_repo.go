@@ -18,6 +18,16 @@ type DocumentRepo interface {
 	// per-bucket dedup. Returns model.ErrDocumentNotFound when the bucket
 	// holds no row with this content.
 	FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error)
+	// GetByReference resolves the opaque externalReference across ALL buckets
+	// (the provider's global fetch). Several buckets may carry the same
+	// reference (re-share, one shared blob); the oldest row wins. Returns
+	// model.ErrDocumentNotFound when no row carries the reference.
+	GetByReference(ctx context.Context, reference string) (model.Document, error)
+	// GetByReferenceInBucket resolves the opaque externalReference within one
+	// bucket (read resolution). UNIQUE(externalReference, storageBucketID)
+	// guarantees at most one match. Returns model.ErrDocumentNotFound when the
+	// bucket holds no row with this reference.
+	GetByReferenceInBucket(ctx context.Context, reference string, storageBucketID uuid.UUID) (model.Document, error)
 	// Create inserts a new document row. contentMetadata is the typed view
 	// of the file.content_metadata JSONB column; the adapter owns the
 	// serialization to bytes.
@@ -31,7 +41,12 @@ type DocumentRepo interface {
 	// it by one. Returns model.ErrDocumentNotFound on 0 rows affected —
 	// which covers both "row gone" and "version mismatch"; the service layer
 	// translates that into its concurrency conflict.
-	UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error
+	//
+	// This is the "move + re-attribute" primitive: besides bucket/temporary-
+	// location/display-name it also re-points authorizationID, createdBy, and
+	// the opaque externalReference. The caller supplies every field's intended
+	// final value (the handler fills omitted fields from the current row).
+	UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error
 	// BackfillContentMetadata writes computed metadata atomically using
 	// compare-and-set: only succeeds if the row currently has empty
 	// content_metadata AND its externalID matches expectedExternalID. This

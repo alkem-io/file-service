@@ -60,6 +60,35 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
+// GetByReference resolves the opaque externalReference across all buckets.
+// pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReference(ctx context.Context, reference string) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReference(ctx, stringToPgxText(&reference))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refRowToDocument(row), nil
+}
+
+// GetByReferenceInBucket resolves the opaque externalReference within one
+// bucket. pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, storageBucketID uuid.UUID) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReferenceInBucket(ctx, queries.GetDocumentByReferenceInBucketParams{
+		ExternalReference: stringToPgxText(&reference),
+		StorageBucketId:   uuidToPgx(storageBucketID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refInBucketRowToDocument(row), nil
+}
+
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
 // rules). A unique violation — another row already holds this content in the
@@ -84,6 +113,7 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadat
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
 		ContentMetadata:   raw,
+		ExternalReference: stringToPgxText(doc.ExternalReference),
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -129,12 +159,15 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 // optimistic locking (WHERE version = $given, SET version = version + 1).
 // 0 rows affected — row missing or version stale — returns
 // model.ErrDocumentNotFound; the service maps that to its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
 	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
 		ID:                uuidToPgx(id),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: temporaryLocation,
-		DisplayName:       displayName,
+		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
+		TemporaryLocation: meta.TemporaryLocation,
+		DisplayName:       meta.DisplayName,
+		AuthorizationId:   uuidToPgx(meta.AuthorizationID),
+		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
+		ExternalReference: stringToPgxText(meta.ExternalReference),
 		UpdatedDate:       timeToPgxNow(),
 		Version:           safeInt32(version),
 	})

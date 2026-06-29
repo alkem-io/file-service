@@ -104,7 +104,7 @@ func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actor
 // (validation order is a documented consequence of the multipart field
 // order, research R4). Observable outcomes are identical.
 func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
-	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME)
+	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME, input.SkipImageProcessing)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +173,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		StorageBucketID:   input.DestinationBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		SkipDedup:         input.SkipDedup,
 	}
 	stored := model.StoredFile{
@@ -278,6 +279,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		StorageBucketID:   input.StorageBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		CreatedDate:       now,
 		UpdatedDate:       now,
 		ContentMetadata:   contentMetadata,
@@ -397,7 +399,9 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			zap.String("outcome", outcome))
 	}
 
-	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0)
+	// Replace never stores verbatim — content edits always run the normal
+	// transcode/measure pipeline (the raw-store path is create-only).
+	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0, false)
 	if err != nil {
 		return nil, err
 	}
@@ -459,19 +463,21 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 	}, nil
 }
 
-// UpdateDocumentMetadata updates the mutable metadata fields (storage bucket,
-// temporary-location flag, display name) atomically. The handler reads the
-// current row first and fills any fields the caller didn't supply, so this
-// method always overwrites all three columns. Uses optimistic locking via
-// the version column.
+// UpdateDocumentMetadata updates the mutable metadata fields atomically — the
+// "move + re-attribute" primitive. Besides storage bucket, temporary-location
+// flag, and display name it also re-points authorizationId, createdBy, and the
+// opaque externalReference (server-driven inbound re-home). The handler reads
+// the current row first and fills any fields the caller didn't supply, so this
+// method always overwrites all of them. Uses optimistic locking via the
+// version column.
 //
 // mimeType, externalID, and size are not mutable through this method — they
 // change only via StoreAndLink (replace content). Callers that rename a
 // document are responsible for keeping displayName's extension consistent
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) (*model.Document, error) {
-	err := s.Repo.UpdateMetadata(ctx, documentID, storageBucketID, temporaryLocation, displayName, version)
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int) (*model.Document, error) {
+	err := s.Repo.UpdateMetadata(ctx, documentID, meta, version)
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {

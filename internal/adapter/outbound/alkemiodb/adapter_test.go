@@ -236,27 +236,33 @@ func TestUpdateMetadata(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	var id, bucketID [16]byte
+	var id, bucketID, authID [16]byte
 	var tempLoc bool
 	var displayName string
 	var version int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "temporaryLocation", "displayName", version FROM file LIMIT 1`,
-	).Scan(&id, &bucketID, &tempLoc, &displayName, &version)
+		`SELECT id, "storageBucketId", "authorizationId", "temporaryLocation", "displayName", version FROM file WHERE "authorizationId" IS NOT NULL LIMIT 1`,
+	).Scan(&id, &bucketID, &authID, &tempLoc, &displayName, &version)
 	if err != nil {
 		t.Skip("no documents")
 	}
 	docID := uuid.UUID(id)
 	origBucket := uuid.UUID(bucketID)
+	origAuth := uuid.UUID(authID)
 
-	// Update with current version (optimistic lock)
-	err = a.UpdateMetadata(context.Background(), docID, origBucket, !tempLoc, displayName, int(version))
+	// Update with current version (optimistic lock). Preserve the row's
+	// authorizationId so this test does not mutate auth/ownership.
+	err = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		StorageBucketID: origBucket, TemporaryLocation: !tempLoc, DisplayName: displayName, AuthorizationID: origAuth,
+	}, int(version))
 	if err != nil {
 		t.Fatalf("UpdateMetadata: %v", err)
 	}
 	defer func() {
 		// Restore with incremented version
-		_ = a.UpdateMetadata(context.Background(), docID, origBucket, tempLoc, displayName, int(version+1))
+		_ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+			StorageBucketID: origBucket, TemporaryLocation: tempLoc, DisplayName: displayName, AuthorizationID: origAuth,
+		}, int(version+1))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -270,7 +276,9 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: uuid.New(),
+	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}

@@ -51,8 +51,8 @@ func (q *Queries) CountDocumentsByExternalID(ctx context.Context, externalid str
 const createDocument = `-- name: CreateDocument :one
 INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-                      "createdDate", "updatedDate", version, content_metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13)
+                      "createdDate", "updatedDate", version, content_metadata, "externalReference")
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, $14)
 RETURNING id
 `
 
@@ -70,6 +70,7 @@ type CreateDocumentParams struct {
 	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	ContentMetadata   []byte             `json:"content_metadata"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
 }
 
 func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) (pgtype.UUID, error) {
@@ -87,6 +88,7 @@ func (q *Queries) CreateDocument(ctx context.Context, arg CreateDocumentParams) 
 		arg.CreatedDate,
 		arg.UpdatedDate,
 		arg.ContentMetadata,
+		arg.ExternalReference,
 	)
 	var id pgtype.UUID
 	err := row.Scan(&id)
@@ -115,7 +117,7 @@ func (q *Queries) DeleteDocument(ctx context.Context, id pgtype.UUID) (DeleteDoc
 const findDocumentByExternalIDAndBucket = `-- name: FindDocumentByExternalIDAndBucket :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version, content_metadata
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
 ORDER BY "createdDate" ASC, id ASC
@@ -142,6 +144,7 @@ type FindDocumentByExternalIDAndBucketRow struct {
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
 	ContentMetadata   []byte             `json:"content_metadata"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
 }
 
 // Deterministic selection: oldest row wins. Matters if historical duplicates
@@ -165,6 +168,7 @@ func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg Fin
 		&i.UpdatedDate,
 		&i.Version,
 		&i.ContentMetadata,
+		&i.ExternalReference,
 	)
 	return i, err
 }
@@ -172,7 +176,7 @@ func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg Fin
 const getDocumentByID = `-- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version, content_metadata
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
 WHERE id = $1
 `
@@ -192,6 +196,7 @@ type GetDocumentByIDRow struct {
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
 	ContentMetadata   []byte             `json:"content_metadata"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
 }
 
 func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocumentByIDRow, error) {
@@ -212,6 +217,119 @@ func (q *Queries) GetDocumentByID(ctx context.Context, id pgtype.UUID) (GetDocum
 		&i.UpdatedDate,
 		&i.Version,
 		&i.ContentMetadata,
+		&i.ExternalReference,
+	)
+	return i, err
+}
+
+const getDocumentByReference = `-- name: GetDocumentByReference :one
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
+FROM file
+WHERE "externalReference" = $1
+ORDER BY "createdDate" ASC, id ASC
+LIMIT 1
+`
+
+type GetDocumentByReferenceRow struct {
+	ID                pgtype.UUID        `json:"id"`
+	ExternalID        string             `json:"externalID"`
+	MimeType          string             `json:"mimeType"`
+	Size              int32              `json:"size"`
+	DisplayName       string             `json:"displayName"`
+	CreatedBy         pgtype.UUID        `json:"createdBy"`
+	TemporaryLocation bool               `json:"temporaryLocation"`
+	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
+	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
+	TagsetId          pgtype.UUID        `json:"tagsetId"`
+	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
+	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
+	Version           int32              `json:"version"`
+	ContentMetadata   []byte             `json:"content_metadata"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
+}
+
+// Global by-reference lookup (provider fetch): resolves an opaque
+// externalReference across ALL buckets. Several buckets may carry the same
+// reference (re-share, one shared blob); oldest row wins deterministically.
+func (q *Queries) GetDocumentByReference(ctx context.Context, externalreference pgtype.Text) (GetDocumentByReferenceRow, error) {
+	row := q.db.QueryRow(ctx, getDocumentByReference, externalreference)
+	var i GetDocumentByReferenceRow
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalID,
+		&i.MimeType,
+		&i.Size,
+		&i.DisplayName,
+		&i.CreatedBy,
+		&i.TemporaryLocation,
+		&i.StorageBucketId,
+		&i.AuthorizationId,
+		&i.TagsetId,
+		&i.CreatedDate,
+		&i.UpdatedDate,
+		&i.Version,
+		&i.ContentMetadata,
+		&i.ExternalReference,
+	)
+	return i, err
+}
+
+const getDocumentByReferenceInBucket = `-- name: GetDocumentByReferenceInBucket :one
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
+FROM file
+WHERE "externalReference" = $1 AND "storageBucketId" = $2
+LIMIT 1
+`
+
+type GetDocumentByReferenceInBucketParams struct {
+	ExternalReference pgtype.Text `json:"externalReference"`
+	StorageBucketId   pgtype.UUID `json:"storageBucketId"`
+}
+
+type GetDocumentByReferenceInBucketRow struct {
+	ID                pgtype.UUID        `json:"id"`
+	ExternalID        string             `json:"externalID"`
+	MimeType          string             `json:"mimeType"`
+	Size              int32              `json:"size"`
+	DisplayName       string             `json:"displayName"`
+	CreatedBy         pgtype.UUID        `json:"createdBy"`
+	TemporaryLocation bool               `json:"temporaryLocation"`
+	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
+	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
+	TagsetId          pgtype.UUID        `json:"tagsetId"`
+	CreatedDate       pgtype.Timestamptz `json:"createdDate"`
+	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
+	Version           int32              `json:"version"`
+	ContentMetadata   []byte             `json:"content_metadata"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
+}
+
+// Bucket-scoped by-reference lookup (read resolution): the single document
+// carrying this reference in the given bucket. UNIQUE(externalReference,
+// storageBucketId) guarantees at most one match.
+func (q *Queries) GetDocumentByReferenceInBucket(ctx context.Context, arg GetDocumentByReferenceInBucketParams) (GetDocumentByReferenceInBucketRow, error) {
+	row := q.db.QueryRow(ctx, getDocumentByReferenceInBucket, arg.ExternalReference, arg.StorageBucketId)
+	var i GetDocumentByReferenceInBucketRow
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalID,
+		&i.MimeType,
+		&i.Size,
+		&i.DisplayName,
+		&i.CreatedBy,
+		&i.TemporaryLocation,
+		&i.StorageBucketId,
+		&i.AuthorizationId,
+		&i.TagsetId,
+		&i.CreatedDate,
+		&i.UpdatedDate,
+		&i.Version,
+		&i.ContentMetadata,
+		&i.ExternalReference,
 	)
 	return i, err
 }
@@ -298,9 +416,12 @@ UPDATE file
 SET "storageBucketId"    = $2,
     "temporaryLocation"  = $3,
     "displayName"        = $4,
-    "updatedDate"        = $5,
+    "authorizationId"    = $5,
+    "createdBy"          = $6,
+    "externalReference"  = $7,
+    "updatedDate"        = $8,
     version              = version + 1
-WHERE id = $1 AND version = $6
+WHERE id = $1 AND version = $9
 `
 
 type UpdateDocumentMetadataParams struct {
@@ -308,20 +429,28 @@ type UpdateDocumentMetadataParams struct {
 	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`
 	TemporaryLocation bool               `json:"temporaryLocation"`
 	DisplayName       string             `json:"displayName"`
+	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
+	CreatedBy         pgtype.UUID        `json:"createdBy"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
 }
 
-// Updates the mutable metadata fields (storageBucketId, temporaryLocation,
-// displayName) atomically with optimistic locking. Caller fills unchanged
-// fields with their current values. mimeType, externalID, size are not
-// mutable through this query — they change only via UpdateDocumentFile.
+// Updates the mutable metadata fields atomically with optimistic locking.
+// Caller fills unchanged fields with their current values. This is the
+// "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
+// displayName it also re-points authorizationId, createdBy, and the opaque
+// externalReference. mimeType, externalID, size are not mutable here — they
+// change only via UpdateDocumentFile.
 func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocumentMetadataParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateDocumentMetadata,
 		arg.ID,
 		arg.StorageBucketId,
 		arg.TemporaryLocation,
 		arg.DisplayName,
+		arg.AuthorizationId,
+		arg.CreatedBy,
+		arg.ExternalReference,
 		arg.UpdatedDate,
 		arg.Version,
 	)

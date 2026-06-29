@@ -7,6 +7,7 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,45 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	documentMetaResponse(doc).Render(w)
 }
 
+// ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
+// ref is required. bucketId omitted → GLOBAL resolution (the provider's fetch:
+// any document carrying the reference, all sharing one blob). bucketId present
+// → bucket-SCOPED resolution (read resolution: the document in that bucket).
+// 200 → document meta; 404 → no match.
+func (h *DocumentHandler) ByReference(w http.ResponseWriter, r *http.Request) {
+	ref := r.URL.Query().Get("ref")
+	if ref == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: ref")
+		return
+	}
+
+	var (
+		doc model.Document
+		err error
+	)
+	if bucketParam := r.URL.Query().Get("bucketId"); bucketParam == "" {
+		doc, err = h.Service.Repo.GetByReference(r.Context(), ref)
+	} else {
+		bucketID, perr := uuid.Parse(bucketParam)
+		if perr != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid bucketId")
+			return
+		}
+		doc, err = h.Service.Repo.GetByReferenceInBucket(r.Context(), ref, bucketID)
+	}
+	if err != nil {
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			writeJSONError(w, http.StatusNotFound, "document not found")
+			return
+		}
+		h.Logger.Error("failed to lookup document by reference", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	documentMetaResponse(doc).Render(w)
+}
+
 // GetContent handles GET /internal/file/{id}/content
 func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
@@ -101,15 +141,17 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 // map: direct field reads keep generated API docs clean (map-index string
 // literals are misinferred as path parameters by the spec generator).
 type createFields struct {
-	displayName       string
-	storageBucketID   string
-	authorizationID   string
-	tagsetID          string
-	createdBy         string
-	temporaryLocation string
-	skipDedup         string
-	allowedMimeTypes  string
-	maxFileSize       string
+	displayName         string
+	storageBucketID     string
+	authorizationID     string
+	tagsetID            string
+	createdBy           string
+	temporaryLocation   string
+	skipDedup           string
+	allowedMimeTypes    string
+	maxFileSize         string
+	externalReference   string
+	skipImageProcessing string
 }
 
 func (f *createFields) set(name, value string) {
@@ -132,6 +174,10 @@ func (f *createFields) set(name, value string) {
 		f.allowedMimeTypes = value
 	case "maxFileSize":
 		f.maxFileSize = value
+	case "externalReference":
+		f.externalReference = value
+	case "skipImageProcessing":
+		f.skipImageProcessing = value
 	}
 }
 
@@ -199,6 +245,11 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, err
 	}
 
+	skipImageProcessing, err := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if err != nil {
+		return input, nil, 0, err
+	}
+
 	if v := fields.allowedMimeTypes; v != "" {
 		parts := strings.Split(v, ",")
 		for _, p := range parts {
@@ -217,15 +268,26 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 	}
 
 	input = model.CreateDocumentInput{
-		DisplayName:       fields.displayName,
-		CreatedBy:         createdBy,
-		TemporaryLocation: temporaryLocation,
-		StorageBucketID:   storageBucketID,
-		AuthorizationID:   authorizationID,
-		TagsetID:          tagsetID,
-		SkipDedup:         skipDedup,
+		DisplayName:         fields.displayName,
+		CreatedBy:           createdBy,
+		TemporaryLocation:   temporaryLocation,
+		StorageBucketID:     storageBucketID,
+		AuthorizationID:     authorizationID,
+		TagsetID:            tagsetID,
+		ExternalReference:   optionalString(fields.externalReference),
+		SkipImageProcessing: skipImageProcessing,
+		SkipDedup:           skipDedup,
 	}
 	return input, allowedMimeTypes, maxFileSize, nil
+}
+
+// optionalString maps an empty multipart field to nil and any non-empty value
+// to a pointer — the wire representation of an absent optional string field.
+func optionalString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 // writeIngestTransportError maps a streaming transport failure to its HTTP
@@ -298,8 +360,17 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, http.StatusBadRequest, "duplicate file part")
 				return
 			}
+			// The verbatim (raw-store) decision is taken at stage time, so the
+			// skipImageProcessing flag MUST precede the file part in the
+			// multipart body (the provider sends metadata first). A value
+			// arriving after the file is ignored for staging.
+			skipImageProcessing, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+			if perr != nil {
+				writeJSONError(w, http.StatusBadRequest, perr.Error())
+				return
+			}
 			declaredMIME := part.Header.Get("Content-Type")
-			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME)
+			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME, skipImageProcessing)
 			if err != nil {
 				h.writeStageError(w, err)
 				return
@@ -470,6 +541,7 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		AuthorizationID:     authID,
 		TagsetID:            tagsetID,
 		CreatedBy:           createdBy,
+		ExternalReference:   body.ExternalReference,
 		SkipDedup:           body.SkipDedup,
 	}
 
@@ -551,11 +623,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body UpdateDocumentRequest
-	if !decodeStrictJSON(w, r, &body) {
+	present, ok := decodeUpdateRequest(w, r, &body)
+	if !ok {
 		return
 	}
 
-	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
+	if len(present) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
@@ -578,14 +651,13 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bucketID, err := resolveBucketID(doc, body)
+	meta, err := buildMetadataUpdate(doc, body, present)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, meta, doc.Version)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
@@ -735,35 +807,92 @@ func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) boo
 	return true
 }
 
-// resolveBucketID resolves the effective storage bucket for a PATCH: the
-// validated UUID from body.storageBucketId when present, otherwise the
-// document's current bucket. A malformed storageBucketId yields an error
-// whose message is safe to return verbatim as a 400 body.
-func resolveBucketID(doc model.Document, body UpdateDocumentRequest) (uuid.UUID, error) {
-	if body.StorageBucketID == nil {
-		return doc.StorageBucketID, nil
-	}
-	parsed, err := uuid.Parse(*body.StorageBucketID)
+// decodeUpdateRequest strict-decodes the PATCH body into dst and returns the
+// set of top-level keys that were actually present, so the handler can tell
+// "field omitted" (keep) from "field explicitly null" (clear) for the
+// tri-state fields. On any malformed input it writes the 400 itself and
+// reports ok=false. Mirrors decodeStrictJSON's unknown-field / trailing-data
+// rejection.
+func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocumentRequest) (present map[string]struct{}, ok bool) {
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return uuid.UUID{}, fmt.Errorf("invalid storageBucketId")
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
 	}
-	return parsed, nil
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+		return nil, false
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
+	}
+	present = make(map[string]struct{}, len(keys))
+	for k := range keys {
+		present[k] = struct{}{}
+	}
+	return present, true
 }
 
-// mergeUpdateFallbacks merges the validation-free PATCH fields over the
-// row's current values: fields present in the body win, omitted fields keep
-// what the document already has. storageBucketId is resolved separately by
-// resolveBucketID because it needs UUID validation first.
-func mergeUpdateFallbacks(doc model.Document, body UpdateDocumentRequest) (tempLoc bool, displayName string) {
-	tempLoc = doc.TemporaryLocation
+// buildMetadataUpdate merges the PATCH fields over the row's current values to
+// produce the full DocumentMetadataUpdate the move primitive persists. Fields
+// present in the body win; omitted fields keep what the document already has.
+// authorizationId/createdBy/externalReference are the re-attribute fields;
+// externalReference and createdBy honor explicit JSON null as "clear". A
+// malformed UUID yields an error whose message is safe as a 400 body.
+func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present map[string]struct{}) (model.DocumentMetadataUpdate, error) {
+	meta := model.DocumentMetadataUpdate{
+		StorageBucketID:   doc.StorageBucketID,
+		TemporaryLocation: doc.TemporaryLocation,
+		DisplayName:       doc.DisplayName,
+		AuthorizationID:   doc.AuthorizationID,
+		CreatedBy:         doc.CreatedBy,
+		ExternalReference: doc.ExternalReference,
+	}
+
+	if body.StorageBucketID != nil {
+		parsed, err := uuid.Parse(*body.StorageBucketID)
+		if err != nil {
+			return meta, fmt.Errorf("invalid storageBucketId")
+		}
+		meta.StorageBucketID = parsed
+	}
 	if body.TemporaryLocation != nil {
-		tempLoc = *body.TemporaryLocation
+		meta.TemporaryLocation = *body.TemporaryLocation
 	}
-	displayName = doc.DisplayName
 	if body.DisplayName != nil {
-		displayName = *body.DisplayName
+		meta.DisplayName = *body.DisplayName
 	}
-	return tempLoc, displayName
+	if body.AuthorizationID != nil {
+		parsed, err := uuid.Parse(*body.AuthorizationID)
+		if err != nil {
+			return meta, fmt.Errorf("invalid authorizationId")
+		}
+		meta.AuthorizationID = parsed
+	}
+	if _, ok := present["createdBy"]; ok {
+		if body.CreatedBy == nil {
+			meta.CreatedBy = nil // explicit null → clear
+		} else {
+			parsed, err := uuid.Parse(*body.CreatedBy)
+			if err != nil {
+				return meta, fmt.Errorf("invalid createdBy")
+			}
+			meta.CreatedBy = &parsed
+		}
+	}
+	if _, ok := present["externalReference"]; ok {
+		meta.ExternalReference = body.ExternalReference // value, or nil for explicit null → clear
+	}
+
+	return meta, nil
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {
@@ -776,6 +905,7 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketID:   doc.StorageBucketID.String(),
 		AuthorizationID:   doc.AuthorizationID.String(),
+		ExternalReference: doc.ExternalReference,
 		CreatedDate:       doc.CreatedDate,
 		UpdatedDate:       doc.UpdatedDate,
 	}

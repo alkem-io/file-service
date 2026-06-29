@@ -36,6 +36,17 @@ type mockDocRepo struct {
 	lastUpdateTemporary   bool
 	lastUpdateDisplayName string
 	lastUpdateVersion     int
+	lastUpdateAuthID      uuid.UUID
+	lastUpdateCreatedBy   *uuid.UUID
+	lastUpdateExternalRef *string
+
+	// by-reference lookups (013): refDoc served by both Get*ByReference;
+	// nil → ErrDocumentNotFound. refErr overrides. lastRefBucket records the
+	// bucket passed to the scoped form (nil ⇒ global form was used).
+	refDoc        *model.Document
+	refErr        error
+	lastRefValue  string
+	lastRefBucket *uuid.UUID
 
 	// Captured args from Create / UpdateFile content_metadata params (US1+).
 	lastCreateContentMetadata     model.ContentMetadata
@@ -77,23 +88,52 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
 	m.updateMetadataCalls++
-	m.lastUpdateBucketID = bucketID
-	m.lastUpdateTemporary = temporary
-	m.lastUpdateDisplayName = displayName
+	m.lastUpdateBucketID = meta.StorageBucketID
+	m.lastUpdateTemporary = meta.TemporaryLocation
+	m.lastUpdateDisplayName = meta.DisplayName
 	m.lastUpdateVersion = version
+	m.lastUpdateAuthID = meta.AuthorizationID
+	m.lastUpdateCreatedBy = meta.CreatedBy
+	m.lastUpdateExternalRef = meta.ExternalReference
 	if m.updateErr != nil {
 		return m.updateErr
 	}
 	// Mirror real adapter behavior so the subsequent service GetByID
 	// reflects the update — otherwise tests can't tell whether the
 	// handler propagated the new values or returned stale ones.
-	m.doc.StorageBucketID = bucketID
-	m.doc.TemporaryLocation = temporary
-	m.doc.DisplayName = displayName
+	m.doc.StorageBucketID = meta.StorageBucketID
+	m.doc.TemporaryLocation = meta.TemporaryLocation
+	m.doc.DisplayName = meta.DisplayName
+	m.doc.AuthorizationID = meta.AuthorizationID
+	m.doc.CreatedBy = meta.CreatedBy
+	m.doc.ExternalReference = meta.ExternalReference
 	m.doc.Version = version + 1
 	return nil
+}
+func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
+	m.lastRefValue = reference
+	m.lastRefBucket = nil
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, bucketID uuid.UUID) (model.Document, error) {
+	m.lastRefValue = reference
+	b := bucketID
+	m.lastRefBucket = &b
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return m.deleteResult, m.deleteErr

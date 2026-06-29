@@ -2351,3 +2351,202 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 		}
 	}
 }
+
+// --- 013: by-reference lookup + PATCH move (re-attribute) ---
+
+// withURLParam attaches a chi route context carrying a single URL param, so a
+// handler that reads chi.URLParam can be invoked directly without a router.
+func withURLParam(req *http.Request, key, value string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add(key, value)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// T004: GET /internal/file/by-reference resolves GLOBALLY (bucketId omitted)
+// and bucket-SCOPED (bucketId present), and 404s on a miss.
+func TestByReference_GlobalAndScoped(t *testing.T) {
+	ref := "synapse-media-id-42"
+	bucket := uuid.New()
+	docID := uuid.New()
+	refDoc := model.Document{
+		ID:                docID,
+		ExternalID:        "hash-abc",
+		MimeType:          "image/jpeg",
+		Size:              123,
+		StorageBucketID:   bucket,
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}
+
+	t.Run("global (no bucketId)", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = &refDoc
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref, nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if repo.lastRefBucket != nil {
+			t.Errorf("global lookup must not pass a bucket; got %v", *repo.lastRefBucket)
+		}
+		if repo.lastRefValue != ref {
+			t.Errorf("ref = %q, want %q", repo.lastRefValue, ref)
+		}
+		var got DocumentMetaResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.ID != docID.String() {
+			t.Errorf("id = %q, want %q", got.ID, docID.String())
+		}
+		if got.ExternalReference == nil || *got.ExternalReference != ref {
+			t.Errorf("externalReference = %v, want %q", got.ExternalReference, ref)
+		}
+	})
+
+	t.Run("scoped (bucketId present)", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = &refDoc
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref+"&bucketId="+bucket.String(), nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if repo.lastRefBucket == nil || *repo.lastRefBucket != bucket {
+			t.Errorf("scoped lookup must pass bucket %v; got %v", bucket, repo.lastRefBucket)
+		}
+	})
+
+	t.Run("missing ref → 400", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("invalid bucketId → 400", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref=x&bucketId=not-a-uuid", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("not found → 404", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = nil // → ErrDocumentNotFound
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref=missing", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+// T008: PATCH /internal/file/{id} re-homes: sets storageBucketId, authorizationId,
+// createdBy, and externalReference in one call (the inbound move primitive).
+func TestUpdate_MovePlusReattribute(t *testing.T) {
+	docID := uuid.New()
+	newBucket := uuid.New()
+	newAuth := uuid.New()
+	newCreatedBy := uuid.New()
+	newRef := "media-id-moved"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	body := fmt.Sprintf(`{"storageBucketId":%q,"authorizationId":%q,"createdBy":%q,"externalReference":%q}`,
+		newBucket, newAuth, newCreatedBy, newRef)
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req = withURLParam(req, "id", docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateBucketID != newBucket {
+		t.Errorf("bucket = %v, want %v", repo.lastUpdateBucketID, newBucket)
+	}
+	if repo.lastUpdateAuthID != newAuth {
+		t.Errorf("authorizationId = %v, want %v", repo.lastUpdateAuthID, newAuth)
+	}
+	if repo.lastUpdateCreatedBy == nil || *repo.lastUpdateCreatedBy != newCreatedBy {
+		t.Errorf("createdBy = %v, want %v", repo.lastUpdateCreatedBy, newCreatedBy)
+	}
+	if repo.lastUpdateExternalRef == nil || *repo.lastUpdateExternalRef != newRef {
+		t.Errorf("externalReference = %v, want %q", repo.lastUpdateExternalRef, newRef)
+	}
+}
+
+// externalReference is tri-state on PATCH: explicit null clears it.
+func TestUpdate_ClearExternalReference(t *testing.T) {
+	docID := uuid.New()
+	existingRef := "old-ref"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		Version:           1,
+		ExternalReference: &existingRef,
+		MimeType:          "image/jpeg",
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"externalReference":null}`))
+	req = withURLParam(req, "id", docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateExternalRef != nil {
+		t.Errorf("externalReference = %v, want nil (explicit null clears)", *repo.lastUpdateExternalRef)
+	}
+}
+
+// Omitting externalReference keeps the row's current value (not cleared).
+func TestUpdate_KeepsExternalReferenceWhenOmitted(t *testing.T) {
+	docID := uuid.New()
+	existingRef := "keep-me"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		Version:           1,
+		ExternalReference: &existingRef,
+		MimeType:          "image/jpeg",
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
+	req = withURLParam(req, "id", docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateExternalRef == nil || *repo.lastUpdateExternalRef != existingRef {
+		t.Errorf("externalReference = %v, want %q (omitted ⇒ keep)", repo.lastUpdateExternalRef, existingRef)
+	}
+}

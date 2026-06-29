@@ -1,7 +1,7 @@
 -- name: GetDocumentByID :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version, content_metadata
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
 WHERE id = $1;
 
@@ -11,17 +11,40 @@ WHERE id = $1;
 -- unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-       "createdDate", "updatedDate", version, content_metadata
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
 WHERE "externalID" = $1 AND "storageBucketId" = $2
 ORDER BY "createdDate" ASC, id ASC
 LIMIT 1;
 
+-- name: GetDocumentByReference :one
+-- Global by-reference lookup (provider fetch): resolves an opaque
+-- externalReference across ALL buckets. Several buckets may carry the same
+-- reference (re-share, one shared blob); oldest row wins deterministically.
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
+FROM file
+WHERE "externalReference" = $1
+ORDER BY "createdDate" ASC, id ASC
+LIMIT 1;
+
+-- name: GetDocumentByReferenceInBucket :one
+-- Bucket-scoped by-reference lookup (read resolution): the single document
+-- carrying this reference in the given bucket. UNIQUE(externalReference,
+-- storageBucketId) guarantees at most one match.
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
+FROM file
+WHERE "externalReference" = $1 AND "storageBucketId" = $2
+LIMIT 1;
+
 -- name: CreateDocument :one
 INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy",
                       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-                      "createdDate", "updatedDate", version, content_metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13)
+                      "createdDate", "updatedDate", version, content_metadata, "externalReference")
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, $14)
 RETURNING id;
 
 -- name: UpdateDocumentFile :execrows
@@ -33,17 +56,22 @@ SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
 WHERE id = $1;
 
 -- name: UpdateDocumentMetadata :execrows
--- Updates the mutable metadata fields (storageBucketId, temporaryLocation,
--- displayName) atomically with optimistic locking. Caller fills unchanged
--- fields with their current values. mimeType, externalID, size are not
--- mutable through this query — they change only via UpdateDocumentFile.
+-- Updates the mutable metadata fields atomically with optimistic locking.
+-- Caller fills unchanged fields with their current values. This is the
+-- "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
+-- displayName it also re-points authorizationId, createdBy, and the opaque
+-- externalReference. mimeType, externalID, size are not mutable here — they
+-- change only via UpdateDocumentFile.
 UPDATE file
 SET "storageBucketId"    = $2,
     "temporaryLocation"  = $3,
     "displayName"        = $4,
-    "updatedDate"        = $5,
+    "authorizationId"    = $5,
+    "createdBy"          = $6,
+    "externalReference"  = $7,
+    "updatedDate"        = $8,
     version              = version + 1
-WHERE id = $1 AND version = $6;
+WHERE id = $1 AND version = $9;
 
 -- name: BackfillContentMetadata :execrows
 -- Compare-and-set: only writes when content_metadata is still empty AND

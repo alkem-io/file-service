@@ -50,6 +50,12 @@ type Document struct {
 	UpdatedDate       time.Time
 	Version           int
 
+	// ExternalReference is an OPAQUE caller-supplied reference (the Synapse
+	// media_id for Matrix media). file-service never parses it; it is purely a
+	// lookup key. Nil when the row has no reference. Distinct from ExternalID
+	// (the content hash). UNIQUE per (ExternalReference, StorageBucketID).
+	ExternalReference *string
+
 	// Reused is set to true when a dedup lookup returned an existing row
 	// instead of inserting a new one. Response-only; not persisted.
 	// When Reused is true, the caller-supplied AuthorizationID and TagsetID
@@ -81,6 +87,18 @@ type CreateDocumentInput struct {
 	AuthorizationID   uuid.UUID
 	TagsetID          *uuid.UUID
 
+	// ExternalReference is the opaque caller reference persisted on the new
+	// row (the Synapse media_id for Matrix media). Nil leaves it unset.
+	// file-service never parses it.
+	ExternalReference *string
+
+	// SkipImageProcessing, when true, stores the upload VERBATIM: no HEIC/WebP
+	// transcode, no EXIF-orientation rotate, no dimension measure. The stored
+	// bytes are byte-identical to the upload. Used by the Synapse media
+	// provider so Synapse's read-back (content-length, hashes) stays exact.
+	// Only meaningful on create; the verbatim decision is taken at stage time.
+	SkipImageProcessing bool
+
 	// SkipDedup, when true, bypasses the per-bucket content-hash dedup
 	// lookup and forces a fresh row insert even if an existing row in the
 	// same bucket has the same externalID. Use case: placeholder uploads
@@ -100,9 +118,28 @@ type CopyDocumentInput struct {
 	TagsetID            *uuid.UUID
 	CreatedBy           *uuid.UUID
 
+	// ExternalReference is the opaque caller reference set on the copied row
+	// (the re-share fork carries the same media_id). Nil leaves it unset.
+	ExternalReference *string
+
 	// SkipDedup mirrors the same flag on CreateDocumentInput. Default false
 	// runs the per-bucket dedup lookup; true forces a fresh row insert.
 	SkipDedup bool
+}
+
+// DocumentMetadataUpdate is the full set of mutable metadata fields written by
+// the PATCH "move + re-attribute" primitive. Every field carries its intended
+// final value — the handler reads the current row and fills any field the
+// caller omitted, so the persisted UPDATE always overwrites all of them.
+// Content fields (mimeType, externalID, size) are not part of this — they
+// change only via StoreAndLink (replace content).
+type DocumentMetadataUpdate struct {
+	StorageBucketID   uuid.UUID
+	TemporaryLocation bool
+	DisplayName       string
+	AuthorizationID   uuid.UUID
+	CreatedBy         *uuid.UUID
+	ExternalReference *string
 }
 
 // StoredFile represents the result of a file storage operation.
