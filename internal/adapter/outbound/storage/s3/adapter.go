@@ -19,6 +19,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -36,6 +37,9 @@ type Config struct {
 	// StageDir hosts the local hash-while-upload staging files. Empty =
 	// os.TempDir(). Publish reads the staged file and FPutObjects it.
 	StageDir string
+	// Logger receives best-effort warnings (e.g. a leaked staging file whose
+	// removal failed after a durable publish). Nil falls back to a no-op.
+	Logger *zap.Logger
 }
 
 // Adapter implements port.StoragePort using an S3-compatible object store.
@@ -43,6 +47,7 @@ type Adapter struct {
 	client   *minio.Client
 	bucket   string
 	stageDir string
+	logger   *zap.Logger
 }
 
 // New constructs the S3 adapter and its underlying client. It does not create
@@ -56,7 +61,11 @@ func New(cfg Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init s3 client: %w", err)
 	}
-	return &Adapter{client: client, bucket: cfg.Bucket, stageDir: cfg.StageDir}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &Adapter{client: client, bucket: cfg.Bucket, stageDir: cfg.StageDir, logger: logger}, nil
 }
 
 // Save stores a complete buffer on top of the streaming stage so there is one
@@ -220,8 +229,14 @@ func (s *stage) Commit() (model.StoredFile, error) {
 	}
 
 	if rmErr := os.Remove(s.tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
-		// The object is safely published; only the staging artifact leaked.
-		return model.StoredFile{}, fmt.Errorf("remove staging file after publish: %w", rmErr)
+		// The object is durably published — failing the request here would 500
+		// a successful commit. Log the leaked staging artifact and return the
+		// committed file; orphan temp files are an operational cleanup concern,
+		// not a request failure.
+		s.a.logger.Warn("s3 stage: failed to remove staging file after publish",
+			zap.String("externalID", externalID),
+			zap.String("tmpName", s.tmpName),
+			zap.Error(rmErr))
 	}
 	s.committed = true
 	return model.StoredFile{ExternalID: externalID, Size: s.size, Created: created}, nil

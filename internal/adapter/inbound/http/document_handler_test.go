@@ -68,6 +68,10 @@ type stubProcessor struct {
 	// application/octet-stream so image-MIME tests exercise the
 	// dims-on-response paths.
 	detectMIME string
+
+	// transcodeCalls counts TranscodeStream invocations, so ordering tests can
+	// prove the verbatim arm ran (0) vs the transcode arm (>0).
+	transcodeCalls int
 }
 
 func (p *stubProcessor) DetectMIME(_ []byte) string {
@@ -1738,7 +1742,7 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+	if !strings.Contains(rr.Body.String(), "update conflicts with an existing document") {
 		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
 	}
 }
@@ -2283,6 +2287,7 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 // TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
 // detectMIME override or the input type.
 func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	p.transcodeCalls++
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}
@@ -2349,6 +2354,108 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 		if !st.aborted {
 			t.Error("stage not aborted after oversized-field rejection")
 		}
+	}
+}
+
+// M3 (013): the verbatim-store contract is byte-exact only when
+// skipImageProcessing precedes the file part (the raw-store decision is taken
+// at stage time). A skipImageProcessing=true that arrives AFTER the file part
+// — when a transcodable image may already have been transcoded/rotated — must
+// be rejected with 400 rather than silently transcoded, signalling the broken
+// contract to the caller.
+func TestDocumentHandler_Create_SkipImageProcessing_AfterFile_Rejected(t *testing.T) {
+	h, _, storage, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png" // a transcodable type → the silent-transcode risk
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	// skipImageProcessing arrives AFTER the file — the misordered case.
+	_ = writer.WriteField("skipImageProcessing", "true")
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for misordered skipImageProcessing, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "skipImageProcessing must be sent before the file part") {
+		t.Errorf("body = %q, want the ordering-contract message", rr.Body.String())
+	}
+	// FR-006: the early return must abort the already-open stage.
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after misordered-skip rejection")
+		}
+	}
+}
+
+// Counterpart to the misordered case: skipImageProcessing=true sent BEFORE the
+// file part is honored — the verbatim arm runs (no transcode) and the upload
+// succeeds. Proves the guard rejects only the unsafe ordering.
+func TestDocumentHandler_Create_SkipImageProcessing_BeforeFile_Verbatim(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("skipImageProcessing", "true") // metadata first
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	if proc.transcodeCalls != 0 {
+		t.Errorf("transcodeCalls = %d, want 0 (verbatim must not transcode)", proc.transcodeCalls)
+	}
+}
+
+// A skipImageProcessing=false arriving after the file part is harmless (false
+// is the staged default), so it must NOT be rejected — only true is unsafe.
+func TestDocumentHandler_Create_SkipImageProcessingFalse_AfterFile_Allowed(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.WriteField("skipImageProcessing", "false")
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for skip=false after file, body: %s", rr.Code, rr.Body.String())
 	}
 }
 

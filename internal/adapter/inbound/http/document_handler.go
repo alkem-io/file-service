@@ -316,8 +316,12 @@ func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err e
 // whole-file buffering. Parts are processed in whatever order they arrive;
 // metadata validation always happens after the loop, before the stage is
 // published. (The known caller sends the file part first — research R4 —
-// which is why bucket-level limits cannot gate the stream early; the
-// handler itself does not depend on any ordering.)
+// which is why bucket-level limits cannot gate the stream early.)
+//
+// One ordering dependency exists (spec 013): skipImageProcessing is consumed
+// when the file part is staged, so the verbatim/byte-exact contract can only
+// be honored if it precedes the file. A skipImageProcessing=true that arrives
+// AFTER the file part is rejected with 400 rather than silently transcoded.
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	capBytes := h.MaxUploadSize
 	if capBytes <= 0 {
@@ -362,8 +366,9 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			}
 			// The verbatim (raw-store) decision is taken at stage time, so the
 			// skipImageProcessing flag MUST precede the file part in the
-			// multipart body (the provider sends metadata first). A value
-			// arriving after the file is ignored for staging.
+			// multipart body (the provider sends metadata first). A
+			// skipImageProcessing=true arriving AFTER the file is rejected
+			// below rather than silently transcoded.
 			skipImageProcessing, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
 			if perr != nil {
 				writeJSONError(w, http.StatusBadRequest, perr.Error())
@@ -375,8 +380,25 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				h.writeStageError(w, err)
 				return
 			}
-		} else if !h.readMetadataField(w, &fields, part) {
-			return
+		} else {
+			if !h.readMetadataField(w, &fields, part) {
+				return
+			}
+			// Verbatim-store contract guard (spec 013): if skipImageProcessing=true
+			// arrives after the file part has already been staged, the bytes may
+			// already have been transcoded/rotated and the byte-exact contract
+			// cannot be honored — reject loudly rather than silently transcode.
+			if staged != nil && part.FormName() == "skipImageProcessing" {
+				skip, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+				if perr != nil {
+					writeJSONError(w, http.StatusBadRequest, perr.Error())
+					return
+				}
+				if skip {
+					writeJSONError(w, http.StatusBadRequest, "skipImageProcessing must be sent before the file part")
+					return
+				}
+			}
 		}
 		_ = part.Close()
 	}
@@ -664,7 +686,12 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, model.ErrDuplicateKey) {
-			writeJSONError(w, http.StatusConflict, "destination bucket already contains a document with this content")
+			// PATCH never changes externalID, so the collision is not "same
+			// content": with the (externalReference, storageBucketId) index a
+			// move can collide on reference, and the authorizationId unique
+			// constraint can collide on re-attribution. Keep the message
+			// generic rather than naming the wrong cause.
+			writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference, authorization, or content)")
 			return
 		}
 		h.Logger.Error("failed to update document", zap.Error(err))

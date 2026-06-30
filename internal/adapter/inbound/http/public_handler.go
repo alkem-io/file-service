@@ -15,6 +15,19 @@ import (
 	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
+// safeInlineMIME is the allow-list of types served with Content-Disposition:
+// inline. Everything else — notably image/svg+xml and text/html, which execute
+// scripts in the serving origin — is forced to download via Content-Disposition:
+// attachment, defeating stored-XSS via an uploaded SVG/HTML file. These four
+// raster types cannot carry script; the web client renders them via
+// <img src=url>, which works regardless of the disposition.
+var safeInlineMIME = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
 // PublicHandler handles the authenticated public file serving endpoint.
 type PublicHandler struct {
 	Repo    port.DocumentRepo
@@ -84,6 +97,16 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 
 	// Response headers matching TS file-service
 	w.Header().Set("Content-Type", doc.MimeType)
+	// Stored-XSS hardening: never let the browser sniff a different type, and
+	// serve only known-safe raster images inline — force everything else
+	// (svg+xml, html, octet-stream, …) to download so it cannot execute script
+	// in this origin.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if safeInlineMIME[model.NormalizeMIME(doc.MimeType)] {
+		w.Header().Set("Content-Disposition", "inline")
+	} else {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", h.MaxAge))
 	w.Header().Set("Pragma", "public")
 	w.Header().Set("Expires", time.Now().Add(time.Duration(h.MaxAge)*time.Second).UTC().Format(http.TimeFormat))

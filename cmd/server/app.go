@@ -105,6 +105,7 @@ func buildStorage(cfg *config.Config, logger *zap.Logger) (port.StoragePort, err
 			Region:    cfg.S3.Region,
 			UseSSL:    cfg.S3.UseSSL,
 			StageDir:  cfg.S3.StageDir,
+			Logger:    logger,
 		})
 	case "local", "":
 		logger.Info("storage backend: local", zap.String("path", cfg.StoragePath))

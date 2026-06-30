@@ -300,6 +300,61 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 	}
 }
 
+// Stored-XSS hardening: the public serve endpoint must always set
+// X-Content-Type-Options: nosniff, serve known-safe raster images inline, and
+// force every other type — notably image/svg+xml and text/html, which run
+// script in the serving origin — to download via Content-Disposition:
+// attachment.
+func TestPublicHandler_ServeDisposition(t *testing.T) {
+	cases := []struct {
+		mime            string
+		wantDisposition string
+	}{
+		{"image/png", "inline"},
+		{"image/jpeg", "inline"},
+		{"image/gif", "inline"},
+		{"image/webp", "inline"},
+		{"image/svg+xml", "attachment"},   // script-capable
+		{"text/html", "attachment"},       // script-capable
+		{"application/pdf", "attachment"}, // not in the inline allow-list
+		{"application/octet-stream", "attachment"},
+		{"IMAGE/PNG", "inline"}, // normalization: case-insensitive match
+	}
+	for _, tc := range cases {
+		t.Run(tc.mime, func(t *testing.T) {
+			docID := uuid.New()
+			h := &PublicHandler{
+				Repo: &mockDocRepo{doc: model.Document{
+					ID:              docID,
+					ExternalID:      "abc123",
+					MimeType:        tc.mime,
+					AuthorizationID: uuid.New(),
+				}},
+				Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+				Storage: &mockStorage{data: []byte("file-content")},
+				MaxAge:  86400,
+				Logger:  zap.NewNop(),
+			}
+
+			r := chi.NewRouter()
+			r.Get("/rest/storage/file/{id}", h.ServeDocument)
+			req := httptest.NewRequest(http.MethodGet, "/rest/storage/file/"+docID.String(), nil)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+			if got := rr.Header().Get("Content-Disposition"); got != tc.wantDisposition {
+				t.Errorf("Content-Disposition = %q, want %q for %s", got, tc.wantDisposition, tc.mime)
+			}
+		})
+	}
+}
+
 func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 	docID := uuid.New()
 	h := &PublicHandler{
