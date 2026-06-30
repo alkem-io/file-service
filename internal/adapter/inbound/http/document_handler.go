@@ -290,6 +290,18 @@ func optionalString(v string) *string {
 	return &v
 }
 
+// nonNilUUID maps the zero UUID — how a NULL authorizationId column reads back
+// on the Document — to nil, so a PATCH that doesn't touch authorizationId seeds
+// the nullable update with NULL rather than rewriting the row to the zero UUID
+// (which would collide on UNIQUE("authorizationId")). Symmetric with the
+// CreatedBy seed, which is already *uuid.UUID.
+func nonNilUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
+
 // writeIngestTransportError maps a streaming transport failure to its HTTP
 // response and outcome counter (spec 020 FR-008).
 func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err error) {
@@ -879,7 +891,7 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 		StorageBucketID:   doc.StorageBucketID,
 		TemporaryLocation: doc.TemporaryLocation,
 		DisplayName:       doc.DisplayName,
-		AuthorizationID:   doc.AuthorizationID,
+		AuthorizationID:   nonNilUUID(doc.AuthorizationID),
 		CreatedBy:         doc.CreatedBy,
 		ExternalReference: doc.ExternalReference,
 	}
@@ -897,12 +909,16 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 	if body.DisplayName != nil {
 		meta.DisplayName = *body.DisplayName
 	}
-	if body.AuthorizationID != nil {
-		parsed, err := uuid.Parse(*body.AuthorizationID)
-		if err != nil {
-			return meta, fmt.Errorf("invalid authorizationId")
+	if _, ok := present["authorizationId"]; ok {
+		if body.AuthorizationID == nil {
+			meta.AuthorizationID = nil // explicit null → clear
+		} else {
+			parsed, err := uuid.Parse(*body.AuthorizationID)
+			if err != nil {
+				return meta, fmt.Errorf("invalid authorizationId")
+			}
+			meta.AuthorizationID = &parsed
 		}
-		meta.AuthorizationID = parsed
 	}
 	if _, ok := present["createdBy"]; ok {
 		if body.CreatedBy == nil {

@@ -137,7 +137,11 @@ type DocumentMetadataUpdate struct {
 	StorageBucketID   uuid.UUID
 	TemporaryLocation bool
 	DisplayName       string
-	AuthorizationID   uuid.UUID
+	// AuthorizationID is nullable so a PATCH that doesn't touch it preserves a
+	// NULL authorizationId column instead of rewriting it to the zero UUID
+	// (which would collide on the UNIQUE("authorizationId") index). Tri-state,
+	// symmetric with CreatedBy and ExternalReference: nil = NULL/clear.
+	AuthorizationID   *uuid.UUID
 	CreatedBy         *uuid.UUID
 	ExternalReference *string
 }

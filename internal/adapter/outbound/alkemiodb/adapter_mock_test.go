@@ -275,7 +275,7 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	err = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 		StorageBucketID:   bucketID,
 		DisplayName:       "name.txt",
-		AuthorizationID:   authID,
+		AuthorizationID:   &authID,
 		ExternalReference: &ref,
 	}, 1)
 	if err != nil {
@@ -296,8 +296,9 @@ func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
+	auth := uuid.New()
 	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
-		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
 	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
@@ -356,8 +357,9 @@ func TestMock_UpdateMetadata_DBError(t *testing.T) {
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
+	auth := uuid.New()
 	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
-		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
 	}, 1)
 	if err == nil {
 		t.Fatal("expected error")

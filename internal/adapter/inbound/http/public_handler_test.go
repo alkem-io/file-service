@@ -36,7 +36,7 @@ type mockDocRepo struct {
 	lastUpdateTemporary   bool
 	lastUpdateDisplayName string
 	lastUpdateVersion     int
-	lastUpdateAuthID      uuid.UUID
+	lastUpdateAuthID      *uuid.UUID
 	lastUpdateCreatedBy   *uuid.UUID
 	lastUpdateExternalRef *string
 
@@ -106,7 +106,11 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	m.doc.StorageBucketID = meta.StorageBucketID
 	m.doc.TemporaryLocation = meta.TemporaryLocation
 	m.doc.DisplayName = meta.DisplayName
-	m.doc.AuthorizationID = meta.AuthorizationID
+	if meta.AuthorizationID != nil {
+		m.doc.AuthorizationID = *meta.AuthorizationID
+	} else {
+		m.doc.AuthorizationID = uuid.Nil
+	}
 	m.doc.CreatedBy = meta.CreatedBy
 	m.doc.ExternalReference = meta.ExternalReference
 	m.doc.Version = version + 1

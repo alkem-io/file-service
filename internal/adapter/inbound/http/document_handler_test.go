@@ -2591,7 +2591,7 @@ func TestUpdate_MovePlusReattribute(t *testing.T) {
 	if repo.lastUpdateBucketID != newBucket {
 		t.Errorf("bucket = %v, want %v", repo.lastUpdateBucketID, newBucket)
 	}
-	if repo.lastUpdateAuthID != newAuth {
+	if repo.lastUpdateAuthID == nil || *repo.lastUpdateAuthID != newAuth {
 		t.Errorf("authorizationId = %v, want %v", repo.lastUpdateAuthID, newAuth)
 	}
 	if repo.lastUpdateCreatedBy == nil || *repo.lastUpdateCreatedBy != newCreatedBy {
@@ -2627,6 +2627,35 @@ func TestUpdate_ClearExternalReference(t *testing.T) {
 	}
 	if repo.lastUpdateExternalRef != nil {
 		t.Errorf("externalReference = %v, want nil (explicit null clears)", *repo.lastUpdateExternalRef)
+	}
+}
+
+// A PATCH that doesn't touch authorizationId must leave a NULL-auth row NULL,
+// not rewrite it to the zero UUID (which would collide on UNIQUE(authorizationId)
+// and 409 a second such row). Symmetric with the nullable createdBy seed.
+func TestUpdate_LeavesNullAuthorizationIDNull(t *testing.T) {
+	docID := uuid.New()
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.Nil, // NULL authorizationId column
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	// PATCH only displayName — authorizationId omitted from the body.
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
+	req = withURLParam(req, "id", docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateAuthID != nil {
+		t.Errorf("authorizationId = %v, want nil (NULL must stay NULL, not become the zero UUID)", *repo.lastUpdateAuthID)
 	}
 }
 

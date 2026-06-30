@@ -116,7 +116,7 @@ func TestByReference_MoveResolution(t *testing.T) {
 		StorageBucketID:   convBucket,
 		TemporaryLocation: false,
 		DisplayName:       doc.DisplayName,
-		AuthorizationID:   authB,
+		AuthorizationID:   &authB,
 		CreatedBy:         &sender,
 		ExternalReference: &ref,
 	}, doc.Version); err != nil {

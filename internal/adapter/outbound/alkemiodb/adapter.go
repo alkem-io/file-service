@@ -165,18 +165,19 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.D
 		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
 		TemporaryLocation: meta.TemporaryLocation,
 		DisplayName:       meta.DisplayName,
-		AuthorizationId:   uuidToPgx(meta.AuthorizationID),
+		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
 		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
 		ExternalReference: stringToPgxText(meta.ExternalReference),
 		UpdatedDate:       timeToPgxNow(),
 		Version:           safeInt32(version),
 	})
 	if err != nil {
-		// Defensive: keeps PATCH consistent with Create/UpdateFile if a
-		// uniqueness constraint is added later (e.g. (externalID,
-		// storageBucketId)). No such constraint exists in this repo's
-		// db/schema/document.sql today, but the production schema can
-		// diverge, and a 409 beats a 500 if it fires.
+		// A PATCH can collide on a uniqueness constraint: the partial
+		// UNIQUE("externalReference", "storageBucketId") when a move re-homes a
+		// reference into a bucket that already holds it, or UNIQUE("authorizationId")
+		// on re-attribution. (It never touches externalID, so it can't collide on
+		// the partial content index.) Map to ErrDuplicateKey so the service can
+		// surface a 409 rather than a 500.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 			return model.ErrDuplicateKey

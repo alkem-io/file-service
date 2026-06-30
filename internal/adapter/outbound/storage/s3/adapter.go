@@ -92,6 +92,9 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 func (a *Adapter) Read(externalID string) ([]byte, error) {
 	obj, err := a.client.GetObject(context.Background(), a.bucket, externalID, minio.GetObjectOptions{})
 	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("read object %s: %w", externalID, os.ErrNotExist)
+		}
 		return nil, fmt.Errorf("read object %s: %w", externalID, err)
 	}
 	defer func() { _ = obj.Close() }()
