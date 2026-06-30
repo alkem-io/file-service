@@ -27,12 +27,14 @@ CREATE TABLE file (
 -- externalReference. Reference-bearing rows are identity'd by their reference
 -- (the UQ below), not by content, so two distinct references with identical
 -- bytes coexist in one bucket — each separately by-reference-resolvable —
--- while still sharing one content-addressed blob. The pre-existing prod
--- UNIQUE("externalID", "storageBucketId") (owned by the server's TypeORM
--- migration) must be made partial in the same way.
-CREATE UNIQUE INDEX "UQ_file_externalID_storageBucketId"
-    ON file ("externalID", "storageBucketId")
-    WHERE "externalReference" IS NULL;
+-- while still sharing one content-addressed blob.
+--
+-- NOTE: prod has NO UNIQUE("externalID","storageBucketId") constraint at all
+-- (the server TypeORM baseline never created one; content-dedup is app-level
+-- via FindByExternalIDAndBucket). So this schema mirror also omits it — adding
+-- one would diverge from prod and could false-green the content-dedup race in
+-- local tests. Do NOT add an externalID unique here without a matching, safe
+-- server TypeORM migration (which would first have to de-dup legacy rows).
 
 -- externalReference is an OPAQUE caller-supplied reference (e.g. a Synapse
 -- media_id for Matrix media); file-service never parses it. Distinct from
