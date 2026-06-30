@@ -29,6 +29,7 @@ type mockRepo struct {
 	createErr     error
 	createErrOnce error // returned only on the first Create call
 	createCalls   int
+	createdDocs   []model.Document // every doc passed to Create, in order
 	updateErr     error
 	deleteResult  model.DeletedDocument
 	deleteErr     error
@@ -81,6 +82,7 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
 	m.lastCreateContentMetadata = contentMetadata
+	m.createdDocs = append(m.createdDocs, doc)
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
 	}
@@ -568,6 +570,118 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 	_, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("expected ErrConflict on SkipDedup duplicate-key, got %v", err)
+	}
+}
+
+// Reference-bearing rows are keyed by externalReference, not content: two
+// creates with the SAME bytes but DIFFERENT externalReference in one bucket
+// must produce TWO distinct rows (each by-reference-resolvable), bypassing
+// content-dedup — even though a content-dedup lookup WOULD have matched.
+func TestCreateDocument_DistinctReferencesSameContent_InsertTwoRows(t *testing.T) {
+	bucket := uuid.New()
+	// findDoc set deliberately: proves content-dedup is skipped, not merely absent.
+	repo := &mockRepo{
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	ref1, ref2 := "media-id-1", "media-id-2"
+	mk := func(ref string) model.CreateDocumentInput {
+		return model.CreateDocumentInput{
+			DisplayName:       "img.png",
+			StorageBucketID:   bucket,
+			AuthorizationID:   uuid.New(),
+			ExternalReference: &ref,
+		}
+	}
+
+	doc1, err := svc.CreateDocument(context.Background(), mk(ref1), []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("create ref1: %v", err)
+	}
+	doc2, err := svc.CreateDocument(context.Background(), mk(ref2), []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("create ref2: %v", err)
+	}
+
+	if repo.findCalls != 0 {
+		t.Errorf("content-dedup lookup must be skipped for reference creates, got %d FindByExternalIDAndBucket calls", repo.findCalls)
+	}
+	if repo.createCalls != 2 {
+		t.Fatalf("expected 2 Create calls (two distinct rows), got %d", repo.createCalls)
+	}
+	if doc1.Reused || doc2.Reused {
+		t.Errorf("reference creates must never report Reused; got %v / %v", doc1.Reused, doc2.Reused)
+	}
+	if doc1.ID == doc2.ID {
+		t.Error("expected two distinct row IDs")
+	}
+	// Each persisted row carries its own reference — both by-reference-resolvable.
+	if len(repo.createdDocs) != 2 {
+		t.Fatalf("captured %d created docs, want 2", len(repo.createdDocs))
+	}
+	got := []string{*repo.createdDocs[0].ExternalReference, *repo.createdDocs[1].ExternalReference}
+	if got[0] != ref1 || got[1] != ref2 {
+		t.Errorf("persisted references = %v, want [%s %s]", got, ref1, ref2)
+	}
+	// Same blob underneath: both rows share the content hash.
+	if repo.createdDocs[0].ExternalID != repo.createdDocs[1].ExternalID {
+		t.Error("both rows must share the content-addressed blob (same externalID)")
+	}
+}
+
+// Copy with an externalReference (a re-share fork) bypasses content-dedup the
+// same way create does: a fresh row materializes even when the destination
+// bucket already holds the same bytes.
+func TestCopyDocument_WithReference_SkipsContentDedup(t *testing.T) {
+	bucket := uuid.New()
+	source := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            7,
+		DisplayName:     "img.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	// findDoc set: the destination bucket already has this content — would dedup
+	// without the reference guard.
+	repo := &mockRepo{
+		doc: source,
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	ref := "media-id-reshare"
+	doc, err := svc.CopyDocument(context.Background(), source.ID, model.CopyDocumentInput{
+		DestinationBucketID: bucket,
+		AuthorizationID:     uuid.New(),
+		ExternalReference:   &ref,
+	})
+	if err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("content-dedup lookup must be skipped for reference copy, got %d calls", repo.findCalls)
+	}
+	if repo.createCalls != 1 {
+		t.Fatalf("expected 1 Create call, got %d", repo.createCalls)
+	}
+	if doc.Reused {
+		t.Error("reference copy must not report Reused")
+	}
+	if len(repo.createdDocs) != 1 || repo.createdDocs[0].ExternalReference == nil || *repo.createdDocs[0].ExternalReference != ref {
+		t.Errorf("copied row must carry the reference %q", ref)
 	}
 }
 

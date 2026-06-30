@@ -276,7 +276,12 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		zap.Int64("bytes", su.Size),
 		zap.String("outcome", "accepted"))
 
-	if input.SkipDedup {
+	// Content-dedup applies only to non-reference creates. A reference-bearing
+	// create is identity'd by its externalReference (the UNIQUE(externalReference,
+	// storageBucketId) index), so it always inserts a fresh row even when an
+	// existing row in the bucket holds the same bytes — the blob layer still
+	// dedups by hash, only the DB row is per-reference. SkipDedup forces fresh too.
+	if input.SkipDedup || hasReference(input.ExternalReference) {
 		return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
 	}
 	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)

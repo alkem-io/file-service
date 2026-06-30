@@ -16,6 +16,17 @@ CREATE TABLE file (
     content_metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- Content-dedup uniqueness is PARTIAL: it applies only to rows WITHOUT an
+-- externalReference. Reference-bearing rows are identity'd by their reference
+-- (the UQ below), not by content, so two distinct references with identical
+-- bytes coexist in one bucket — each separately by-reference-resolvable —
+-- while still sharing one content-addressed blob. The pre-existing prod
+-- UNIQUE("externalID", "storageBucketId") (owned by the server's TypeORM
+-- migration) must be made partial in the same way.
+CREATE UNIQUE INDEX "UQ_file_externalID_storageBucketId"
+    ON file ("externalID", "storageBucketId")
+    WHERE "externalReference" IS NULL;
+
 -- externalReference is an OPAQUE caller-supplied reference (e.g. a Synapse
 -- media_id for Matrix media); file-service never parses it. Distinct from
 -- "externalID" (the content hash / blob key). At most one row may carry a

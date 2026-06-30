@@ -150,7 +150,12 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// (FR-014, FR-018, SC-007 + SC-009).
 	s.backfillIfNeeded(ctx, &source)
 
-	if !input.SkipDedup {
+	// Content-dedup applies only to non-reference copies. A reference-bearing
+	// copy (a re-share fork carrying its own externalReference) is identity'd by
+	// that reference, so it always materializes a fresh row even when the
+	// destination bucket already holds the same bytes — they share the
+	// content-addressed blob, but the DB row is per-reference.
+	if !input.SkipDedup && !hasReference(input.ExternalReference) {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
 		if err != nil {
 			return nil, err
@@ -300,10 +305,18 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Default path: another concurrent creator won the race on the
-		// unique(externalID, storageBucketID) index. Re-query and return
-		// the winner with Reused=true.
-		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		// Default path: another concurrent creator won the race. Re-query the
+		// winner and return it with Reused=true. A reference-bearing row collided
+		// on UNIQUE(externalReference, storageBucketId) — look it up by reference;
+		// a non-reference row collided on the partial UNIQUE(externalID,
+		// storageBucketId) — look it up by content.
+		var raced model.Document
+		var findErr error
+		if hasReference(input.ExternalReference) {
+			raced, findErr = s.Repo.GetByReferenceInBucket(ctx, *input.ExternalReference, input.StorageBucketID)
+		} else {
+			raced, findErr = s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		}
 		if findErr == nil {
 			raced.Reused = true
 			return &raced, nil
@@ -523,6 +536,15 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
+}
+
+// hasReference reports whether a create/copy carries a usable externalReference
+// (non-nil, non-empty). Reference-bearing rows are identity'd by their
+// reference, not by content, so they bypass per-bucket content-dedup: two
+// distinct references with identical bytes must yield two rows (each
+// by-reference-resolvable), sharing only the content-addressed blob.
+func hasReference(ref *string) bool {
+	return ref != nil && *ref != ""
 }
 
 // BackfillIfNeeded is the public entry point for handlers that read a
