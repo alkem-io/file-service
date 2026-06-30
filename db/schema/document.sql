@@ -1,3 +1,10 @@
+-- ⚠️ SCHEMA OWNERSHIP: this file is the **sqlc codegen source** only — a MIRROR of
+-- the prod schema. The prod `file` table is created and MIGRATED by the **server's
+-- TypeORM migrations** (run by the `server-migration` cron via `pnpm migration:run`);
+-- file-service does full runtime CRUD on the table but does NOT migrate it.
+-- Any schema change here MUST have a matching server TypeORM migration, or it will
+-- exist locally/in tests but be absent in prod. (There is intentionally no runnable
+-- `db/migrations/` here — it would be misleading.)
 CREATE TABLE file (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     "createdDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
