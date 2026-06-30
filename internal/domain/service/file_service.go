@@ -305,11 +305,15 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Default path: another concurrent creator won the race. Re-query the
-		// winner and return it with Reused=true. A reference-bearing row collided
-		// on UNIQUE(externalReference, storageBucketId) — look it up by reference;
-		// a non-reference row collided on the partial UNIQUE(externalID,
-		// storageBucketId) — look it up by content.
+		// Best-effort race re-query. ErrDuplicateKey only arises from a DB
+		// unique violation; reference-bearing rows can still collide on the
+		// partial UNIQUE(externalReference, storageBucketId), so we re-resolve
+		// the winner by reference and return it with Reused=true. For plain
+		// (non-reference) rows this branch is effectively inert in prod: there
+		// is no externalID content-unique index there, so content-dedup is an
+		// app-level, best-effort, racey lookup (a pre-existing condition) — the
+		// by-content re-query below only fires on the off chance such a content
+		// constraint exists and raised a duplicate.
 		var raced model.Document
 		var findErr error
 		if hasReference(input.ExternalReference) {

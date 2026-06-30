@@ -119,7 +119,7 @@ SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
        "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
-WHERE "externalID" = $1 AND "storageBucketId" = $2
+WHERE "externalID" = $1 AND "storageBucketId" = $2 AND "externalReference" IS NULL
 ORDER BY "createdDate" ASC, id ASC
 LIMIT 1
 `
@@ -147,9 +147,15 @@ type FindDocumentByExternalIDAndBucketRow struct {
 	ExternalReference pgtype.Text        `json:"externalReference"`
 }
 
+// Content-dedup lookup for PLAIN (non-reference) uploads only. The
+// "externalReference" IS NULL filter is the keystone of the dual-identity
+// rule: reference-bearing rows are identity'd by their externalReference, so
+// a plain upload must never dedup onto (and thus couple its lifecycle to) a
+// reference-bearing row that happens to share the same bytes. Plain rows
+// dedup among plain rows; reference rows are resolved by reference.
 // Deterministic selection: oldest row wins. Matters if historical duplicates
-// exist (pre-migration) or if two racing inserts both succeed before the
-// unique index lands in prod. "createdDate" ASC, then id ASC as tiebreaker.
+// exist (pre-migration) or if two racing inserts both succeed (prod has no
+// externalID unique index). "createdDate" ASC, then id ASC as tiebreaker.
 func (q *Queries) FindDocumentByExternalIDAndBucket(ctx context.Context, arg FindDocumentByExternalIDAndBucketParams) (FindDocumentByExternalIDAndBucketRow, error) {
 	row := q.db.QueryRow(ctx, findDocumentByExternalIDAndBucket, arg.ExternalID, arg.StorageBucketId)
 	var i FindDocumentByExternalIDAndBucketRow
@@ -282,6 +288,7 @@ SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "createdDate", "updatedDate", version, content_metadata, "externalReference"
 FROM file
 WHERE "externalReference" = $1 AND "storageBucketId" = $2
+ORDER BY "createdDate" ASC, id ASC
 LIMIT 1
 `
 
@@ -309,8 +316,11 @@ type GetDocumentByReferenceInBucketRow struct {
 }
 
 // Bucket-scoped by-reference lookup (read resolution): the single document
-// carrying this reference in the given bucket. UNIQUE(externalReference,
-// storageBucketId) guarantees at most one match.
+// carrying this reference in the given bucket. The partial
+// UNIQUE(externalReference, storageBucketId) normally guarantees at most one
+// match; ORDER BY "createdDate" ASC, id ASC keeps resolution deterministic
+// (oldest wins) as defense-in-depth, matching the global by-reference query,
+// even if that constraint were ever absent.
 func (q *Queries) GetDocumentByReferenceInBucket(ctx context.Context, arg GetDocumentByReferenceInBucketParams) (GetDocumentByReferenceInBucketRow, error) {
 	row := q.db.QueryRow(ctx, getDocumentByReferenceInBucket, arg.ExternalReference, arg.StorageBucketId)
 	var i GetDocumentByReferenceInBucketRow

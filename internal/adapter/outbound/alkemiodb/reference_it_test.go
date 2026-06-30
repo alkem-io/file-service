@@ -142,6 +142,73 @@ func TestByReference_MoveResolution(t *testing.T) {
 	}
 }
 
+// Content-dedup must only match PLAIN (non-reference) rows. A reference-bearing
+// row sharing the same bytes must be invisible to FindByExternalIDAndBucket, so
+// a later plain upload of those bytes does NOT dedup onto the Matrix row (which
+// would couple their lifecycles — a delete-by-reference would drop the plain
+// doc's row). Enforced by the "externalReference" IS NULL filter on the query.
+func TestFindByExternalIDAndBucket_IgnoresReferenceRows(t *testing.T) {
+	pool := testPool(t)
+	defer pool.Close()
+	a := New(pool)
+
+	bucket, _ := twoBuckets(t, pool)
+	authRef, cleanupRef := newAuthPolicy(t, pool)
+	defer cleanupRef()
+
+	externalID := "blob-" + uuid.New().String()[:12]
+	ref := "media-id-" + uuid.New().String()
+	now := time.Now()
+
+	// A reference-bearing (Matrix) row holding these exact bytes in the bucket.
+	refID, _ := uuid.NewV7()
+	if _, err := a.Create(context.Background(), model.Document{
+		ID:                refID,
+		ExternalID:        externalID,
+		MimeType:          "image/jpeg",
+		Size:              10,
+		DisplayName:       "matrix.jpg",
+		StorageBucketID:   bucket,
+		AuthorizationID:   authRef,
+		ExternalReference: &ref,
+		CreatedDate:       now,
+		UpdatedDate:       now,
+	}, model.ContentMetadata{}); err != nil {
+		t.Fatalf("Create reference row: %v", err)
+	}
+	defer func() { _, _ = a.Delete(context.Background(), refID) }()
+
+	// A plain upload of the same bytes in the same bucket must NOT dedup onto
+	// the reference row: content-dedup only sees plain rows.
+	if _, err := a.FindByExternalIDAndBucket(context.Background(), externalID, bucket); !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("FindByExternalIDAndBucket matched a reference row (err = %v), want ErrDocumentNotFound", err)
+	}
+
+	// Sanity: a PLAIN row with the same bytes IS found (the filter isn't
+	// over-broad — it excludes only reference rows).
+	authPlain, cleanupPlain := newAuthPolicy(t, pool)
+	defer cleanupPlain()
+	plainID, _ := uuid.NewV7()
+	if _, err := a.Create(context.Background(), model.Document{
+		ID:              plainID,
+		ExternalID:      externalID,
+		MimeType:        "image/jpeg",
+		Size:            10,
+		DisplayName:     "plain.jpg",
+		StorageBucketID: bucket,
+		AuthorizationID: authPlain,
+		CreatedDate:     now,
+		UpdatedDate:     now,
+	}, model.ContentMetadata{}); err != nil {
+		t.Fatalf("Create plain row: %v", err)
+	}
+	defer func() { _, _ = a.Delete(context.Background(), plainID) }()
+
+	if got, err := a.FindByExternalIDAndBucket(context.Background(), externalID, bucket); err != nil || got.ID != plainID {
+		t.Fatalf("FindByExternalIDAndBucket = (%v, %v), want plain row %v", got.ID, err, plainID)
+	}
+}
+
 // T015: two rows sharing one externalID (a re-share copy) keep refcount = 2;
 // deleting one keeps the blob referenced (count = 1) — Matrix-aware GC via
 // ordinary rows. Both rows carry their own externalReference.

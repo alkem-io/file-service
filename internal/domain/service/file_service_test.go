@@ -436,6 +436,65 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 }
 
+// Reference-branch race: a reference-bearing create whose Create loses the race
+// on the partial UNIQUE(externalReference, storageBucketId). insertDocument must
+// re-resolve the winner via GetByReferenceInBucket (NOT by content) and return
+// it with Reused=true. Content-dedup (FindByExternalIDAndBucket) must never be
+// consulted on the reference path.
+func TestCreateDocument_ReferenceRace_ResolvesByReference(t *testing.T) {
+	winnerID := uuid.New()
+	winnerAuth := uuid.New()
+	bucket := uuid.New()
+	ref := "media-id-race"
+
+	findCalled := false
+	getRefCalls := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			findCalled = true
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		getByRef: func() (model.Document, error) {
+			getRefCalls++
+			return model.Document{
+				ID:                winnerID,
+				ExternalID:        "sha3-of-content",
+				StorageBucketID:   bucket,
+				AuthorizationID:   winnerAuth,
+				ExternalReference: &ref,
+			}, nil
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:       "img.png",
+		StorageBucketID:   bucket,
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true after reference-branch race")
+	}
+	if doc.ID != winnerID {
+		t.Errorf("ID = %v, want winner %v", doc.ID, winnerID)
+	}
+	if doc.AuthorizationID != winnerAuth {
+		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+	if getRefCalls != 1 {
+		t.Errorf("expected GetByReferenceInBucket consulted exactly once, got %d", getRefCalls)
+	}
+	if findCalled {
+		t.Error("content-dedup (FindByExternalIDAndBucket) must not be consulted on the reference path")
+	}
+}
+
 // SkipDedup: true → fresh row inserted even when an existing row matches.
 // Lookup must NOT be called; existing row must NOT be returned/mutated.
 func TestCreateDocument_SkipDedup_InsertsFreshRowWhenContentExists(t *testing.T) {
@@ -686,9 +745,12 @@ func TestCopyDocument_WithReference_SkipsContentDedup(t *testing.T) {
 }
 
 // mockRepoRace is a minimal repo mock supporting a scripted FindByExternalIDAndBucket
-// and a fixed Create error — used for the concurrent race test.
+// and a fixed Create error — used for the concurrent race test. getByRef, when
+// set, scripts GetByReferenceInBucket for the reference-branch race test;
+// otherwise that lookup reports ErrDocumentNotFound.
 type mockRepoRace struct {
 	find      func() (model.Document, error)
+	getByRef  func() (model.Document, error)
 	createErr error
 }
 
@@ -713,6 +775,9 @@ func (m *mockRepoRace) GetByReference(_ context.Context, _ string) (model.Docume
 	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockRepoRace) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	if m.getByRef != nil {
+		return m.getByRef()
+	}
 	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {

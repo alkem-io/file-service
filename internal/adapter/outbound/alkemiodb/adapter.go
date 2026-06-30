@@ -91,9 +91,12 @@ func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, 
 
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
-// rules). A unique violation — another row already holds this content in the
-// bucket — surfaces as model.ErrDuplicateKey so the service can fall back to
-// its dedup path.
+// rules). Any DB unique violation surfaces as model.ErrDuplicateKey so the
+// service can run its best-effort race re-query. In prod the only such
+// constraint is the partial UNIQUE(externalReference, storageBucketId); there
+// is NO externalID content-unique index, so content-dedup is app-level and
+// best-effort — the service's by-content re-query branch is effectively inert
+// in prod and would only fire if such a content constraint existed.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
