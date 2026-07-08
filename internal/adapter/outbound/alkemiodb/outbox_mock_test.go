@@ -89,6 +89,36 @@ func TestMock_CreateWithOutbox_DedupRollsBack(t *testing.T) {
 	}
 }
 
+// TestMock_CreateWithOutbox_NotifyFailureNonFatal: the post-commit NOTIFY is best-effort — if it
+// fails, the create still succeeds (the row is committed; the consumer's poll floor drains it).
+func TestMock_CreateWithOutbox_NotifyFailureNonFatal(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	docID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnError(errors.New("notify boom"))
+
+	id, err := New(mock).CreateWithOutbox(context.Background(), sampleDoc(docID), model.ContentMetadata{}, 1)
+	if err != nil {
+		t.Fatalf("a failed NOTIFY must not fail the committed create, got: %v", err)
+	}
+	if id != docID {
+		t.Fatalf("id = %v, want %v", id, docID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestMock_UpdateFileWithOutbox_Commits: a content replace updates the row and enqueues the new
 // hash in one transaction, then NOTIFYs.
 func TestMock_UpdateFileWithOutbox_Commits(t *testing.T) {

@@ -73,7 +73,7 @@ func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config
 		PipeReadLimit: cfg.Ingest.VipsPipeReadLimit,
 		PixelBudget:   cfg.Ingest.PixelBudget,
 	})
-	repo := alkemiodb.New(pool)
+	repo := alkemiodb.NewWithLogger(pool, logger)
 	svc := &service.FileService{
 		Repo:            repo,
 		Auth:            auth,

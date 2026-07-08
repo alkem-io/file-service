@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -32,15 +33,28 @@ type Pool interface {
 // Adapter implements port.DocumentRepo (and port.BackupOutboxRepo) using pgx/sqlc.
 type Adapter struct {
 	queries *queries.Queries
-	pool    Pool // for Begin (the transactional outbox writes); nil-safe for the non-outbox methods
+	pool    Pool        // for Begin (the transactional outbox writes); nil-safe for the non-outbox methods
+	logger  *zap.Logger // surfaces best-effort backup-outbox NOTIFY failures; never nil
 }
 
 // New creates an Adapter from a Begin-capable DBTX connection (pgxpool.Pool, pgxmock, etc.).
+// The logger is a no-op — use NewWithLogger to surface best-effort NOTIFY failures.
 func New(db Pool) *Adapter {
 	return &Adapter{
 		queries: queries.New(db),
 		pool:    db,
+		logger:  zap.NewNop(),
 	}
+}
+
+// NewWithLogger is New with a Zap logger for best-effort backup-outbox NOTIFY warnings.
+// A nil logger falls back to the no-op logger.
+func NewWithLogger(db Pool, logger *zap.Logger) *Adapter {
+	a := New(db)
+	if logger != nil {
+		a.logger = logger
+	}
+	return a
 }
 
 // GetByID implements port.DocumentRepo: pgx.ErrNoRows is translated to

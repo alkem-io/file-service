@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -105,7 +106,12 @@ func (a *Adapter) PruneBackupOutbox(ctx context.Context, olderThan time.Time) (i
 
 // notifyBackup emits NOTIFY on the backup channel after a committed enqueue. Best-effort — it
 // must NOT fail a committed write, and the durable table + the consumer's poll floor guarantee
-// progress if the notification is lost — so the error is deliberately ignored.
+// progress if the notification is lost — so the error is not propagated. It IS logged at warn,
+// though: a persistently failing NOTIFY (e.g. a permissions issue) should be visible rather than
+// silently dropped.
 func (a *Adapter) notifyBackup(ctx context.Context) {
-	_, _ = a.pool.Exec(ctx, "NOTIFY file_backup_outbox")
+	if _, err := a.pool.Exec(ctx, "NOTIFY file_backup_outbox"); err != nil {
+		a.logger.Warn("backup-outbox NOTIFY failed (best-effort; the consumer's poll floor still drains)",
+			zap.Error(err))
+	}
 }
