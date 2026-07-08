@@ -58,6 +58,54 @@ type FileService struct {
 	Storage   port.StoragePort
 	Processor port.ImageProcessor
 	Logger    *zap.Logger
+	// Outbox, when non-nil, makes create/replace of a NON-temporary object also commit a
+	// backup-outbox row in the same transaction (008-continuous-file-backup FR-001). nil = the
+	// producer is off (flag default) and the plain Repo path runs — no behaviour change.
+	Outbox port.BackupOutboxRepo
+	// HotMimePrefixes marks document/office/Yjs mime types as outbox priority=1 (hot).
+	HotMimePrefixes []string
+}
+
+// priorityForMime returns the backup-outbox priority for a mime type: 1 (hot) when it carries
+// any configured hot prefix — documents/office/Yjs, the low-RPO driver — else 0 (normal).
+func (s *FileService) priorityForMime(mimeType string) int16 {
+	for _, p := range s.HotMimePrefixes {
+		if strings.HasPrefix(mimeType, p) {
+			return 1
+		}
+	}
+	return 0
+}
+
+// writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
+// in the same commit, FR-001) when the producer is on and the object is non-temporary, else the
+// original non-transactional Repo.Create. Both return model.ErrDuplicateKey on the dedup race.
+func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta model.ContentMetadata) error {
+	if s.Outbox != nil && !doc.TemporaryLocation {
+		_, err := s.Outbox.CreateWithOutbox(ctx, doc, meta, s.priorityForMime(doc.MimeType))
+		return err
+	}
+	_, err := s.Repo.Create(ctx, doc, meta)
+	return err
+}
+
+// writeReplace persists replaced content — via the transactional outbox path (enqueue the new
+// content hash in the same commit) when the producer is on and the document is non-temporary,
+// else the original Repo.UpdateFile. Same error semantics either way.
+func (s *FileService) writeReplace(ctx context.Context, doc model.Document, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
+	if s.Outbox != nil && !doc.TemporaryLocation {
+		return s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+	}
+	return s.Repo.UpdateFile(ctx, documentID, externalID, mimeType, size, meta)
+}
+
+// PruneBackupOutbox drops consumer-finished outbox rows older than `retention`, keeping the
+// shared outbox bounded (SC-008). A no-op (0, nil) when the producer is off.
+func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Duration) (int64, error) {
+	if s.Outbox == nil {
+		return 0, nil
+	}
+	return s.Outbox.PruneBackupOutbox(ctx, time.Now().Add(-retention))
 }
 
 // ServeResult contains file content and metadata for serving.
@@ -285,7 +333,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		ImageHeight:       imageHeight,
 	}
 
-	_, err = s.Repo.Create(ctx, doc, contentMetadata)
+	err = s.writeCreate(ctx, doc, contentMetadata)
 	if err == nil {
 		return &doc, nil
 	}
@@ -424,7 +472,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 		Measured:    su.Measured,
 	}
 	contentMetadata := processResultToContentMetadata(result, su.MimeType)
-	err = s.Repo.UpdateFile(ctx, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
+	err = s.writeReplace(ctx, doc, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
 	if err != nil {
 		// Never delete the newly-stored blob on failure: another concurrent
 		// request in any bucket may have already linked this externalID

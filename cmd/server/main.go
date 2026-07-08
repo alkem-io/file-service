@@ -60,6 +60,14 @@ func run() int {
 	// the pre-fix replace path. Idempotent; runs concurrently with serving.
 	go runMimeRepair(context.Background(), fileSvc, logger)
 
+	// Periodic backup-outbox prune (008 SC-008), only when the producer is on.
+	// Cancelled on shutdown so the goroutine exits cleanly.
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+	defer cancelBg()
+	if cfg.BackupOutbox.Enabled {
+		go runOutboxPrune(bgCtx, fileSvc, cfg.BackupOutbox.DoneRetention, logger)
+	}
+
 	router := buildRouter(pool, nc, cfg, fileSvc, logger)
 	srv := newHTTPServer(cfg.Port, router)
 
