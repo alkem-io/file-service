@@ -19,3 +19,17 @@ CREATE TABLE file_backup_outbox (
     "claimedAt"  TIMESTAMPTZ,
     "visibleAt"  TIMESTAMPTZ
 );
+
+-- Indexes mirror the server migration (parity — codegen ignores them, but the mirror should
+-- reflect the real table). Claim scan, externalID lookup, stale-claim reaper, and — the one the
+-- prune below depends on — a partial index on done rows so PruneBackupOutboxDone is index-backed.
+CREATE INDEX idx_file_backup_outbox_claim
+    ON file_backup_outbox (priority DESC, "createdDate", "visibleAt")
+    WHERE status = 'pending';
+CREATE INDEX idx_file_backup_outbox_external ON file_backup_outbox ("externalID");
+CREATE INDEX idx_file_backup_outbox_inprogress
+    ON file_backup_outbox ("claimedAt")
+    WHERE status = 'in_progress';
+CREATE INDEX idx_file_backup_outbox_done
+    ON file_backup_outbox ("createdDate")
+    WHERE status = 'done';
