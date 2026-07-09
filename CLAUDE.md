@@ -98,6 +98,20 @@ Service:
 - `PORT` — HTTP listen port (default 4003)
 - `DOCUMENT_MAX_AGE` — Cache-Control max-age in seconds (default 86400)
 
+Continuous-backup outbox producer (008-continuous-file-backup, **off by default**):
+- `FILE_BACKUP_OUTBOX_ENABLED` — when true, a committed non-temporary create/replace also
+  commits a `file_backup_outbox` row in the SAME transaction, then emits `NOTIFY
+  file_backup_outbox`. Off = the original non-transactional write paths, unchanged.
+- `FILE_BACKUP_HOT_MIME_PREFIXES` — CSV of MIME prefixes enqueued at hot priority=1
+  (default: office/OOXML, ODF, legacy Word/Excel/PowerPoint, Yjs).
+- `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS` — retention for consumer-finished (`done`)
+  rows before the hourly prune drops them (default 24).
+
+The `file_backup_outbox` **table DDL is a server-owned migration** — file-service does
+only the transactional DML (enqueue) and the prune; `db/schema/outbox.sql` is a sqlc
+codegen mirror. Producer activity is counted on `/debug/vars`:
+`file_backup_outbox_enqueued_total`, `file_backup_outbox_pruned_total`.
+
 ## Integration Context
 
 - Auth checks on public endpoints via h2c HTTP/2 (preferred)

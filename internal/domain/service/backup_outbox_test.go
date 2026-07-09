@@ -74,6 +74,7 @@ func TestWriteCreateRouting(t *testing.T) {
 	t.Run("producer-on-nontemporary-uses-outbox-hot", func(t *testing.T) {
 		repo, ob := &mockRepo{}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Outbox: ob, HotMimePrefixes: []string{"application/x-yjs"}, Logger: nopLogger}
+		before := backupOutboxEnqueued.Value()
 		_ = s.writeCreate(context.Background(), nonTemp, model.ContentMetadata{})
 		if ob.createCalls != 1 || repo.createCalls != 0 {
 			t.Fatalf("on: outbox=%d repo=%d (want outbox=1 repo=0)", ob.createCalls, repo.createCalls)
@@ -81,13 +82,20 @@ func TestWriteCreateRouting(t *testing.T) {
 		if ob.lastPriority != 1 {
 			t.Fatalf("a yjs object must enqueue hot priority=1, got %d", ob.lastPriority)
 		}
+		if got := backupOutboxEnqueued.Value() - before; got != 1 {
+			t.Fatalf("a committed enqueue must count once (T011): got +%d", got)
+		}
 	})
 	t.Run("producer-on-temporary-uses-repo", func(t *testing.T) {
 		repo, ob := &mockRepo{}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
+		before := backupOutboxEnqueued.Value()
 		_ = s.writeCreate(context.Background(), temp, model.ContentMetadata{})
 		if repo.createCalls != 1 || ob.createCalls != 0 {
 			t.Fatalf("temporary must NOT enqueue: repo=%d outbox=%d", repo.createCalls, ob.createCalls)
+		}
+		if got := backupOutboxEnqueued.Value() - before; got != 0 {
+			t.Fatalf("temporary must NOT count an enqueue (T011): got +%d", got)
 		}
 	})
 }
@@ -105,9 +113,13 @@ func TestWriteReplaceRouting(t *testing.T) {
 	t.Run("producer-on-nontemporary-uses-outbox", func(t *testing.T) {
 		repo, ob := &mockRepo{}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
+		before := backupOutboxEnqueued.Value()
 		_ = s.writeReplace(context.Background(), model.Document{}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
 		if ob.updateCalls != 1 || repo.updateFileCalls != 0 {
 			t.Fatalf("outbox=%d repo=%d (want outbox=1 repo=0)", ob.updateCalls, repo.updateFileCalls)
+		}
+		if got := backupOutboxEnqueued.Value() - before; got != 1 {
+			t.Fatalf("a committed replace-enqueue must count once (T011): got +%d", got)
 		}
 	})
 	t.Run("producer-on-temporary-uses-repo", func(t *testing.T) {

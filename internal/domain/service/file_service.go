@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
 	"strings"
@@ -80,12 +81,25 @@ func (s *FileService) priorityForMime(mimeType string) int16 {
 	return 0
 }
 
+// Continuous-backup producer counters (008-continuous-file-backup T011), published on the
+// expvar endpoint (/debug/vars) alongside the other file-service metrics. They are declared
+// here in the domain core — not in the inbound HTTP metrics file with the rest — because their
+// increment sites are here, and the core must not import the inbound adapter (hexagonal
+// boundary). expvar.NewInt registers globally, so they still surface on the same endpoint.
+var (
+	backupOutboxEnqueued = expvar.NewInt("file_backup_outbox_enqueued_total")
+	backupOutboxPruned   = expvar.NewInt("file_backup_outbox_pruned_total")
+)
+
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
 // in the same commit, FR-001) when the producer is on and the object is non-temporary, else the
 // original non-transactional Repo.Create. Both return model.ErrDuplicateKey on the dedup race.
 func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
 		_, err := s.Outbox.CreateWithOutbox(ctx, doc, meta, s.priorityForMime(doc.MimeType))
+		if err == nil {
+			backupOutboxEnqueued.Add(1)
+		}
 		return err
 	}
 	_, err := s.Repo.Create(ctx, doc, meta)
@@ -97,7 +111,11 @@ func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta 
 // else the original Repo.UpdateFile. Same error semantics either way.
 func (s *FileService) writeReplace(ctx context.Context, doc model.Document, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
-		return s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+		if err == nil {
+			backupOutboxEnqueued.Add(1)
+		}
+		return err
 	}
 	return s.Repo.UpdateFile(ctx, documentID, externalID, mimeType, size, meta)
 }
@@ -108,7 +126,11 @@ func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Dura
 	if s.Outbox == nil {
 		return 0, nil
 	}
-	return s.Outbox.PruneBackupOutbox(ctx, time.Now().Add(-retention))
+	n, err := s.Outbox.PruneBackupOutbox(ctx, time.Now().Add(-retention))
+	if err == nil && n > 0 {
+		backupOutboxPruned.Add(n)
+	}
+	return n, err
 }
 
 // ServeResult contains file content and metadata for serving.
