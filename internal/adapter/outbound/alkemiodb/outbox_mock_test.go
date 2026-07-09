@@ -169,6 +169,29 @@ func TestMock_UpdateFileWithOutbox_NotFoundRollsBack(t *testing.T) {
 	}
 }
 
+// TestMock_UpdateFileWithOutbox_DuplicateRollsBack: a unique violation on the content update rolls
+// the tx back (no outbox row, no NOTIFY) and surfaces model.ErrDuplicateKey, matching UpdateFile.
+func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
+	mock.ExpectRollback()
+
+	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
+	if !errors.Is(err, model.ErrDuplicateKey) {
+		t.Fatalf("want ErrDuplicateKey, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestMock_PruneBackupOutbox: prunes done rows older than the cutoff and returns the count.
 func TestMock_PruneBackupOutbox(t *testing.T) {
 	mock, err := pgxmock.NewPool()

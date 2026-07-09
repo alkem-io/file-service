@@ -68,9 +68,12 @@ type FileService struct {
 
 // priorityForMime returns the backup-outbox priority for a mime type: 1 (hot) when it carries
 // any configured hot prefix — documents/office/Yjs, the low-RPO driver — else 0 (normal).
+// MIME types are case-insensitive (RFC 2045), so both sides are lowercased — a mixed-case stored
+// or configured value can't silently miss a hot prefix.
 func (s *FileService) priorityForMime(mimeType string) int16 {
+	m := strings.ToLower(mimeType)
 	for _, p := range s.HotMimePrefixes {
-		if strings.HasPrefix(mimeType, p) {
+		if strings.HasPrefix(m, strings.ToLower(p)) {
 			return 1
 		}
 	}

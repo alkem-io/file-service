@@ -50,6 +50,10 @@ func TestPriorityForMime(t *testing.T) {
 			t.Fatalf("%q must be normal (0)", m)
 		}
 	}
+	// Case-insensitive (RFC 2045): a mixed-case MIME must still match a lowercase hot prefix.
+	if s.priorityForMime("Application/X-Yjs") != 1 {
+		t.Fatal("mixed-case yjs must still be hot (1)")
+	}
 }
 
 // TestWriteCreateRouting: the outbox path runs only when the producer is on AND the object is
@@ -90,6 +94,14 @@ func TestWriteCreateRouting(t *testing.T) {
 
 // TestWriteReplaceRouting mirrors the create routing for the content-replace path.
 func TestWriteReplaceRouting(t *testing.T) {
+	t.Run("producer-off-uses-repo", func(t *testing.T) {
+		repo, ob := &mockRepo{}, &recordingOutbox{}
+		s := &FileService{Repo: repo, Logger: nopLogger} // Outbox nil
+		_ = s.writeReplace(context.Background(), model.Document{}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
+		if repo.updateFileCalls != 1 || ob.updateCalls != 0 {
+			t.Fatalf("off: repo=%d outbox=%d (want repo=1 outbox=0)", repo.updateFileCalls, ob.updateCalls)
+		}
+	})
 	t.Run("producer-on-nontemporary-uses-outbox", func(t *testing.T) {
 		repo, ob := &mockRepo{}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
