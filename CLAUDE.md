@@ -109,7 +109,7 @@ Continuous-backup outbox producer (008-continuous-file-backup, **off by default*
 
 The `file_backup_outbox` **table DDL is a server-owned migration** — file-service does
 only the transactional DML (enqueue) and the prune; `db/schema/outbox.sql` is a sqlc
-codegen mirror. Producer activity is counted on `/debug/vars`:
+codegen mirror. Producer activity is counted on `/internal/debug/vars`:
 `file_backup_outbox_enqueued_total`, `file_backup_outbox_pruned_total`.
 
 ## Integration Context

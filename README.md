@@ -106,7 +106,7 @@ lowest effective RPO; everything else is priority `0`.
 hourly prune of `done` rows older than `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS`, keeping
 the shared outbox bounded. `db/schema/outbox.sql` is a sqlc codegen mirror only.
 
-Producer activity is counted on the expvar endpoint (`/debug/vars`):
+Producer activity is counted on the expvar endpoint (`/internal/debug/vars`):
 `file_backup_outbox_enqueued_total` and `file_backup_outbox_pruned_total`.
 
 ## Development

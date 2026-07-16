@@ -82,7 +82,7 @@ func (s *FileService) priorityForMime(mimeType string) int16 {
 }
 
 // Continuous-backup producer counters (008-continuous-file-backup T011), published on the
-// expvar endpoint (/debug/vars) alongside the other file-service metrics. They are declared
+// expvar endpoint (/internal/debug/vars) alongside the other file-service metrics. They are declared
 // here in the domain core — not in the inbound HTTP metrics file with the rest — because their
 // increment sites are here, and the core must not import the inbound adapter (hexagonal
 // boundary). expvar.NewInt registers globally, so they still surface on the same endpoint.
