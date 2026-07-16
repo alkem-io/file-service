@@ -5,11 +5,11 @@ go 1.26.1
 require (
 	github.com/davidbyttow/govips/v2 v2.18.0
 	github.com/gabriel-vasile/mimetype v1.4.13
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/nats-io/nats-server/v2 v2.14.2
+	github.com/nats-io/nats-server/v2 v2.14.3
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pashagolub/pgxmock/v5 v5.1.0
 	github.com/sony/gobreaker/v2 v2.4.0
