@@ -750,11 +750,24 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	// No field carries an effective change — either every key is a no-op
 	// explicit-null (e.g. {"temporaryLocation":null}) or sets a field to its
-	// current value (e.g. {"displayName":"<current name>"}). Reject rather than
-	// bump version+updatedDate on an unchanged row (which would spuriously 409 a
-	// concurrent actor).
+	// current value (e.g. {"displayName":"<current name>"}). This is an
+	// IDEMPOTENT SUCCESS, not an error (settled — do not flip back to 400): a
+	// PATCH that produces no effective change returns 200 with the CURRENT
+	// document and writes NOTHING. This satisfies both concerns at once — no
+	// version+updatedDate bump on an unchanged row (so a concurrent actor is
+	// never spuriously 409'd) AND idempotent/desired-state callers (server
+	// re-attributing to the same value, retries) get a 200, not a 400. A
+	// structurally empty body ({} with no keys) is still a 400 above
+	// (len(present) == 0); only keys-present-but-no-change lands here.
 	if applied == 0 {
-		writeJSONError(w, http.StatusBadRequest, "no fields to update")
+		UpdateDocumentResponse{
+			ID:                doc.ID.String(),
+			StorageBucketID:   doc.StorageBucketID.String(),
+			TemporaryLocation: doc.TemporaryLocation,
+			DisplayName:       doc.DisplayName,
+			ImageWidth:        doc.ImageWidth,
+			ImageHeight:       doc.ImageHeight,
+		}.Render(w)
 		return
 	}
 
@@ -964,12 +977,13 @@ func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocu
 // whose message is safe as a 400 body.
 //
 // applied reports how many fields carry an EFFECTIVE change — a new value that
-// differs from the row's current value — so the handler can 400 a no-op PATCH
-// instead of bumping version+updatedDate on an unchanged row (which would
-// spuriously 409 a concurrent actor). This rejects both the explicit-null no-op
-// (e.g. {"temporaryLocation":null}, present but merges nothing) AND the
-// same-value no-op (e.g. {"displayName":"<current name>"}). doc is the freshly
-// loaded row, so the comparison needs no extra DB round-trip.
+// differs from the row's current value — so the handler can treat a no-op PATCH
+// as an idempotent 200 no-write instead of bumping version+updatedDate on an
+// unchanged row (which would spuriously 409 a concurrent actor). applied == 0
+// covers both the explicit-null no-op (e.g. {"temporaryLocation":null}, present
+// but merges nothing) AND the same-value no-op (e.g.
+// {"displayName":"<current name>"}). doc is the freshly loaded row, so the
+// comparison needs no extra DB round-trip.
 func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present map[string]struct{}) (meta model.DocumentMetadataUpdate, applied int, err error) {
 	meta = model.DocumentMetadataUpdate{
 		StorageBucketID:   doc.StorageBucketID,
@@ -1007,7 +1021,7 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 			}
 			newVal = &parsed
 		}
-		if !equalUUIDPtr(newVal, meta.AuthorizationID) {
+		if !equalPtr(newVal, meta.AuthorizationID) {
 			meta.AuthorizationID = newVal
 			applied++
 		}
@@ -1021,13 +1035,13 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 			}
 			newVal = &parsed
 		}
-		if !equalUUIDPtr(newVal, meta.CreatedBy) {
+		if !equalPtr(newVal, meta.CreatedBy) {
 			meta.CreatedBy = newVal
 			applied++
 		}
 	}
 	if _, ok := present["externalReference"]; ok {
-		if !equalStringPtr(body.ExternalReference, meta.ExternalReference) {
+		if !equalPtr(body.ExternalReference, meta.ExternalReference) {
 			meta.ExternalReference = body.ExternalReference // value, or nil for explicit null → clear
 			applied++
 		}
@@ -1036,18 +1050,11 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 	return meta, applied, nil
 }
 
-// equalUUIDPtr reports whether two optional UUIDs are equal, treating nil
-// (absent/cleared) as distinct from any set value.
-func equalUUIDPtr(a, b *uuid.UUID) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// equalStringPtr reports whether two optional strings are equal, treating nil
-// (absent/cleared) as distinct from any set value.
-func equalStringPtr(a, b *string) bool {
+// equalPtr reports whether two optional values are equal, treating nil
+// (absent/cleared) as distinct from any set value. Used for the tri-state PATCH
+// fields (uuid.UUID and string), so nil-vs-set and set-vs-set both compare
+// correctly.
+func equalPtr[T comparable](a, b *T) bool {
 	if a == nil || b == nil {
 		return a == b
 	}

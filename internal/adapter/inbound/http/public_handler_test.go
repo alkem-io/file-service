@@ -309,35 +309,49 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 	}
 }
 
-// Stored-XSS hardening: the public serve endpoint must always set
-// X-Content-Type-Options: nosniff and serve inline ONLY the known-safe-to-render
-// allow-list (raster images, PDF, plain text). Everything else — unknown types,
-// application/octet-stream, and any scriptable type (svg, html, xml, rss, …) —
-// must download via Content-Disposition: attachment.
+// Stored-XSS hardening (deny-list + nosniff; see activeContentMIME): the public
+// serve endpoint always sets X-Content-Type-Options: nosniff and force-downloads
+// ONLY the enumerable set of browser-active/script-capable content-types
+// (html/xhtml/svg, the XML family, syndication/RDF/MathML, MHTML/rfc822).
+// Everything else — inert media, documents, unknown types — serves inline for
+// in-browser preview parity with the TS file-service. This is the settled
+// design; the inline cases below include the delta-2 regression media types.
 func TestPublicHandler_ServeDisposition(t *testing.T) {
 	cases := []struct {
 		mime            string
 		wantDisposition string
 	}{
+		// Inert media / documents → inline (safe under nosniff, TS-parity preview).
 		{"image/png", "inline"},
 		{"image/jpeg", "inline"},
 		{"image/gif", "inline"},
 		{"image/webp", "inline"},
 		{"image/avif", "inline"},
-		{"application/pdf", "inline"},                // safe to preview inline
-		{"text/plain", "inline"},                     // safe to preview inline
-		{"application/octet-stream", "attachment"},   // opaque binary; not on the safe allow-list
-		{"application/rss+xml", "attachment"},        // scriptable, not enumerable by a deny-list
-		{"application/x-unknown-type", "attachment"}, // unknown type → download safely
-		{"image/svg+xml", "attachment"},              // script-capable
-		{"text/html", "attachment"},                  // script-capable
-		{"application/xhtml+xml", "attachment"},      // script-capable
-		{"application/xml", "attachment"},            // script-capable
-		{"text/xml", "attachment"},                   // script-capable
-		{"text/html; charset=utf-8", "attachment"},   // params stripped before match
-		{"image/png; qs=0.5", "inline"},              // params stripped before match
-		{"IMAGE/SVG+XML", "attachment"},              // normalization: case-insensitive match
-		{"IMAGE/PNG", "inline"},                      // normalization: case-insensitive match
+		{"application/pdf", "inline"},
+		{"text/plain", "inline"},
+		// delta-2 regression cases: an allow-list wrongly force-downloaded these.
+		{"image/bmp", "inline"},
+		{"image/tiff", "inline"},
+		{"image/heic", "inline"},
+		{"video/mp4", "inline"},
+		{"audio/mpeg", "inline"},
+		{"application/json", "inline"},
+		{"text/csv", "inline"},
+		{"application/octet-stream", "inline"},   // inert binary; nosniff prevents active render
+		{"application/x-unknown-type", "inline"}, // unknown/inert → inline is safe under nosniff
+		{"image/png; qs=0.5", "inline"},          // params stripped before match
+		{"IMAGE/PNG", "inline"},                  // normalization: case-insensitive match
+		// Browser-active / script-capable content-types → attachment.
+		{"text/html", "attachment"},
+		{"application/xhtml+xml", "attachment"},
+		{"image/svg+xml", "attachment"},
+		{"application/xml", "attachment"},
+		{"text/xml", "attachment"},
+		{"application/rss+xml", "attachment"},
+		{"application/atom+xml", "attachment"},
+		{"message/rfc822", "attachment"},
+		{"text/html; charset=utf-8", "attachment"}, // params stripped before match
+		{"IMAGE/SVG+XML", "attachment"},            // normalization: case-insensitive match
 	}
 	for _, tc := range cases {
 		t.Run(tc.mime, func(t *testing.T) {

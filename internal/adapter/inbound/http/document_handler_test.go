@@ -1526,10 +1526,11 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 	}
 }
 
-func TestDocumentHandler_Patch_DisplayName_SameValueNoOp_Rejected(t *testing.T) {
-	// Renaming to the CURRENT name carries no effective change: the guard must
-	// reject it 400 with no DB write, rather than bump version+updatedDate on an
-	// unchanged row (which would spuriously 409 a concurrent actor).
+func TestDocumentHandler_Patch_DisplayName_SameValueNoOp_Idempotent200(t *testing.T) {
+	// Renaming to the CURRENT name carries no effective change: an idempotent
+	// PATCH must return 200 with the current document and write NOTHING — no
+	// version+updatedDate bump on an unchanged row (which would spuriously 409 a
+	// concurrent actor) — while still succeeding for idempotent/retry callers.
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{
@@ -1548,11 +1549,21 @@ func TestDocumentHandler_Patch_DisplayName_SameValueNoOp_Rejected(t *testing.T) 
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for same-value no-op; body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-value no-op; body=%s", rr.Code, rr.Body.String())
 	}
 	if repo.updateMetadataCalls != 0 {
 		t.Errorf("UpdateMetadata calls = %d, want 0 (no write on same-value no-op)", repo.updateMetadataCalls)
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID != docID.String() {
+		t.Errorf("id = %q, want %q (current document echoed back)", resp.ID, docID.String())
+	}
+	if resp.DisplayName != "stable.txt" {
+		t.Errorf("displayName = %q, want %q (unchanged current value)", resp.DisplayName, "stable.txt")
 	}
 }
 
@@ -2768,18 +2779,25 @@ func TestCreate_ReferenceCreate_NonReferenceCollision_Returns409(t *testing.T) {
 }
 
 // FIX 3: a body whose only key is an explicit-null on a non-clearable field
-// merges nothing, so it must 400 rather than bump version+updatedDate on an
-// unchanged row (which would spuriously 409 a concurrent actor).
-func TestUpdate_ExplicitNullNoOp_Rejected(t *testing.T) {
+// merges nothing, so it is an idempotent 200 no-write — NOT a 400 — with the
+// current document echoed back and no version+updatedDate bump.
+func TestUpdate_ExplicitNullNoOp_Idempotent200(t *testing.T) {
 	docID := uuid.New()
 	rr, repo := runPatch(t, docID, `{"temporaryLocation":null}`, func(r *mockDocRepo) {
 		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
 	})
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for no-op explicit null; body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for no-op explicit null; body=%s", rr.Code, rr.Body.String())
 	}
 	if repo.updateMetadataCalls != 0 {
 		t.Errorf("updateMetadataCalls = %d, want 0 (no write on no-op)", repo.updateMetadataCalls)
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID != docID.String() {
+		t.Errorf("id = %q, want %q (current document echoed back)", resp.ID, docID.String())
 	}
 }
 
