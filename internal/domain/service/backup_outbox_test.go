@@ -150,10 +150,17 @@ func TestWriteReplaceRouting(t *testing.T) {
 // backup-outbox row; every other PATCH takes the plain Repo.UpdateMetadata path with no enqueue.
 func TestUpdateMetadataOutboxRouting(t *testing.T) {
 	const officeMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	// The threaded `current` document (what the handler already loaded) and what a re-read of the
+	// repo would return are given DIVERGENT content fields on purpose: the outbox row must carry the
+	// THREADED values, so if anyone reintroduces the removed s.Repo.GetByID pre-read (reading
+	// repo.doc) the enqueued externalID/size/priority would flip to repo.doc's and these assertions
+	// would fail — genuinely guarding the no-pre-read invariant this commit establishes.
+	const threadedExternalID, threadedSize = "hashThreaded", 99
 	cases := []struct {
 		name         string
-		wasTemporary bool // the current (caller-loaded) row's temporaryLocation before the PATCH
-		mime         string
+		wasTemporary bool   // the threaded current row's temporaryLocation before the PATCH
+		currentMime  string // the threaded current row's mime — drives the enqueued priority
+		repoMime     string // what a (forbidden) re-read would see — OPPOSITE priority class, to catch it
 		outboxOn     bool
 		updateTemp   bool  // meta.TemporaryLocation (the PATCH target)
 		outboxErr    error // when set, UpdateMetadataWithOutbox fails — the metric-guard error path
@@ -161,27 +168,30 @@ func TestUpdateMetadataOutboxRouting(t *testing.T) {
 		wantRepo     int   // expected plain Repo.UpdateMetadata calls
 		wantMetric   int64 // expected backupOutboxEnqueued delta (increments only on a SUCCESSFUL enqueue)
 		wantErr      bool
-		wantPriority int16
+		wantPriority int16 // priority derived from currentMime (NOT repoMime)
 	}{
-		{name: "transition-image-priority-0", wasTemporary: true, mime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
-		{name: "transition-office-hot-priority-1", wasTemporary: true, mime: officeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
-		{name: "outbox-off-uses-repo", wasTemporary: true, mime: "image/png", outboxOn: false, wantRepo: 1},
-		{name: "already-durable-no-transition", wasTemporary: false, mime: "image/png", outboxOn: true, wantRepo: 1},
-		{name: "keeps-temporary-no-enqueue", wasTemporary: true, mime: "image/png", outboxOn: true, updateTemp: true, wantRepo: 1},
+		{name: "transition-image-priority-0", wasTemporary: true, currentMime: "image/png", repoMime: officeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
+		{name: "transition-office-hot-priority-1", wasTemporary: true, currentMime: officeMime, repoMime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
+		{name: "outbox-off-uses-repo", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: false, wantRepo: 1},
+		{name: "already-durable-no-transition", wasTemporary: false, currentMime: "image/png", repoMime: "image/png", outboxOn: true, wantRepo: 1},
+		{name: "keeps-temporary-no-enqueue", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: true, updateTemp: true, wantRepo: 1},
 		// Metric-guard error path: a transition whose outbox write fails must propagate the error
 		// AND leave the counter untouched (the `if err == nil { Add(1) }` guard).
-		{name: "transition-outbox-error-no-metric", wasTemporary: true, mime: "image/png", outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
+		{name: "transition-outbox-error-no-metric", wasTemporary: true, currentMime: "image/png", repoMime: officeMime, outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			repo := &mockRepo{doc: model.Document{ExternalID: "hashA", Size: 42, MimeType: tc.mime, TemporaryLocation: tc.wasTemporary}}
+			// repo.doc is the post-update read source AND what a forbidden pre-read would return —
+			// deliberately divergent from `current` in every content field.
+			repo := &mockRepo{doc: model.Document{ExternalID: "hashRepoRead", Size: 7, MimeType: tc.repoMime, TemporaryLocation: tc.wasTemporary}}
 			ob := &recordingOutbox{updateMetadataErr: tc.outboxErr}
 			s := &FileService{Repo: repo, HotMimePrefixes: []string{"application/vnd.openxmlformats-officedocument"}, Logger: nopLogger}
 			if tc.outboxOn {
 				s.Outbox = ob
 			}
-			// The handler loads the current document and threads it in; here that's repo.doc.
-			current := model.Document{ExternalID: "hashA", Size: 42, MimeType: tc.mime, TemporaryLocation: tc.wasTemporary}
+			// The handler loads the current document and threads it in; content fields (immutable on
+			// a metadata PATCH) come from here, NOT from a re-read.
+			current := model.Document{ExternalID: threadedExternalID, Size: threadedSize, MimeType: tc.currentMime, TemporaryLocation: tc.wasTemporary}
 			meta := model.DocumentMetadataUpdate{TemporaryLocation: tc.updateTemp}
 			before := backupOutboxEnqueued.Value()
 
@@ -202,11 +212,14 @@ func TestUpdateMetadataOutboxRouting(t *testing.T) {
 				t.Fatalf("enqueue counter delta = %d, want %d", got, tc.wantMetric)
 			}
 			if tc.wantOutbox == 1 {
-				if ob.lastMetaExternalID != "hashA" || ob.lastMetaSize != 42 {
-					t.Fatalf("outbox row must carry the doc's externalID/size: got %q/%d", ob.lastMetaExternalID, ob.lastMetaSize)
+				// The row MUST carry the threaded current values, never repo.doc's — a reintroduced
+				// GetByID pre-read would surface repo.doc's ("hashRepoRead"/7/opposite priority) here.
+				if ob.lastMetaExternalID != threadedExternalID || ob.lastMetaSize != threadedSize {
+					t.Fatalf("outbox row must carry the THREADED externalID/size %q/%d, got %q/%d (a re-read would give repo.doc's)",
+						threadedExternalID, threadedSize, ob.lastMetaExternalID, ob.lastMetaSize)
 				}
 				if ob.lastPriority != tc.wantPriority {
-					t.Fatalf("priority = %d, want %d", ob.lastPriority, tc.wantPriority)
+					t.Fatalf("priority = %d, want %d (derived from the THREADED mime, not repo.doc's)", ob.lastPriority, tc.wantPriority)
 				}
 			}
 		})
