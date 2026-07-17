@@ -2913,3 +2913,30 @@ func TestUpdate_OversizedBody_Rejected(t *testing.T) {
 		t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
 	}
 }
+
+func TestBuildMetadataUpdate_AuthorizationIdCannotBeCleared(t *testing.T) {
+	base := model.Document{
+		ID:              uuid.New(),
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	present := map[string]struct{}{"authorizationId": {}}
+
+	// Explicit JSON null → clear → rejected (would orphan the document's auth).
+	if _, _, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: nil}, present); err == nil || !strings.Contains(err.Error(), "cannot be cleared") {
+		t.Fatalf("null authorizationId: want cannot-be-cleared error, got %v", err)
+	}
+
+	// Nil UUID string → rejected (reads back as the zero UUID → 403 forever).
+	zero := uuid.Nil.String()
+	if _, _, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: &zero}, present); err == nil || !strings.Contains(err.Error(), "nil UUID") {
+		t.Fatalf("nil-UUID authorizationId: want nil-UUID error, got %v", err)
+	}
+
+	// Valid re-attribution → applied.
+	newAuth := uuid.New().String()
+	meta, applied, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: &newAuth}, present)
+	if err != nil || applied != 1 || meta.AuthorizationID == nil || meta.AuthorizationID.String() != newAuth {
+		t.Fatalf("valid re-attribution: applied=%d err=%v authz=%v", applied, err, meta.AuthorizationID)
+	}
+}

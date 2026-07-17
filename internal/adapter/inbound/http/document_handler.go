@@ -1020,16 +1020,23 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 		applied++
 	}
 	if _, ok := present["authorizationId"]; ok {
-		var newVal *uuid.UUID // nil for explicit null → clear
-		if body.AuthorizationID != nil {
-			parsed, err := uuid.Parse(*body.AuthorizationID)
-			if err != nil {
-				return meta, applied, fmt.Errorf("invalid authorizationId")
-			}
-			newVal = &parsed
+		// authorizationId may be RE-ATTRIBUTED to a new policy (part of re-home)
+		// but never CLEARED: a NULL/nil authorizationId reads back as the nil
+		// UUID, matches no policy, and permanently orphans the document (403 on
+		// every read). Reject an explicit null or the nil UUID, preserving the
+		// pre-013 invariant that a metadata update can't break authorization.
+		if body.AuthorizationID == nil {
+			return meta, applied, fmt.Errorf("authorizationId cannot be cleared")
 		}
-		if !equalPtr(newVal, meta.AuthorizationID) {
-			meta.AuthorizationID = newVal
+		parsed, err := uuid.Parse(*body.AuthorizationID)
+		if err != nil {
+			return meta, applied, fmt.Errorf("invalid authorizationId")
+		}
+		if parsed == uuid.Nil {
+			return meta, applied, fmt.Errorf("authorizationId cannot be the nil UUID")
+		}
+		if !equalPtr(&parsed, meta.AuthorizationID) {
+			meta.AuthorizationID = &parsed
 			applied++
 		}
 	}
