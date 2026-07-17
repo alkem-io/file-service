@@ -2686,3 +2686,216 @@ func TestUpdate_KeepsExternalReferenceWhenOmitted(t *testing.T) {
 		t.Errorf("externalReference = %v, want %q (omitted ⇒ keep)", repo.lastUpdateExternalRef, existingRef)
 	}
 }
+
+// --- 013 review round 1 regression tests ---
+
+// FIX 1 (PATCH): an empty-string externalReference is neither "keep" (absent)
+// nor "clear" (explicit null), so it is rejected with 400 rather than persisted
+// as a non-NULL ” that would orphan the row from both identity systems.
+func TestUpdate_EmptyExternalReference_Rejected(t *testing.T) {
+	docID := uuid.New()
+	rr, repo := runPatch(t, docID, `{"externalReference":""}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for empty externalReference; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+	}
+}
+
+// FIX 1 (Copy): an empty externalReference is normalized to NULL — exactly like
+// Create — so a later identical-content upload can content-dedup against it.
+func TestCopy_EmptyExternalReference_PersistedAsNull(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	sourceID := uuid.New()
+	repo.doc = model.Document{
+		ID:          sourceID,
+		ExternalID:  "sha3-of-content",
+		MimeType:    "image/png",
+		Size:        42,
+		DisplayName: "banner.png",
+	}
+
+	empty := ""
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+		ExternalReference:   &empty,
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.ExternalReference != nil {
+		t.Errorf("persisted externalReference = %v, want nil (empty ⇒ NULL)", *repo.lastCreateDoc.ExternalReference)
+	}
+}
+
+// FIX 2: a reference-bearing create that collides on a DIFFERENT unique
+// constraint (e.g. authorizationId) re-queries by reference, finds no winner,
+// and must surface a clean 409 — not a 500 "winner lookup failed".
+func TestCreate_ReferenceCreate_NonReferenceCollision_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.createErr = model.ErrDuplicateKey // dup-key on a non-reference constraint
+	// refDoc left nil ⇒ GetByReferenceInBucket returns ErrDocumentNotFound (no winner).
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.WriteField("externalReference", "fresh-media-id") // reference is new
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (collision on a different constraint), body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// FIX 3: a body whose only key is an explicit-null on a non-clearable field
+// merges nothing, so it must 400 rather than bump version+updatedDate on an
+// unchanged row (which would spuriously 409 a concurrent actor).
+func TestUpdate_ExplicitNullNoOp_Rejected(t *testing.T) {
+	docID := uuid.New()
+	rr, repo := runPatch(t, docID, `{"temporaryLocation":null}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for no-op explicit null; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (no write on no-op)", repo.updateMetadataCalls)
+	}
+}
+
+// FIX 4: externalReference is capped at the VARCHAR(256) column on every path,
+// so an over-length value is a clean 400 rather than a Postgres "value too
+// long" 500.
+func TestExternalReference_TooLong_Rejected(t *testing.T) {
+	tooLong := strings.Repeat("a", maxExternalReferenceLen+1)
+
+	t.Run("create", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, _ := writer.CreateFormFile("file", "test.txt")
+		_, _ = part.Write([]byte("hello"))
+		_ = writer.WriteField("displayName", "test.txt")
+		_ = writer.WriteField("storageBucketId", uuid.New().String())
+		_ = writer.WriteField("authorizationId", uuid.New().String())
+		_ = writer.WriteField("externalReference", tooLong)
+		_ = writer.Close()
+
+		r := chi.NewRouter()
+		r.Post("/internal/file", h.Create)
+		req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("copy", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		sourceID := uuid.New()
+		repo.doc = model.Document{ID: sourceID, ExternalID: "sha3", MimeType: "image/png", Size: 1}
+		body, _ := json.Marshal(CopyDocumentRequest{
+			SourceID:            sourceID.String(),
+			DestinationBucketID: uuid.New().String(),
+			AuthorizationID:     uuid.New().String(),
+			ExternalReference:   &tooLong,
+		})
+		r := chi.NewRouter()
+		r.Post("/internal/file/copy", h.Copy)
+		req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("patch", func(t *testing.T) {
+		docID := uuid.New()
+		rr, repo := runPatch(t, docID, `{"externalReference":"`+tooLong+`"}`, func(r *mockDocRepo) {
+			r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+		})
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+		if repo.updateMetadataCalls != 0 {
+			t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+		}
+	})
+}
+
+// FIX 5: a duplicated skipImageProcessing=true — sent BEFORE the file and again
+// AFTER — honors the byte-exact contract (the pre-file value already established
+// verbatim), so the after-file duplicate must NOT trip the ordering guard.
+func TestDocumentHandler_Create_SkipImageProcessing_DuplicatedConsistent_Allowed(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("skipImageProcessing", "true") // established before the file
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.WriteField("skipImageProcessing", "true") // duplicate, consistent with pre-file value
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for consistent duplicate skip, body: %s", rr.Code, rr.Body.String())
+	}
+	if proc.transcodeCalls != 0 {
+		t.Errorf("transcodeCalls = %d, want 0 (verbatim honored)", proc.transcodeCalls)
+	}
+}
+
+// FIX 7: an over-cap PATCH body is bounded by http.MaxBytesReader and maps to
+// 413 rather than buffering unbounded input.
+func TestUpdate_OversizedBody_Rejected(t *testing.T) {
+	docID := uuid.New()
+	huge := strings.Repeat("a", (1<<20)+1024) // just over the 1 MiB cap
+	rr, repo := runPatch(t, docID, `{"displayName":"`+huge+`"}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for oversized PATCH body; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+	}
+}

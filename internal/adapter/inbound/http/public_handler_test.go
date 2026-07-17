@@ -52,6 +52,10 @@ type mockDocRepo struct {
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
+	// Captured full doc from the most recent Create (013: asserts the
+	// persisted externalReference is normalized to NULL on empty input).
+	lastCreateDoc model.Document
+
 	// Lazy-backfill capture (US1).
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
@@ -75,6 +79,7 @@ func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ u
 }
 func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.lastCreateContentMetadata = contentMetadata
+	m.lastCreateDoc = doc
 	return doc.ID, m.createErr
 }
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
@@ -305,10 +310,10 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 }
 
 // Stored-XSS hardening: the public serve endpoint must always set
-// X-Content-Type-Options: nosniff, serve known-safe raster images inline, and
-// force every other type — notably image/svg+xml and text/html, which run
-// script in the serving origin — to download via Content-Disposition:
-// attachment.
+// X-Content-Type-Options: nosniff, serve safe types inline (TS-parity), and
+// force only active-content types — notably image/svg+xml, text/html, and xml
+// variants, which run script in the serving origin — to download via
+// Content-Disposition: attachment.
 func TestPublicHandler_ServeDisposition(t *testing.T) {
 	cases := []struct {
 		mime            string
@@ -318,11 +323,17 @@ func TestPublicHandler_ServeDisposition(t *testing.T) {
 		{"image/jpeg", "inline"},
 		{"image/gif", "inline"},
 		{"image/webp", "inline"},
-		{"image/svg+xml", "attachment"},   // script-capable
-		{"text/html", "attachment"},       // script-capable
-		{"application/pdf", "attachment"}, // not in the inline allow-list
-		{"application/octet-stream", "attachment"},
-		{"IMAGE/PNG", "inline"}, // normalization: case-insensitive match
+		{"application/pdf", "inline"},              // safe to preview inline
+		{"application/octet-stream", "inline"},     // opaque binary; nosniff prevents active reinterpretation
+		{"image/svg+xml", "attachment"},            // script-capable
+		{"text/html", "attachment"},                // script-capable
+		{"application/xhtml+xml", "attachment"},    // script-capable
+		{"application/xml", "attachment"},          // script-capable
+		{"text/xml", "attachment"},                 // script-capable
+		{"text/html; charset=utf-8", "attachment"}, // params stripped before match
+		{"image/png; qs=0.5", "inline"},            // params stripped before match
+		{"IMAGE/SVG+XML", "attachment"},            // normalization: case-insensitive match
+		{"IMAGE/PNG", "inline"},                    // normalization: case-insensitive match
 	}
 	for _, tc := range cases {
 		t.Run(tc.mime, func(t *testing.T) {

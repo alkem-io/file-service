@@ -225,17 +225,18 @@ paths:
       description: |-
         Create handles POST /internal/file — streaming ingest (spec 020): the
         file part flows request → sniff → (transcode) → staged storage without
-        whole-file buffering. Parts are processed in whatever order they arrive;
-        metadata validation always happens after the loop, before the stage is
-        published. (The known caller sends the file part first — research R4 —
-        which is why bucket-level limits cannot gate the stream early; the
-        handler itself does not depend on any ordering.)
+        whole-file buffering. Metadata fields are validated after the loop, so
+        they may appear before or after the file part — with one exception
+        below.
 
         Optional multipart metadata fields (013): externalReference (opaque
         caller reference, e.g. the Synapse media_id — never parsed) and
         skipImageProcessing (when "true", store the bytes VERBATIM: no transcode,
-        rotate, or measure — so a provider's read-back is byte-exact). The
-        skipImageProcessing field MUST precede the file part to take effect.
+        rotate, or measure — so a provider's read-back is byte-exact).
+        skipImageProcessing is the one ordering exception: it is consumed when
+        the file part is staged, so to take effect it MUST precede the file part.
+        A skipImageProcessing=true established only AFTER the file part is
+        rejected with 400 rather than silently transcoded.
       operationId: DocumentHandler.Create
       responses:
         "201":

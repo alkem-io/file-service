@@ -15,17 +15,19 @@ import (
 	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
-// safeInlineMIME is the allow-list of types served with Content-Disposition:
-// inline. Everything else — notably image/svg+xml and text/html, which execute
-// scripts in the serving origin — is forced to download via Content-Disposition:
-// attachment, defeating stored-XSS via an uploaded SVG/HTML file. These four
-// raster types cannot carry script; the web client renders them via
-// <img src=url>, which works regardless of the disposition.
-var safeInlineMIME = map[string]bool{
-	"image/png":  true,
-	"image/jpeg": true,
-	"image/gif":  true,
-	"image/webp": true,
+// activeContentMIME is the deny-list of types forced to download via
+// Content-Disposition: attachment. These execute script in a browsing
+// context, so serving them inline from this origin enables stored-XSS via an
+// uploaded file. Everything else — PDFs, plain images, office docs, … — is
+// served inline (TS file-service parity), matched against the base MIME with
+// parameters stripped. X-Content-Type-Options: nosniff is always set so the
+// browser cannot sniff a benign type into an active one.
+var activeContentMIME = map[string]bool{
+	"text/html":             true,
+	"application/xhtml+xml": true,
+	"image/svg+xml":         true,
+	"application/xml":       true,
+	"text/xml":              true,
 }
 
 // PublicHandler handles the authenticated public file serving endpoint.
@@ -98,14 +100,14 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	// Response headers matching TS file-service
 	w.Header().Set("Content-Type", doc.MimeType)
 	// Stored-XSS hardening: never let the browser sniff a different type, and
-	// serve only known-safe raster images inline — force everything else
-	// (svg+xml, html, octet-stream, …) to download so it cannot execute script
-	// in this origin.
+	// force only active-content types (svg+xml, html, xml, …) to download so
+	// they cannot execute script in this origin. Everything else is served
+	// inline for TS-parity preview (PDFs, plain images, …).
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if safeInlineMIME[model.NormalizeMIME(doc.MimeType)] {
-		w.Header().Set("Content-Disposition", "inline")
-	} else {
+	if activeContentMIME[model.NormalizeMIME(doc.MimeType)] {
 		w.Header().Set("Content-Disposition", "attachment")
+	} else {
+		w.Header().Set("Content-Disposition", "inline")
 	}
 	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", h.MaxAge))
 	w.Header().Set("Pragma", "public")

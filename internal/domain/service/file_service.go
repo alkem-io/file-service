@@ -398,6 +398,13 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 			raced.Reused = true
 			return &raced, nil
 		}
+		if errors.Is(findErr, model.ErrDocumentNotFound) {
+			// No dedup/reference winner to reuse: the unique violation was on a
+			// DIFFERENT constraint (e.g. UNIQUE(authorizationId)), not the
+			// reference/content index. That's a clean conflict, not a lookup
+			// failure — surface it as ErrConflict (409) rather than a 500.
+			return nil, ErrConflict
+		}
 		s.Logger.Warn("dedup: unique violation but re-query failed",
 			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
 		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
