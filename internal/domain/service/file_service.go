@@ -573,8 +573,12 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 // document are responsible for keeping displayName's extension consistent
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int) (*model.Document, error) {
-	if err := s.writeMetadataUpdate(ctx, documentID, meta, version); err != nil {
+// The caller passes the already-loaded current document (the handler reads it for the version
+// check + buildMetadataUpdate); this method reuses it for the temporary→durable transition check
+// and the outbox breadcrumb instead of re-reading — content fields (externalID/size/mimeType) are
+// immutable on a metadata PATCH, so the loaded values stay correct through the update.
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int, current model.Document) (*model.Document, error) {
+	if err := s.writeMetadataUpdate(ctx, documentID, meta, version, current); err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
 			return nil, ErrConflict
@@ -594,23 +598,19 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 // create/replace — so without enqueuing its backup hint here it would escape the 008 continuous-
 // backup outbox entirely. A PATCH that keeps the row temporary (still staging), or one on an
 // already-durable row (no transition — already enqueued at create/replace), takes the plain
-// Repo.UpdateMetadata path and correctly enqueues nothing. Returns model.ErrDocumentNotFound on a
-// version mismatch / missing row (the caller maps it to ErrConflict) on either path.
-func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
-	// Pre-read only when the outbox is on AND the update targets a durable state — the sole shape
-	// that can be a temporary→durable transition. Every other PATCH skips the extra read.
-	if s.Outbox != nil && !meta.TemporaryLocation {
-		old, err := s.Repo.GetByID(ctx, documentID)
-		if err != nil {
-			return err // ErrDocumentNotFound → ErrConflict at the caller
+// Repo.UpdateMetadata path and correctly enqueues nothing. The transition is decided from the
+// caller-supplied current document (no extra read — an extra read would be an availability
+// regression, failing a PATCH whose UPDATE would otherwise commit). Returns model.ErrDocumentNotFound
+// on a version mismatch / missing row (the caller maps it to ErrConflict) on either path.
+func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int, current model.Document) error {
+	// temporary→durable transition: outbox on AND the row WAS temporary AND the update targets a
+	// durable state. Enqueue the now-durable object's backup hint in the same commit as the UPDATE.
+	if s.Outbox != nil && current.TemporaryLocation && !meta.TemporaryLocation {
+		err := s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, current.ExternalID, current.Size, s.priorityForMime(current.MimeType))
+		if err == nil {
+			backupOutboxEnqueued.Add(1)
 		}
-		if old.TemporaryLocation {
-			err = s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, old.ExternalID, old.Size, s.priorityForMime(old.MimeType))
-			if err == nil {
-				backupOutboxEnqueued.Add(1)
-			}
-			return err
-		}
+		return err
 	}
 	return s.Repo.UpdateMetadata(ctx, documentID, meta, version)
 }

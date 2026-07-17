@@ -152,32 +152,44 @@ func TestUpdateMetadataOutboxRouting(t *testing.T) {
 	const officeMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	cases := []struct {
 		name         string
-		wasTemporary bool // the stored row's temporaryLocation before the PATCH
+		wasTemporary bool // the current (caller-loaded) row's temporaryLocation before the PATCH
 		mime         string
 		outboxOn     bool
-		updateTemp   bool // meta.TemporaryLocation (the PATCH target)
-		wantOutbox   int  // expected UpdateMetadataWithOutbox calls
-		wantRepo     int  // expected plain Repo.UpdateMetadata calls
+		updateTemp   bool  // meta.TemporaryLocation (the PATCH target)
+		outboxErr    error // when set, UpdateMetadataWithOutbox fails — the metric-guard error path
+		wantOutbox   int   // expected UpdateMetadataWithOutbox calls
+		wantRepo     int   // expected plain Repo.UpdateMetadata calls
+		wantMetric   int64 // expected backupOutboxEnqueued delta (increments only on a SUCCESSFUL enqueue)
+		wantErr      bool
 		wantPriority int16
 	}{
-		{"transition-image-priority-0", true, "image/png", true, false, 1, 0, 0},
-		{"transition-office-hot-priority-1", true, officeMime, true, false, 1, 0, 1},
-		{"outbox-off-uses-repo", true, "image/png", false, false, 0, 1, 0},
-		{"already-durable-no-transition", false, "image/png", true, false, 0, 1, 0},
-		{"keeps-temporary-no-enqueue", true, "image/png", true, true, 0, 1, 0},
+		{name: "transition-image-priority-0", wasTemporary: true, mime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
+		{name: "transition-office-hot-priority-1", wasTemporary: true, mime: officeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
+		{name: "outbox-off-uses-repo", wasTemporary: true, mime: "image/png", outboxOn: false, wantRepo: 1},
+		{name: "already-durable-no-transition", wasTemporary: false, mime: "image/png", outboxOn: true, wantRepo: 1},
+		{name: "keeps-temporary-no-enqueue", wasTemporary: true, mime: "image/png", outboxOn: true, updateTemp: true, wantRepo: 1},
+		// Metric-guard error path: a transition whose outbox write fails must propagate the error
+		// AND leave the counter untouched (the `if err == nil { Add(1) }` guard).
+		{name: "transition-outbox-error-no-metric", wasTemporary: true, mime: "image/png", outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &mockRepo{doc: model.Document{ExternalID: "hashA", Size: 42, MimeType: tc.mime, TemporaryLocation: tc.wasTemporary}}
-			ob := &recordingOutbox{}
+			ob := &recordingOutbox{updateMetadataErr: tc.outboxErr}
 			s := &FileService{Repo: repo, HotMimePrefixes: []string{"application/vnd.openxmlformats-officedocument"}, Logger: nopLogger}
 			if tc.outboxOn {
 				s.Outbox = ob
 			}
+			// The handler loads the current document and threads it in; here that's repo.doc.
+			current := model.Document{ExternalID: "hashA", Size: 42, MimeType: tc.mime, TemporaryLocation: tc.wasTemporary}
 			meta := model.DocumentMetadataUpdate{TemporaryLocation: tc.updateTemp}
 			before := backupOutboxEnqueued.Value()
 
-			if _, err := s.UpdateDocumentMetadata(context.Background(), uuid.New(), meta, 1); err != nil {
+			_, err := s.UpdateDocumentMetadata(context.Background(), uuid.New(), meta, 1, current)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error to propagate from the failed outbox enqueue")
+			}
+			if !tc.wantErr && err != nil {
 				t.Fatalf("UpdateDocumentMetadata: %v", err)
 			}
 			if ob.updateMetadataCalls != tc.wantOutbox {
@@ -186,9 +198,8 @@ func TestUpdateMetadataOutboxRouting(t *testing.T) {
 			if repo.updateMetadataCalls != tc.wantRepo {
 				t.Fatalf("repo calls = %d, want %d", repo.updateMetadataCalls, tc.wantRepo)
 			}
-			wantCount := int64(tc.wantOutbox)
-			if got := backupOutboxEnqueued.Value() - before; got != wantCount {
-				t.Fatalf("enqueue counter delta = %d, want %d", got, wantCount)
+			if got := backupOutboxEnqueued.Value() - before; got != tc.wantMetric {
+				t.Fatalf("enqueue counter delta = %d, want %d", got, tc.wantMetric)
 			}
 			if tc.wantOutbox == 1 {
 				if ob.lastMetaExternalID != "hashA" || ob.lastMetaSize != 42 {

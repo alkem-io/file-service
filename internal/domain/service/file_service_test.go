@@ -1237,7 +1237,7 @@ func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, model.DocumentMetadataUpdate{StorageBucketID: newBucket, DisplayName: "renamed.txt"}, 1)
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, model.DocumentMetadataUpdate{StorageBucketID: newBucket, DisplayName: "renamed.txt"}, 1, model.Document{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1251,7 +1251,7 @@ func TestUpdateDocumentMetadata_NotFound(t *testing.T) {
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1, model.Document{})
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
@@ -1265,7 +1265,7 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1, model.Document{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1477,7 +1477,7 @@ func TestUpdateDocumentMetadata_VersionConflict(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 3)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 3, model.Document{})
 	if err == nil {
 		t.Fatal("expected error for version conflict")
 	}

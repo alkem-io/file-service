@@ -783,7 +783,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, meta, doc.Version)
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, meta, doc.Version, doc)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
