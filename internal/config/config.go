@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,32 @@ type Config struct {
 	AuthServiceURL string // h2c URL for auth-evaluation-service (e.g., "http://auth-service:6060")
 	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
 	Ingest         IngestConfig
+	BackupOutbox   BackupOutboxConfig
+}
+
+// BackupOutboxConfig governs the continuous-backup producer (008-continuous-file-backup):
+// when Enabled, every committed non-temporary document also commits a `file_backup_outbox`
+// row in the SAME transaction (FR-001) and emits NOTIFY. Off by default — a pure opt-in.
+type BackupOutboxConfig struct {
+	// Enabled turns the transactional outbox producer on. Default false.
+	Enabled bool
+	// HotMimePrefixes are MIME-type prefixes whose objects get outbox priority=1 (hot) so
+	// their effective RPO is lowest (documents/office/Yjs — the RPO driver). Everything else
+	// is priority=0. Configurable so the hot set lives in file-service config (research R2).
+	HotMimePrefixes []string
+	// DoneRetention is how long a consumer-finished (status='done') outbox row is kept before
+	// the periodic prune drops it — keeps the shared outbox bounded (SC-008). The durable
+	// record lives in the backup ledger; done rows are just a debugging window.
+	DoneRetention time.Duration
+}
+
+// defaultHotMimePrefixes marks the user-authored, non-reconstructable document classes hot.
+var defaultHotMimePrefixes = []string{
+	"application/vnd.openxmlformats-officedocument", // docx / xlsx / pptx
+	"application/vnd.oasis.opendocument",            // odt / ods / odp
+	"application/msword",                            // legacy .doc
+	"application/vnd.ms-",                           // legacy .xls / .ppt
+	"application/x-yjs",                             // Yjs blobs (whiteboards, memos)
 }
 
 // S3Config holds the S3-compatible object-store settings. Only populated (and
@@ -175,6 +202,11 @@ func Load() (*Config, error) {
 		AlkemioDB:      dbCfg,
 		NATS:           natsCfg,
 		Ingest:         ingestCfg,
+		BackupOutbox: BackupOutboxConfig{
+			Enabled:         getenvBool("FILE_BACKUP_OUTBOX_ENABLED", false),
+			HotMimePrefixes: getenvCSV("FILE_BACKUP_HOT_MIME_PREFIXES", defaultHotMimePrefixes),
+			DoneRetention:   getenvHours("FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS", 24*time.Hour),
+		},
 	}, nil
 }
 
@@ -199,7 +231,7 @@ func loadS3Config() (S3Config, error) {
 		return S3Config{}, fmt.Errorf("S3_BUCKET is required when STORAGE_TYPE=s3")
 	}
 
-	useSSL, err := getenvBool("S3_USE_SSL", true)
+	useSSL, err := getenvBoolStrict("S3_USE_SSL", true)
 	if err != nil {
 		return S3Config{}, fmt.Errorf("S3_USE_SSL: %w", err)
 	}
@@ -384,6 +416,55 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
+// getenvBool reads a boolean env var (strconv.ParseBool: 1/t/true/0/f/false…); an unset or
+// blank value returns the fallback, and an unparseable value ALSO returns the fallback (a
+// mis-typed flag must not silently flip a default the wrong way — it stays at the default).
+func getenvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
+}
+
+// getenvHours reads an integer-hours env var into a Duration; unset, non-numeric, or
+// non-positive returns the fallback (a mis-typed value stays at the default, like getenvBool).
+func getenvHours(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return time.Duration(n) * time.Hour
+}
+
+// getenvCSV reads a comma-separated env var into a trimmed, non-empty slice; unset returns the
+// fallback (so ops can override the whole list but the default is used when the var is absent).
+func getenvCSV(key string, fallback []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
+}
+
 func getenvPort(key string, fallback int) (int, error) {
 	v, err := getenvInt(key, fallback)
 	if err != nil {
@@ -407,7 +488,11 @@ func getenvInt(key string, fallback int) (int, error) {
 	return n, nil
 }
 
-func getenvBool(key string, fallback bool) (bool, error) {
+// getenvBoolStrict reads a boolean env var and, UNLIKE getenvBool, returns an
+// error on an unparseable value instead of falling back — used where a mis-typed
+// flag must fail loudly at boot (e.g. S3 backend config) rather than silently
+// take a default.
+func getenvBoolStrict(key string, fallback bool) (bool, error) {
 	v := os.Getenv(key)
 	if v == "" {
 		return fallback, nil

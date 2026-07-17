@@ -74,19 +74,29 @@ func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config
 		PipeReadLimit: cfg.Ingest.VipsPipeReadLimit,
 		PixelBudget:   cfg.Ingest.PixelBudget,
 	})
-
 	storage, err := buildStorage(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	return &service.FileService{
-		Repo:      alkemiodb.New(pool),
-		Auth:      auth,
-		Storage:   storage,
-		Processor: processor,
-		Logger:    logger,
-	}, nil
+	repo := alkemiodb.NewWithLogger(pool, logger)
+	svc := &service.FileService{
+		Repo:            repo,
+		Auth:            auth,
+		Storage:         storage,
+		Processor:       processor,
+		Logger:          logger,
+		HotMimePrefixes: cfg.BackupOutbox.HotMimePrefixes,
+	}
+	// 008-continuous-file-backup: when the producer is enabled, the SAME adapter drives the
+	// transactional outbox writes (it implements both DocumentRepo and BackupOutboxRepo). Off =
+	// nil Outbox = the create/replace paths use the original non-transactional Repo methods.
+	if cfg.BackupOutbox.Enabled {
+		svc.Outbox = repo
+		logger.Info("continuous-backup outbox producer enabled",
+			zap.Int("hotMimePrefixes", len(cfg.BackupOutbox.HotMimePrefixes)))
+	}
+	return svc, nil
 }
 
 // buildStorage selects the storage backend from STORAGE_TYPE: "local"
@@ -196,4 +206,28 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 		zap.Int("unrecoverable", sum.Unrecoverable),
 		zap.Int("skipped_not_office", sum.SkippedNotOffice),
 		zap.Int("errors", sum.Errors))
+}
+
+// runOutboxPrune periodically drops consumer-finished backup-outbox rows older than the
+// retention window (008-continuous-file-backup SC-008), until ctx is cancelled. Best-effort —
+// a prune failure is logged, never fatal. Only launched when the producer is enabled.
+func runOutboxPrune(ctx context.Context, fileSvc *service.FileService, retention time.Duration, logger *zap.Logger) {
+	const interval = time.Hour
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := fileSvc.PruneBackupOutbox(ctx, retention)
+			if err != nil {
+				logger.Warn("backup-outbox prune failed", zap.Error(err))
+				continue
+			}
+			if n > 0 {
+				logger.Info("backup-outbox pruned", zap.Int64("rows", n))
+			}
+		}
+	}
 }

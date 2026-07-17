@@ -99,6 +99,9 @@ make build
 | `AUTH_BREAKER_FAILURE_THRESHOLD` | `3` | Circuit breaker threshold (h2c) |
 | `AUTH_BREAKER_TIMEOUT_SECONDS` | `15` | Circuit breaker open duration |
 | `AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS` | `2` | Half-open test requests |
+| `FILE_BACKUP_OUTBOX_ENABLED` | `false` | Turn the continuous-backup outbox producer on (see below) |
+| `FILE_BACKUP_HOT_MIME_PREFIXES` | office/ODF/Yjs prefixes | CSV of MIME prefixes enqueued at hot priority (=1) |
+| `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS` | `24` | How long consumer-finished (`done`) outbox rows are kept before the prune drops them |
 
 ### NATS-specific (only when NATS transport is active)
 
@@ -107,6 +110,30 @@ make build
 | `NATS_SUBJECT` | `auth.evaluate` | Auth subject |
 | `NATS_RECONNECT_WAIT_MS` | `1000` | Initial reconnect delay |
 | `NATS_RECONNECT_MAX_WAIT_MS` | `30000` | Max reconnect delay |
+
+## Continuous-backup outbox producer (`FILE_BACKUP_OUTBOX_ENABLED`)
+
+Part of the cross-repo `008-continuous-file-backup` feature. **Off by default** — a
+pure opt-in that leaves the original write paths byte-for-byte unchanged.
+
+When enabled, every committed **non-temporary** document create / content-replace also
+commits a `file_backup_outbox` row **in the same transaction** as the `file` write (so
+there is never a committed file without its backup hint, and never an outbox row without
+a file). After the commit the service emits a best-effort `NOTIFY file_backup_outbox` to
+wake the downstream backup worker; the durable table plus the worker's poll floor cover a
+lost notification. Temporary-location objects, and the flag-off path, enqueue nothing.
+
+`FILE_BACKUP_HOT_MIME_PREFIXES` marks user-authored, non-reconstructable classes
+(office/OOXML, ODF, legacy Word/Excel/PowerPoint, Yjs) as priority `1` (hot) for the
+lowest effective RPO; everything else is priority `0`.
+
+**Table ownership:** the `file_backup_outbox` DDL is a **server-owned migration** — it is
+*not* created here. file-service only performs the transactional DML (enqueue) and an
+hourly prune of `done` rows older than `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS`, keeping
+the shared outbox bounded. `db/schema/outbox.sql` is a sqlc codegen mirror only.
+
+Producer activity is counted on the expvar endpoint (`/internal/debug/vars`):
+`file_backup_outbox_enqueued_total` and `file_backup_outbox_pruned_total`.
 
 ## Development
 

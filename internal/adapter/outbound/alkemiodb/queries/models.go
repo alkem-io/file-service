@@ -25,3 +25,19 @@ type File struct {
 	TagsetId          pgtype.UUID        `json:"tagsetId"`
 	ContentMetadata   []byte             `json:"content_metadata"`
 }
+
+type FileBackupOutbox struct {
+	ID          int64              `json:"id"`
+	FileId      pgtype.UUID        `json:"fileId"`
+	ExternalID  string             `json:"externalID"`
+	Priority    int16              `json:"priority"`
+	Status      string             `json:"status"`
+	Attempts    int32              `json:"attempts"`
+	Deliveries  int32              `json:"deliveries"`
+	LastError   pgtype.Text        `json:"lastError"`
+	CreatedBy   pgtype.UUID        `json:"createdBy"`
+	CreatedDate pgtype.Timestamptz `json:"createdDate"`
+	Size        int64              `json:"size"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimedAt"`
+	VisibleAt   pgtype.Timestamptz `json:"visibleAt"`
+}
