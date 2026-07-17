@@ -73,6 +73,10 @@ components:
           type: string
         id:
           type: string
+        imageHeight:
+          type: integer
+        imageWidth:
+          type: integer
         mimeType:
           type: string
         size:

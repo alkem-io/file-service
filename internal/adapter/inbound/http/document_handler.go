@@ -1158,6 +1158,8 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 		ExternalReference: doc.ExternalReference,
 		CreatedDate:       doc.CreatedDate,
 		UpdatedDate:       doc.UpdatedDate,
+		ImageWidth:        doc.ImageWidth,
+		ImageHeight:       doc.ImageHeight,
 	}
 	if doc.CreatedBy != nil {
 		s := doc.CreatedBy.String()

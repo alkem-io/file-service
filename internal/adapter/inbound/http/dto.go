@@ -124,6 +124,11 @@ type DocumentMetaResponse struct {
 	ExternalReference *string   `json:"externalReference,omitempty"`
 	CreatedDate       time.Time `json:"createdDate"`
 	UpdatedDate       time.Time `json:"updatedDate"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions sourced from
+	// content_metadata for image rows. Both nil for non-images and for
+	// image rows whose metadata is empty/sentinel.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 // Render writes the response as JSON with HTTP 200.

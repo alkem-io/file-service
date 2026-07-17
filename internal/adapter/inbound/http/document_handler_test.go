@@ -1174,6 +1174,121 @@ func TestDocumentMetaResponse_WithoutNullables(t *testing.T) {
 	}
 }
 
+// --- 013: image dimensions on /meta + by-reference responses ---
+
+// An image document surfaces imageWidth/imageHeight on the GET /meta wire body;
+// they're sourced from the same doc.ImageWidth/Height mirror of content_metadata
+// that the create/update responses use. The Alkemio server's by-reference lookup
+// consumes these to populate conversation attachment width/height.
+func TestDocumentHandler_GetMeta_Image_ReturnsDims(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		ExternalID:      "img-hash",
+		MimeType:        "image/jpeg",
+		Size:            123,
+		DisplayName:     "photo.jpg",
+		AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(),
+		ImageWidth:      intp(800),
+		ImageHeight:     intp(600),
+	}
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/meta", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["imageWidth"] != float64(800) {
+		t.Errorf("imageWidth = %v, want 800", body["imageWidth"])
+	}
+	if body["imageHeight"] != float64(600) {
+		t.Errorf("imageHeight = %v, want 600", body["imageHeight"])
+	}
+}
+
+// Non-image content must omit both dim keys entirely (omitempty), matching the
+// create/update contract.
+func TestDocumentHandler_GetMeta_NonImage_OmitsDims(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		ExternalID:      "txt-hash",
+		MimeType:        "text/plain",
+		Size:            5,
+		DisplayName:     "notes.txt",
+		AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(),
+	}
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/meta", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["imageWidth"]; ok {
+		t.Errorf("imageWidth must be omitted for non-image content; got %v", body["imageWidth"])
+	}
+	if _, ok := body["imageHeight"]; ok {
+		t.Errorf("imageHeight must be omitted for non-image content; got %v", body["imageHeight"])
+	}
+}
+
+// The by-reference endpoint shares documentMetaResponse, so it must carry the
+// same dims — this is the exact path the Alkemio server uses to populate
+// conversation attachment width/height.
+func TestByReference_Image_ReturnsDims(t *testing.T) {
+	ref := "synapse-media-id-99"
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.refDoc = &model.Document{
+		ID:                docID,
+		ExternalID:        "img-hash",
+		MimeType:          "image/png",
+		Size:              456,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+		ImageWidth:        intp(1024),
+		ImageHeight:       intp(768),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref, nil)
+	w := httptest.NewRecorder()
+	h.ByReference(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var got DocumentMetaResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ImageWidth == nil || *got.ImageWidth != 1024 {
+		t.Errorf("imageWidth = %v, want 1024", got.ImageWidth)
+	}
+	if got.ImageHeight == nil || *got.ImageHeight != 768 {
+		t.Errorf("imageHeight = %v, want 768", got.ImageHeight)
+	}
+}
+
 func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	repo.err = model.ErrDocumentNotFound
