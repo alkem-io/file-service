@@ -526,7 +526,7 @@ func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err er
 		IngestOutcomes.Add("rejected_bucket_policy", 1)
 		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, service.ErrConflict):
-		writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
+		writeJSONError(w, http.StatusConflict, "a conflicting document already exists (unique constraint)")
 	default:
 		IngestOutcomes.Add("failed_mid_stream", 1)
 		h.Logger.Error("failed to create document", zap.Error(err))
@@ -634,9 +634,11 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "source document not found")
 		case errors.Is(err, service.ErrConflict):
-			// Reachable only when SkipDedup=true and the destination bucket
-			// already has a row with this content under the unique index.
-			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the destination bucket")
+			// A unique-constraint collision in the destination bucket with no
+			// reference winner. Arises with or without SkipDedup — e.g. a
+			// SkipDedup=true content collision, or a normal reference-bearing
+			// copy that collides on a different unique index.
+			writeJSONError(w, http.StatusConflict, "a conflicting document already exists (unique constraint)")
 		default:
 			h.Logger.Error("failed to copy document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -746,10 +748,11 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// A body whose only keys are explicit-null on non-clearable fields (e.g.
-	// {"temporaryLocation":null}) is present but merges nothing — reject it
-	// rather than bump version+updatedDate on an unchanged row (which would
-	// spuriously 409 a concurrent actor).
+	// No field carries an effective change — either every key is a no-op
+	// explicit-null (e.g. {"temporaryLocation":null}) or sets a field to its
+	// current value (e.g. {"displayName":"<current name>"}). Reject rather than
+	// bump version+updatedDate on an unchanged row (which would spuriously 409 a
+	// concurrent actor).
 	if applied == 0 {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
@@ -960,9 +963,13 @@ func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocu
 // they honor explicit JSON null as "clear". A malformed UUID yields an error
 // whose message is safe as a 400 body.
 //
-// applied reports how many fields actually produced a mutation, so the handler
-// can 400 a no-op PATCH (e.g. {"temporaryLocation":null}, which is present but
-// merges nothing) instead of bumping version+updatedDate on an unchanged row.
+// applied reports how many fields carry an EFFECTIVE change — a new value that
+// differs from the row's current value — so the handler can 400 a no-op PATCH
+// instead of bumping version+updatedDate on an unchanged row (which would
+// spuriously 409 a concurrent actor). This rejects both the explicit-null no-op
+// (e.g. {"temporaryLocation":null}, present but merges nothing) AND the
+// same-value no-op (e.g. {"displayName":"<current name>"}). doc is the freshly
+// loaded row, so the comparison needs no extra DB round-trip.
 func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present map[string]struct{}) (meta model.DocumentMetadataUpdate, applied int, err error) {
 	meta = model.DocumentMetadataUpdate{
 		StorageBucketID:   doc.StorageBucketID,
@@ -978,47 +985,73 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 		if err != nil {
 			return meta, applied, fmt.Errorf("invalid storageBucketId")
 		}
-		meta.StorageBucketID = parsed
-		applied++
+		if parsed != meta.StorageBucketID {
+			meta.StorageBucketID = parsed
+			applied++
+		}
 	}
-	if body.TemporaryLocation != nil {
+	if body.TemporaryLocation != nil && *body.TemporaryLocation != meta.TemporaryLocation {
 		meta.TemporaryLocation = *body.TemporaryLocation
 		applied++
 	}
-	if body.DisplayName != nil {
+	if body.DisplayName != nil && *body.DisplayName != meta.DisplayName {
 		meta.DisplayName = *body.DisplayName
 		applied++
 	}
 	if _, ok := present["authorizationId"]; ok {
-		if body.AuthorizationID == nil {
-			meta.AuthorizationID = nil // explicit null → clear
-		} else {
+		var newVal *uuid.UUID // nil for explicit null → clear
+		if body.AuthorizationID != nil {
 			parsed, err := uuid.Parse(*body.AuthorizationID)
 			if err != nil {
 				return meta, applied, fmt.Errorf("invalid authorizationId")
 			}
-			meta.AuthorizationID = &parsed
+			newVal = &parsed
 		}
-		applied++
+		if !equalUUIDPtr(newVal, meta.AuthorizationID) {
+			meta.AuthorizationID = newVal
+			applied++
+		}
 	}
 	if _, ok := present["createdBy"]; ok {
-		if body.CreatedBy == nil {
-			meta.CreatedBy = nil // explicit null → clear
-		} else {
+		var newVal *uuid.UUID // nil for explicit null → clear
+		if body.CreatedBy != nil {
 			parsed, err := uuid.Parse(*body.CreatedBy)
 			if err != nil {
 				return meta, applied, fmt.Errorf("invalid createdBy")
 			}
-			meta.CreatedBy = &parsed
+			newVal = &parsed
 		}
-		applied++
+		if !equalUUIDPtr(newVal, meta.CreatedBy) {
+			meta.CreatedBy = newVal
+			applied++
+		}
 	}
 	if _, ok := present["externalReference"]; ok {
-		meta.ExternalReference = body.ExternalReference // value, or nil for explicit null → clear
-		applied++
+		if !equalStringPtr(body.ExternalReference, meta.ExternalReference) {
+			meta.ExternalReference = body.ExternalReference // value, or nil for explicit null → clear
+			applied++
+		}
 	}
 
 	return meta, applied, nil
+}
+
+// equalUUIDPtr reports whether two optional UUIDs are equal, treating nil
+// (absent/cleared) as distinct from any set value.
+func equalUUIDPtr(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// equalStringPtr reports whether two optional strings are equal, treating nil
+// (absent/cleared) as distinct from any set value.
+func equalStringPtr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {

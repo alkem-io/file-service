@@ -1252,7 +1252,7 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}` // effective change (fixture defaults false) so the update path runs
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1271,7 +1271,7 @@ func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}` // effective change (fixture defaults false) so the update path runs
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1526,10 +1526,10 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 	}
 }
 
-func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
-	// Renaming to the same name twice: handler/service does not branch on
-	// "no-op", but the row's version still advances (DB UPDATE always
-	// runs). The contract is "stable result", not "no DB write".
+func TestDocumentHandler_Patch_DisplayName_SameValueNoOp_Rejected(t *testing.T) {
+	// Renaming to the CURRENT name carries no effective change: the guard must
+	// reject it 400 with no DB write, rather than bump version+updatedDate on an
+	// unchanged row (which would spuriously 409 a concurrent actor).
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{
@@ -1543,20 +1543,16 @@ func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
 	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"displayName": "stable.txt"}`
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
-		}
-		if repo.lastUpdateDisplayName != "stable.txt" {
-			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
-		}
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for same-value no-op; body=%s", rr.Code, rr.Body.String())
 	}
-	if repo.updateMetadataCalls != 2 {
-		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("UpdateMetadata calls = %d, want 0 (no write on same-value no-op)", repo.updateMetadataCalls)
 	}
 }
 
