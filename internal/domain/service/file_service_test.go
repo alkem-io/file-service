@@ -19,22 +19,23 @@ var nopLogger = zap.NewNop()
 // --- Mocks ---
 
 type mockRepo struct {
-	doc           model.Document
-	getErr        error
-	findDoc       *model.Document // nil means "not found"
-	findErr       error           // if set, overrides findDoc
-	findCalls     int
-	lastFindExt   string
-	lastFindBkt   uuid.UUID
-	createErr     error
-	createErrOnce error // returned only on the first Create call
-	createCalls   int
-	createdDocs   []model.Document // every doc passed to Create, in order
-	updateErr     error
-	deleteResult  model.DeletedDocument
-	deleteErr     error
-	count         int
-	countErr      error
+	doc                 model.Document
+	getErr              error
+	findDoc             *model.Document // nil means "not found"
+	findErr             error           // if set, overrides findDoc
+	findCalls           int
+	lastFindExt         string
+	lastFindBkt         uuid.UUID
+	createErr           error
+	createErrOnce       error // returned only on the first Create call
+	createCalls         int
+	createdDocs         []model.Document // every doc passed to Create, in order
+	updateErr           error
+	updateMetadataCalls int
+	deleteResult        model.DeletedDocument
+	deleteErr           error
+	count               int
+	countErr            error
 
 	// Captured args from Create / UpdateFile content_metadata params.
 	lastCreateContentMetadata     model.ContentMetadata
@@ -102,6 +103,7 @@ func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expe
 	return m.backfillErr
 }
 func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
+	m.updateMetadataCalls++
 	return m.updateErr
 }
 func (m *mockRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {

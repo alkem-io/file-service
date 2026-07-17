@@ -98,6 +98,49 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 	return nil
 }
 
+// UpdateMetadataWithOutbox applies the versioned PATCH metadata update AND enqueues a backup-outbox
+// row for the now-durable document in ONE transaction (008-continuous-file-backup FR-001), then
+// NOTIFYs. Called when a PATCH flips a document temporary→durable (013 conversation media reaches
+// durability via a temporaryLocation:true→false flip — the re-home MOVE / re-share pin / outbound
+// flip). model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateMetadata
+// does. The outbox breadcrumb: createdBy is the re-attributed owner (meta.CreatedBy, null when the
+// PATCH leaves it unset) and createdDate is enqueue time (now) — the RPO-lag semantics the
+// consumer's backlog gauge expects.
+func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, externalID string, size int, priority int16) error {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := a.queries.WithTx(tx)
+
+	rows, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return model.ErrDuplicateKey
+		}
+		return err
+	}
+	if rows == 0 {
+		return model.ErrDocumentNotFound
+	}
+	if err := q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
+		FileId:      uuidToPgx(id),
+		ExternalID:  externalID,
+		Priority:    priority,
+		CreatedBy:   uuidToPgxNullable(meta.CreatedBy), // the re-attributed owner breadcrumb; nil if unset
+		CreatedDate: timeToPgxNow(),
+		Size:        int64(size),
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	a.notifyBackup(ctx)
+	return nil
+}
+
 // PruneBackupOutbox deletes `done` outbox rows older than the cutoff, keeping the shared outbox
 // bounded (SC-008). file-service owns the outbox DML; the durable record lives in the ledger.
 func (a *Adapter) PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error) {

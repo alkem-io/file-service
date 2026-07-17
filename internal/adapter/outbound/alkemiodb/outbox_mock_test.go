@@ -192,6 +192,81 @@ func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
 	}
 }
 
+// TestMock_UpdateMetadataWithOutbox_Commits: a temporary→durable PATCH applies the versioned
+// metadata update and enqueues the now-durable object's backup hint in ONE transaction, then
+// NOTIFYs. Asserts the outbox row carries the doc's externalID + size + priority.
+func TestMock_UpdateMetadataWithOutbox_Commits(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	id := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashDur", int16(1),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(99)).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
+
+	err = New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, "hashDur", 99, 1)
+	if err != nil {
+		t.Fatalf("UpdateMetadataWithOutbox: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack: a version mismatch / missing row (0 rows) →
+// ErrDocumentNotFound, the tx rolls back and no outbox row is enqueued.
+func TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+
+	err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, "h", 1, 0)
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("want ErrDocumentNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack: a unique violation on the metadata update
+// (a re-homed reference / re-attributed authorizationId collision) rolls the tx back (no outbox
+// row, no NOTIFY) and surfaces model.ErrDuplicateKey, matching UpdateMetadata.
+func TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).
+		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
+	mock.ExpectRollback()
+
+	err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, "h", 1, 0)
+	if !errors.Is(err, model.ErrDuplicateKey) {
+		t.Fatalf("want ErrDuplicateKey, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestMock_PruneBackupOutbox: prunes done rows older than the cutoff and returns the count.
 func TestMock_PruneBackupOutbox(t *testing.T) {
 	mock, err := pgxmock.NewPool()

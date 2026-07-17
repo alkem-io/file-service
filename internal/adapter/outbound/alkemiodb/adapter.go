@@ -207,17 +207,7 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 // 0 rows affected — row missing or version stale — returns
 // model.ErrDocumentNotFound; the service maps that to its conflict error.
 func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
-	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
-		ID:                uuidToPgx(id),
-		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
-		TemporaryLocation: meta.TemporaryLocation,
-		DisplayName:       meta.DisplayName,
-		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
-		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
-		ExternalReference: stringToPgxText(meta.ExternalReference),
-		UpdatedDate:       timeToPgxNow(),
-		Version:           safeInt32(version),
-	})
+	rows, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
 		// A PATCH can collide on a uniqueness constraint: the partial
 		// UNIQUE("externalReference", "storageBucketId") when a move re-homes a
@@ -235,6 +225,22 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.D
 		return model.ErrDocumentNotFound
 	}
 	return nil
+}
+
+// updateMetadataParams maps the PATCH "move + re-attribute" fields to the sqlc update params — the
+// ONE owner, shared by UpdateMetadata and the transactional UpdateMetadataWithOutbox.
+func updateMetadataParams(id uuid.UUID, meta model.DocumentMetadataUpdate, version int) queries.UpdateDocumentMetadataParams {
+	return queries.UpdateDocumentMetadataParams{
+		ID:                uuidToPgx(id),
+		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
+		TemporaryLocation: meta.TemporaryLocation,
+		DisplayName:       meta.DisplayName,
+		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
+		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
+		ExternalReference: stringToPgxText(meta.ExternalReference),
+		UpdatedDate:       timeToPgxNow(),
+		Version:           safeInt32(version),
+	}
 }
 
 // BackfillContentMetadata persists computed content_metadata on a row without

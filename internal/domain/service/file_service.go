@@ -574,8 +574,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
 func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int) (*model.Document, error) {
-	err := s.Repo.UpdateMetadata(ctx, documentID, meta, version)
-	if err != nil {
+	if err := s.writeMetadataUpdate(ctx, documentID, meta, version); err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
 			return nil, ErrConflict
@@ -587,6 +586,33 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 		return nil, err
 	}
 	return &doc, nil
+}
+
+// writeMetadataUpdate applies the versioned PATCH, routing a temporary→durable transition through
+// the transactional backup-outbox path. 013 conversation media (re-home MOVE / re-share pin /
+// outbound flip) reaches durability via THIS PATCH — a temporaryLocation:true→false flip, never via
+// create/replace — so without enqueuing its backup hint here it would escape the 008 continuous-
+// backup outbox entirely. A PATCH that keeps the row temporary (still staging), or one on an
+// already-durable row (no transition — already enqueued at create/replace), takes the plain
+// Repo.UpdateMetadata path and correctly enqueues nothing. Returns model.ErrDocumentNotFound on a
+// version mismatch / missing row (the caller maps it to ErrConflict) on either path.
+func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
+	// Pre-read only when the outbox is on AND the update targets a durable state — the sole shape
+	// that can be a temporary→durable transition. Every other PATCH skips the extra read.
+	if s.Outbox != nil && !meta.TemporaryLocation {
+		old, err := s.Repo.GetByID(ctx, documentID)
+		if err != nil {
+			return err // ErrDocumentNotFound → ErrConflict at the caller
+		}
+		if old.TemporaryLocation {
+			err = s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, old.ExternalID, old.Size, s.priorityForMime(old.MimeType))
+			if err == nil {
+				backupOutboxEnqueued.Add(1)
+			}
+			return err
+		}
+	}
+	return s.Repo.UpdateMetadata(ctx, documentID, meta, version)
 }
 
 var (

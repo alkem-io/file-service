@@ -14,9 +14,13 @@ import (
 // recordingOutbox is a fake BackupOutboxRepo that records which transactional path ran and the
 // priority it was handed — enough to assert the flag/temporary-location routing (FR-001).
 type recordingOutbox struct {
-	createCalls  int
-	updateCalls  int
-	lastPriority int16
+	createCalls         int
+	updateCalls         int
+	updateMetadataCalls int
+	lastPriority        int16
+	lastMetaExternalID  string
+	lastMetaSize        int
+	updateMetadataErr   error
 }
 
 var _ port.BackupOutboxRepo = (*recordingOutbox)(nil)
@@ -31,6 +35,14 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 	o.updateCalls++
 	o.lastPriority = priority
 	return nil
+}
+
+func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, externalID string, size int, priority int16) error {
+	o.updateMetadataCalls++
+	o.lastPriority = priority
+	o.lastMetaExternalID = externalID
+	o.lastMetaSize = size
+	return o.updateMetadataErr
 }
 
 func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int64, error) {
@@ -130,4 +142,62 @@ func TestWriteReplaceRouting(t *testing.T) {
 			t.Fatalf("temporary must NOT enqueue: repo=%d outbox=%d", repo.updateFileCalls, ob.updateCalls)
 		}
 	})
+}
+
+// TestUpdateMetadataOutboxRouting: 013 conversation media reaches durability via a metadata PATCH
+// flipping temporaryLocation true→false (re-home MOVE / re-share pin / outbound flip). Only that
+// transition — outbox on AND the row WAS temporary AND the update targets durable — enqueues a
+// backup-outbox row; every other PATCH takes the plain Repo.UpdateMetadata path with no enqueue.
+func TestUpdateMetadataOutboxRouting(t *testing.T) {
+	const officeMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	cases := []struct {
+		name         string
+		wasTemporary bool // the stored row's temporaryLocation before the PATCH
+		mime         string
+		outboxOn     bool
+		updateTemp   bool // meta.TemporaryLocation (the PATCH target)
+		wantOutbox   int  // expected UpdateMetadataWithOutbox calls
+		wantRepo     int  // expected plain Repo.UpdateMetadata calls
+		wantPriority int16
+	}{
+		{"transition-image-priority-0", true, "image/png", true, false, 1, 0, 0},
+		{"transition-office-hot-priority-1", true, officeMime, true, false, 1, 0, 1},
+		{"outbox-off-uses-repo", true, "image/png", false, false, 0, 1, 0},
+		{"already-durable-no-transition", false, "image/png", true, false, 0, 1, 0},
+		{"keeps-temporary-no-enqueue", true, "image/png", true, true, 0, 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &mockRepo{doc: model.Document{ExternalID: "hashA", Size: 42, MimeType: tc.mime, TemporaryLocation: tc.wasTemporary}}
+			ob := &recordingOutbox{}
+			s := &FileService{Repo: repo, HotMimePrefixes: []string{"application/vnd.openxmlformats-officedocument"}, Logger: nopLogger}
+			if tc.outboxOn {
+				s.Outbox = ob
+			}
+			meta := model.DocumentMetadataUpdate{TemporaryLocation: tc.updateTemp}
+			before := backupOutboxEnqueued.Value()
+
+			if _, err := s.UpdateDocumentMetadata(context.Background(), uuid.New(), meta, 1); err != nil {
+				t.Fatalf("UpdateDocumentMetadata: %v", err)
+			}
+			if ob.updateMetadataCalls != tc.wantOutbox {
+				t.Fatalf("outbox calls = %d, want %d", ob.updateMetadataCalls, tc.wantOutbox)
+			}
+			if repo.updateMetadataCalls != tc.wantRepo {
+				t.Fatalf("repo calls = %d, want %d", repo.updateMetadataCalls, tc.wantRepo)
+			}
+			wantCount := int64(tc.wantOutbox)
+			if got := backupOutboxEnqueued.Value() - before; got != wantCount {
+				t.Fatalf("enqueue counter delta = %d, want %d", got, wantCount)
+			}
+			if tc.wantOutbox == 1 {
+				if ob.lastMetaExternalID != "hashA" || ob.lastMetaSize != 42 {
+					t.Fatalf("outbox row must carry the doc's externalID/size: got %q/%d", ob.lastMetaExternalID, ob.lastMetaSize)
+				}
+				if ob.lastPriority != tc.wantPriority {
+					t.Fatalf("priority = %d, want %d", ob.lastPriority, tc.wantPriority)
+				}
+			}
+		})
+	}
 }

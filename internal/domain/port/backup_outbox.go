@@ -23,6 +23,14 @@ type BackupOutboxRepo interface {
 	// UpdateFileWithOutbox replaces a document's content and enqueues a backup hint for the new
 	// content hash atomically. Same error semantics as DocumentRepo.UpdateFile.
 	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error
+	// UpdateMetadataWithOutbox applies the versioned metadata update AND enqueues a backup-outbox
+	// row for the now-durable document atomically (same commit), then NOTIFYs. Used when a PATCH
+	// transitions a document temporary→durable (013 conversation media reaches durability via a
+	// temporaryLocation:true→false flip — the re-home MOVE / re-share pin / outbound flip — never
+	// via create/replace, so this is the only path that can enqueue its backup hint). Same error
+	// semantics as DocumentRepo.UpdateMetadata (0 rows → model.ErrDocumentNotFound, which the
+	// service maps to ErrConflict; a unique violation → model.ErrDuplicateKey).
+	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, externalID string, size int, priority int16) error
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)
