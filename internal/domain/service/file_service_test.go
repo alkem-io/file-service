@@ -685,6 +685,9 @@ func TestCreateDocument_DistinctReferencesSameContent_InsertTwoRows(t *testing.T
 		t.Fatalf("captured %d created docs, want 2", len(repo.createdDocs))
 	}
 	got := []string{*repo.createdDocs[0].ExternalReference, *repo.createdDocs[1].ExternalReference}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 persisted references, got %d", len(got))
+	}
 	if got[0] != ref1 || got[1] != ref2 {
 		t.Errorf("persisted references = %v, want [%s %s]", got, ref1, ref2)
 	}

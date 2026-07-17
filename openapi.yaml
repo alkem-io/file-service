@@ -6,13 +6,11 @@ components:
           format: uuid
           type: string
         createdBy:
-          format: uuid
           type: string
         destinationBucketId:
           format: uuid
           type: string
         externalReference:
-          description: Opaque caller reference set on the copied row (e.g. the Synapse media_id for a re-share). Never parsed by file-service.
           type: string
         skipDedup:
           type: boolean
@@ -20,7 +18,6 @@ components:
           format: uuid
           type: string
         tagsetId:
-          format: uuid
           type: string
       required:
         - sourceId
@@ -73,7 +70,6 @@ components:
         externalID:
           type: string
         externalReference:
-          description: Opaque caller reference (e.g. the Synapse media_id). Null when unset. Never parsed by file-service.
           type: string
         id:
           type: string
@@ -149,27 +145,16 @@ components:
         - size
       type: object
     http.UpdateDocumentRequest:
-      description: |-
-        Body for PATCH /internal/file/{id} — the "move + re-attribute" primitive.
-        All fields optional; at least one must be present. Omitted fields keep
-        their current value. externalReference is tri-state: omitted → keep, a
-        string → set, explicit JSON null → clear.
       properties:
         authorizationId:
-          description: Re-point the document to a new (server-minted) authorization policy.
-          format: uuid
           type: string
         createdBy:
-          description: Set the owning actor (the message sender on inbound re-home).
-          format: uuid
           type: string
         displayName:
           type: string
         externalReference:
-          description: Set or clear the opaque caller reference (e.g. the Synapse media_id). Never parsed by file-service.
           type: string
         storageBucketId:
-          format: uuid
           type: string
         temporaryLocation:
           type: boolean
@@ -225,18 +210,15 @@ paths:
       description: |-
         Create handles POST /internal/file — streaming ingest (spec 020): the
         file part flows request → sniff → (transcode) → staged storage without
-        whole-file buffering. Metadata fields are validated after the loop, so
-        they may appear before or after the file part — with one exception
-        below.
+        whole-file buffering. Parts are processed in whatever order they arrive;
+        metadata validation always happens after the loop, before the stage is
+        published. (The known caller sends the file part first — research R4 —
+        which is why bucket-level limits cannot gate the stream early.)
 
-        Optional multipart metadata fields (013): externalReference (opaque
-        caller reference, e.g. the Synapse media_id — never parsed) and
-        skipImageProcessing (when "true", store the bytes VERBATIM: no transcode,
-        rotate, or measure — so a provider's read-back is byte-exact).
-        skipImageProcessing is the one ordering exception: it is consumed when
-        the file part is staged, so to take effect it MUST precede the file part.
-        A skipImageProcessing=true established only AFTER the file part is
-        rejected with 400 rather than silently transcoded.
+        One ordering dependency exists (spec 013): skipImageProcessing is consumed
+        when the file part is staged, so the verbatim/byte-exact contract can only
+        be honored if it precedes the file. A skipImageProcessing=true that arrives
+        AFTER the file part is rejected with 400 rather than silently transcoded.
       operationId: DocumentHandler.Create
       responses:
         "201":
@@ -297,22 +279,18 @@ paths:
     get:
       description: |-
         ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
-        ref is required. bucketId omitted → GLOBAL resolution (any document
-        carrying the opaque reference, all sharing one blob — the provider's
-        fetch). bucketId present → bucket-SCOPED resolution (the document in
-        that bucket — read resolution). externalReference is opaque; never parsed.
+        ref is required. bucketId omitted → GLOBAL resolution (the provider's fetch:
+        any document carrying the reference, all sharing one blob). bucketId present
+        → bucket-SCOPED resolution (read resolution: the document in that bucket).
+        200 → document meta; 404 → no match.
       operationId: DocumentHandler.ByReference
       parameters:
         - in: query
           name: ref
-          required: true
-          description: Opaque external reference (e.g. the Synapse media_id).
           schema:
             type: string
         - in: query
           name: bucketId
-          required: false
-          description: When present, scope resolution to this storage bucket; when omitted, resolve globally.
           schema:
             format: uuid
             type: string
@@ -341,7 +319,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
-      summary: ByReference resolves a document by its opaque externalReference (global or bucket-scoped).
+      summary: ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
       tags:
         - /internal
   /internal/file/copy:
@@ -385,7 +363,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/skipDedup-requested-but-a-row-with-this-content-already-exists-in-the-destination-bucket'
+                $ref: '#/components/schemas/a-conflicting-document-already-exists-(unique-constraint)'
           description: Conflict
         "500":
           content:
@@ -431,9 +409,11 @@ paths:
     patch:
       description: |-
         Update handles PATCH /internal/file/{id}.
-        Mutates storageBucketId, temporaryLocation, and/or displayName. Each
-        field is optional; at least one must be present. Omitted fields retain
-        their current value.
+        Mutates the "move + re-attribute" fields: storageBucketId, temporaryLocation,
+        displayName, authorizationId, createdBy, and externalReference. Each field is
+        optional; at least one must produce an effective change. Omitted fields retain
+        their current value; authorizationId, createdBy, and externalReference accept
+        an explicit JSON null to clear.
 
         displayName notes:
           - Validation rejects empty/whitespace-only, length > 512 (matches
@@ -483,6 +463,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Entity Too Large
         "500":
           content:
             application/json:

@@ -2468,11 +2468,11 @@ func TestDocumentHandler_Create_SkipImageProcessingFalse_AfterFile_Allowed(t *te
 
 // --- 013: by-reference lookup + PATCH move (re-attribute) ---
 
-// withURLParam attaches a chi route context carrying a single URL param, so a
-// handler that reads chi.URLParam can be invoked directly without a router.
-func withURLParam(req *http.Request, key, value string) *http.Request {
+// withID attaches a chi route context carrying the "id" URL param, so a
+// handler that reads chi.URLParam("id") can be invoked directly without a router.
+func withID(req *http.Request, value string) *http.Request {
 	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add(key, value)
+	rctx.URLParams.Add("id", value)
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 }
 
@@ -2588,7 +2588,7 @@ func TestUpdate_MovePlusReattribute(t *testing.T) {
 	body := fmt.Sprintf(`{"storageBucketId":%q,"authorizationId":%q,"createdBy":%q,"externalReference":%q}`,
 		newBucket, newAuth, newCreatedBy, newRef)
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
-	req = withURLParam(req, "id", docID.String())
+	req = withID(req, docID.String())
 	w := httptest.NewRecorder()
 	h.Update(w, req)
 
@@ -2625,7 +2625,7 @@ func TestUpdate_ClearExternalReference(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"externalReference":null}`))
-	req = withURLParam(req, "id", docID.String())
+	req = withID(req, docID.String())
 	w := httptest.NewRecorder()
 	h.Update(w, req)
 
@@ -2654,7 +2654,7 @@ func TestUpdate_LeavesNullAuthorizationIDNull(t *testing.T) {
 
 	// PATCH only displayName — authorizationId omitted from the body.
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
-	req = withURLParam(req, "id", docID.String())
+	req = withID(req, docID.String())
 	w := httptest.NewRecorder()
 	h.Update(w, req)
 
@@ -2682,7 +2682,7 @@ func TestUpdate_KeepsExternalReferenceWhenOmitted(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
-	req = withURLParam(req, "id", docID.String())
+	req = withID(req, docID.String())
 	w := httptest.NewRecorder()
 	h.Update(w, req)
 

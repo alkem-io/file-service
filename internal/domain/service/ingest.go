@@ -216,33 +216,7 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return nil, ErrPayloadTooLarge
 	}
 
-	// A front-window sniff (3072 bytes) degrades to application/zip when an
-	// OOXML package's [Content_Types].xml lands past that window — the cause
-	// of spurious 415s on reordered office zips (cf. spec 019 / PR #13). When
-	// the sniff is the generic application/zip (and was not overridden by a
-	// transcode, where MimeType is the encoder output), recover the real
-	// OOXML type from the staged file's central directory and validate THAT
-	// against the allow-list below. The su.MimeType == su.DetectedMIME guard
-	// keeps the image-transcode path untouched (images never sniff as zip).
-	if normalizeMIME(su.DetectedMIME) == "application/zip" && su.MimeType == su.DetectedMIME {
-		ra, size, err := su.stage.StagedReaderAt()
-		switch {
-		case err != nil:
-			// An infrastructure read failure (FS sync, or a future object-store
-			// ranged read) is not a verdict on the content: don't treat it as
-			// "not an office package". Recovery is skipped and the upload falls
-			// through to plain application/zip allow-list validation, but log it
-			// so a legitimate office file rejected only because its staged bytes
-			// were unreadable is diagnosable rather than silent.
-			s.logIngest("zip central-directory reader unavailable; skipping OOXML recovery", su.DetectedMIME, su.Size, err)
-		default:
-			if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
-				su.DetectedMIME = officeMIME // validated against the allow-list below
-				su.MimeType = officeMIME     // persisted as the real office type, not application/zip
-				s.logIngest("recovered office MIME from zip central directory", officeMIME, su.Size, nil)
-			}
-		}
-	}
+	s.recoverOfficeMIME(su)
 
 	if len(allowedMimeTypes) > 0 {
 		normalized := make([]string, len(allowedMimeTypes))
@@ -293,6 +267,32 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return s.backfillIfNeeded(ctx, existing), nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
+}
+
+// recoverOfficeMIME upgrades a staged upload that sniffed as generic
+// application/zip to its real OOXML type by reading the zip central directory.
+// A front-window sniff (3072 bytes) degrades to application/zip when an OOXML
+// package's [Content_Types].xml lands past that window — the cause of spurious
+// 415s on reordered office zips (cf. spec 019 / PR #13). The guard (sniff is
+// application/zip AND was not overridden by a transcode, where MimeType is the
+// encoder output) keeps the image-transcode path untouched (images never sniff
+// as zip). An infrastructure read failure is logged and skipped — not treated
+// as a verdict on the content — so the upload falls through to plain
+// application/zip allow-list validation, diagnosable rather than silent.
+func (s *FileService) recoverOfficeMIME(su *StagedUpload) {
+	if normalizeMIME(su.DetectedMIME) != "application/zip" || su.MimeType != su.DetectedMIME {
+		return
+	}
+	ra, size, err := su.stage.StagedReaderAt()
+	if err != nil {
+		s.logIngest("zip central-directory reader unavailable; skipping OOXML recovery", su.DetectedMIME, su.Size, err)
+		return
+	}
+	if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
+		su.DetectedMIME = officeMIME // validated against the allow-list by the caller
+		su.MimeType = officeMIME     // persisted as the real office type, not application/zip
+		s.logIngest("recovered office MIME from zip central directory", officeMIME, su.Size, nil)
+	}
 }
 
 // detectZipOfficeMIME recovers the canonical OOXML MIME from a staged zip's

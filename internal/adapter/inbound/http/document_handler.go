@@ -250,21 +250,11 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, err
 	}
 
-	if v := fields.allowedMimeTypes; v != "" {
-		parts := strings.Split(v, ",")
-		for _, p := range parts {
-			if trimmed := strings.TrimSpace(p); trimmed != "" {
-				allowedMimeTypes = append(allowedMimeTypes, trimmed)
-			}
-		}
-	}
+	allowedMimeTypes = parseAllowedMimeTypes(fields.allowedMimeTypes)
 
-	if v := fields.maxFileSize; v != "" {
-		parsed, err := strconv.Atoi(v)
-		if err != nil || parsed < 0 {
-			return input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
-		}
-		maxFileSize = parsed
+	maxFileSize, err = parseMaxFileSize(fields.maxFileSize)
+	if err != nil {
+		return input, nil, 0, err
 	}
 
 	externalReference := optionalString(fields.externalReference)
@@ -284,6 +274,36 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		SkipDedup:           skipDedup,
 	}
 	return input, allowedMimeTypes, maxFileSize, nil
+}
+
+// parseAllowedMimeTypes splits a comma-separated allow-list into trimmed,
+// non-empty entries. An empty input yields a nil slice (no per-request policy
+// override).
+func parseAllowedMimeTypes(v string) []string {
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// parseMaxFileSize parses the optional per-request maxFileSize override. An
+// empty input means "no override" (0). A malformed or negative value is a
+// 400-safe error.
+func parseMaxFileSize(v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
+	}
+	return parsed, nil
 }
 
 // optionalString maps an empty multipart field to nil and any non-empty value
@@ -369,6 +389,50 @@ func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err e
 	}
 }
 
+// stageFilePart parses the skipImageProcessing flag currently in effect and
+// stages the file part's bytes. The verbatim (raw-store) decision is taken at
+// stage time, so skipImageProcessing MUST precede the file part in the
+// multipart body (the provider sends metadata first); a skipImageProcessing=true
+// arriving AFTER the file is rejected by validateSkipAfterFile rather than
+// silently transcoded. Returns the staged upload and the skip value that was in
+// effect, or false (after writing the error response) on failure.
+func (h *DocumentHandler) stageFilePart(w http.ResponseWriter, r *http.Request, part *multipart.Part, fields createFields) (*service.StagedUpload, bool, bool) {
+	skipImageProcessing, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if perr != nil {
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return nil, false, false
+	}
+	declaredMIME := part.Header.Get("Content-Type")
+	staged, err := h.Service.StageUpload(r.Context(), part, declaredMIME, skipImageProcessing)
+	if err != nil {
+		h.writeStageError(w, err)
+		return nil, false, false
+	}
+	return staged, skipImageProcessing, true
+}
+
+// validateSkipAfterFile enforces the verbatim-store contract guard (spec 013):
+// reject only when skipImageProcessing=true is FIRST established after the file
+// part has already been staged — the bytes may already have been
+// transcoded/rotated, so the byte-exact contract cannot be honored. A duplicate
+// part consistent with the value staged before the file (stagedSkip) is honored,
+// so it must not 400. Returns false after writing the error response.
+func (h *DocumentHandler) validateSkipAfterFile(w http.ResponseWriter, fields createFields, staged *service.StagedUpload, stagedSkip bool, part *multipart.Part) bool {
+	if staged == nil || part.FormName() != "skipImageProcessing" {
+		return true
+	}
+	skip, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if perr != nil {
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return false
+	}
+	if skip && !stagedSkip {
+		writeJSONError(w, http.StatusBadRequest, "skipImageProcessing must be sent before the file part")
+		return false
+	}
+	return true
+}
+
 // Create handles POST /internal/file — streaming ingest (spec 020): the
 // file part flows request → sniff → (transcode) → staged storage without
 // whole-file buffering. Parts are processed in whatever order they arrive;
@@ -428,43 +492,17 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, http.StatusBadRequest, "duplicate file part")
 				return
 			}
-			// The verbatim (raw-store) decision is taken at stage time, so the
-			// skipImageProcessing flag MUST precede the file part in the
-			// multipart body (the provider sends metadata first). A
-			// skipImageProcessing=true arriving AFTER the file is rejected
-			// below rather than silently transcoded.
-			skipImageProcessing, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
-			if perr != nil {
-				writeJSONError(w, http.StatusBadRequest, perr.Error())
+			newStaged, skip, ok := h.stageFilePart(w, r, part, fields)
+			if !ok {
 				return
 			}
-			stagedSkip = skipImageProcessing
-			declaredMIME := part.Header.Get("Content-Type")
-			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME, skipImageProcessing)
-			if err != nil {
-				h.writeStageError(w, err)
-				return
-			}
+			staged, stagedSkip = newStaged, skip
 		} else {
 			if !h.readMetadataField(w, &fields, part) {
 				return
 			}
-			// Verbatim-store contract guard (spec 013): reject only when
-			// skipImageProcessing=true is FIRST established after the file part
-			// has already been staged — the bytes may already have been
-			// transcoded/rotated, so the byte-exact contract cannot be honored.
-			// A duplicate part consistent with the value staged before the file
-			// (stagedSkip) is honored, so it must not 400.
-			if staged != nil && part.FormName() == "skipImageProcessing" {
-				skip, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
-				if perr != nil {
-					writeJSONError(w, http.StatusBadRequest, perr.Error())
-					return
-				}
-				if skip && !stagedSkip {
-					writeJSONError(w, http.StatusBadRequest, "skipImageProcessing must be sent before the file part")
-					return
-				}
+			if !h.validateSkipAfterFile(w, fields, staged, stagedSkip, part) {
+				return
 			}
 		}
 		_ = part.Close()
@@ -701,34 +739,8 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body UpdateDocumentRequest
-	present, ok := decodeUpdateRequest(w, r, &body)
+	body, present, ok := h.decodeAndValidateUpdate(w, r)
 	if !ok {
-		return
-	}
-
-	if len(present) == 0 {
-		writeJSONError(w, http.StatusBadRequest, "no fields to update")
-		return
-	}
-
-	if body.DisplayName != nil {
-		if err := validateDisplayName(*body.DisplayName); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	// externalReference is tri-state: absent = keep, explicit null = clear. An
-	// empty *string value* is neither, so it is rejected rather than silently
-	// mapped to NULL (clearing is done with an explicit null). This also keeps
-	// PATCH from ever persisting a non-NULL empty reference.
-	if _, ok := present["externalReference"]; ok && body.ExternalReference != nil && *body.ExternalReference == "" {
-		writeJSONError(w, http.StatusBadRequest, "externalReference must not be empty")
-		return
-	}
-	if err := validateExternalReference(body.ExternalReference); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -797,6 +809,46 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	updated = h.Service.BackfillIfNeeded(r.Context(), updated)
 
 	newUpdateDocumentResponse(updated).Render(w)
+}
+
+// decodeAndValidateUpdate decodes the PATCH body, rejects a structurally empty
+// patch, and validates the fields that can be checked without loading the row
+// (displayName, and the tri-state externalReference: absent = keep, explicit
+// null = clear, empty string = rejected). Returns false after writing the error
+// response.
+func (h *DocumentHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http.Request) (UpdateDocumentRequest, map[string]struct{}, bool) {
+	var body UpdateDocumentRequest
+	present, ok := decodeUpdateRequest(w, r, &body)
+	if !ok {
+		return body, nil, false
+	}
+
+	if len(present) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "no fields to update")
+		return body, nil, false
+	}
+
+	if body.DisplayName != nil {
+		if err := validateDisplayName(*body.DisplayName); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return body, nil, false
+		}
+	}
+
+	// externalReference is tri-state: absent = keep, explicit null = clear. An
+	// empty *string value* is neither, so it is rejected rather than silently
+	// mapped to NULL (clearing is done with an explicit null). This also keeps
+	// PATCH from ever persisting a non-NULL empty reference.
+	if _, ok := present["externalReference"]; ok && body.ExternalReference != nil && *body.ExternalReference == "" {
+		writeJSONError(w, http.StatusBadRequest, "externalReference must not be empty")
+		return body, nil, false
+	}
+	if err := validateExternalReference(body.ExternalReference); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return body, nil, false
+	}
+
+	return body, present, true
 }
 
 // newUpdateDocumentResponse single-sources the model.Document -> PATCH response
@@ -1019,40 +1071,29 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 		meta.DisplayName = *body.DisplayName
 		applied++
 	}
-	if _, ok := present["authorizationId"]; ok {
-		// authorizationId may be RE-ATTRIBUTED to a new policy (part of re-home)
-		// but never CLEARED: a NULL/nil authorizationId reads back as the nil
-		// UUID, matches no policy, and permanently orphans the document (403 on
-		// every read). Reject an explicit null or the nil UUID, preserving the
-		// pre-013 invariant that a metadata update can't break authorization.
-		if body.AuthorizationID == nil {
-			return meta, applied, fmt.Errorf("authorizationId cannot be cleared")
-		}
-		parsed, err := uuid.Parse(*body.AuthorizationID)
-		if err != nil {
-			return meta, applied, fmt.Errorf("invalid authorizationId")
-		}
-		if parsed == uuid.Nil {
-			return meta, applied, fmt.Errorf("authorizationId cannot be the nil UUID")
-		}
-		if !equalPtr(&parsed, meta.AuthorizationID) {
-			meta.AuthorizationID = &parsed
-			applied++
-		}
+	// authorizationId may be RE-ATTRIBUTED to a new policy (part of re-home) but
+	// never CLEARED: a NULL/nil authorizationId reads back as the nil UUID,
+	// matches no policy, and permanently orphans the document (403 on every
+	// read). clearable=false rejects an explicit null or the nil UUID, preserving
+	// the pre-013 invariant that a metadata update can't break authorization.
+	_, hasAuth := present["authorizationId"]
+	authVal, authChanged, err := applyReattributeUUID(hasAuth, body.AuthorizationID, meta.AuthorizationID, false, "authorizationId")
+	if err != nil {
+		return meta, applied, err
 	}
-	if _, ok := present["createdBy"]; ok {
-		var newVal *uuid.UUID // nil for explicit null → clear
-		if body.CreatedBy != nil {
-			parsed, err := uuid.Parse(*body.CreatedBy)
-			if err != nil {
-				return meta, applied, fmt.Errorf("invalid createdBy")
-			}
-			newVal = &parsed
-		}
-		if !equalPtr(newVal, meta.CreatedBy) {
-			meta.CreatedBy = newVal
-			applied++
-		}
+	if authChanged {
+		meta.AuthorizationID = authVal
+		applied++
+	}
+	// createdBy is clearable (explicit null → NULL).
+	_, hasCreatedBy := present["createdBy"]
+	createdByVal, createdByChanged, err := applyReattributeUUID(hasCreatedBy, body.CreatedBy, meta.CreatedBy, true, "createdBy")
+	if err != nil {
+		return meta, applied, err
+	}
+	if createdByChanged {
+		meta.CreatedBy = createdByVal
+		applied++
 	}
 	if _, ok := present["externalReference"]; ok {
 		if !equalPtr(body.ExternalReference, meta.ExternalReference) {
@@ -1062,6 +1103,35 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 	}
 
 	return meta, applied, nil
+}
+
+// applyReattributeUUID resolves a tri-state optional-UUID PATCH field against
+// the row's current value, factoring the shared shape of the authorizationId
+// and createdBy re-attribute blocks. present is whether the JSON key was sent;
+// raw is the decoded pointer (nil = explicit JSON null); current is the row's
+// current value. clearable governs whether an explicit null is allowed:
+// authorizationId is NOT clearable (a null/nil UUID orphans the document), so
+// clearable=false rejects both an explicit null and the nil UUID. Returns the
+// resolved value, whether it is an EFFECTIVE change vs current, and a 400-safe
+// error whose message names the field.
+func applyReattributeUUID(present bool, raw *string, current *uuid.UUID, clearable bool, field string) (val *uuid.UUID, changed bool, err error) {
+	if !present {
+		return current, false, nil
+	}
+	if raw == nil {
+		if !clearable {
+			return current, false, fmt.Errorf("%s cannot be cleared", field)
+		}
+		return nil, !equalPtr[uuid.UUID](nil, current), nil
+	}
+	parsed, err := uuid.Parse(*raw)
+	if err != nil {
+		return current, false, fmt.Errorf("invalid %s", field)
+	}
+	if !clearable && parsed == uuid.Nil {
+		return current, false, fmt.Errorf("%s cannot be the nil UUID", field)
+	}
+	return &parsed, !equalPtr(&parsed, current), nil
 }
 
 // equalPtr reports whether two optional values are equal, treating nil

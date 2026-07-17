@@ -62,6 +62,8 @@ func twoBuckets(t *testing.T, raw *pgxpool.Pool) (uuid.UUID, uuid.UUID) {
 // T014: create → by-reference (global & scoped) → PATCH move (bucket + auth +
 // createdBy + ref) → by-reference resolves in the new bucket; the old bucket
 // misses; global still resolves.
+//
+//nolint:gocyclo // end-to-end multi-step integration scenario; splitting would obscure the flow
 func TestByReference_MoveResolution(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
