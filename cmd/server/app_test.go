@@ -104,10 +104,7 @@ func TestBuildFileService(t *testing.T) {
 	defer pool.Close()
 
 	logger, _ := zap.NewDevelopment()
-	svc, err := buildFileService(pool, nil, cfg, logger)
-	if err != nil {
-		t.Fatalf("buildFileService: %v", err)
-	}
+	svc := buildFileService(pool, nil, cfg, logger)
 	if svc == nil {
 		t.Fatal("nil service")
 	}

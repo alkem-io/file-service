@@ -19,7 +19,6 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("DOCUMENT_MAX_AGE", "")
 	t.Setenv("LOCAL_STORAGE_PATH", "")
-	t.Setenv("STORAGE_TYPE", "")
 	t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "")
 	t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "")
 	t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "")
@@ -74,9 +73,6 @@ func TestLoad_MinimalValid(t *testing.T) {
 	}
 	if cfg.StoragePath != "../server/.storage" {
 		t.Errorf("StoragePath = %q", cfg.StoragePath)
-	}
-	if cfg.StorageType != "local" {
-		t.Errorf("StorageType = %q", cfg.StorageType)
 	}
 	if cfg.DocumentMaxAge.Seconds() != 86400 {
 		t.Errorf("DocumentMaxAge = %v", cfg.DocumentMaxAge)
@@ -441,36 +437,4 @@ func TestLoad_MaxUploadSize_AboveCeilingRejected(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("MAX_UPLOAD_SIZE", "1073741825") // 1 GiB + 1
 	requireLoadErr(t, "MAX_UPLOAD_SIZE")
-}
-
-// STORAGE_TYPE=s3 requires the S3 connection settings.
-func TestLoad_S3_RequiresSettings(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("STORAGE_TYPE", "s3")
-	requireLoadErr(t, "S3_ENDPOINT")
-}
-
-// STORAGE_TYPE=s3 with full settings loads.
-func TestLoad_S3_Valid(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("STORAGE_TYPE", "s3")
-	t.Setenv("S3_ENDPOINT", "s3.fr-par.scw.cloud")
-	t.Setenv("S3_ACCESS_KEY", "ak")
-	t.Setenv("S3_SECRET_KEY", "sk")
-	t.Setenv("S3_BUCKET", "alkemio-media")
-	t.Setenv("S3_REGION", "fr-par")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.StorageType != "s3" {
-		t.Errorf("StorageType = %q, want s3", cfg.StorageType)
-	}
-	if cfg.S3.Bucket != "alkemio-media" || cfg.S3.Endpoint != "s3.fr-par.scw.cloud" {
-		t.Errorf("unexpected S3 config: %+v", cfg.S3)
-	}
-	if !cfg.S3.UseSSL {
-		t.Error("S3.UseSSL should default to true")
-	}
 }

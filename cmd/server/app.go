@@ -16,7 +16,6 @@ import (
 	"github.com/alkem-io/file-service/internal/adapter/outbound/authhttp"
 	natsAdapter "github.com/alkem-io/file-service/internal/adapter/outbound/nats"
 	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
-	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/s3"
 	"github.com/alkem-io/file-service/internal/config"
 	"github.com/alkem-io/file-service/internal/domain/model"
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -64,7 +63,7 @@ func buildAuthClient(cfg *config.Config, nc *nats.Conn, logger *zap.Logger) port
 	}
 }
 
-func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) (*service.FileService, error) {
+func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config, logger *zap.Logger) *service.FileService {
 	// imaging.New runs vips.Startup (vips build); the streaming knobs must
 	// be applied to an initialized libvips, so configure AFTER New.
 	processor := imaging.New()
@@ -74,16 +73,11 @@ func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config
 		PipeReadLimit: cfg.Ingest.VipsPipeReadLimit,
 		PixelBudget:   cfg.Ingest.PixelBudget,
 	})
-	storage, err := buildStorage(cfg, logger)
-	if err != nil {
-		return nil, err
-	}
-
 	repo := alkemiodb.NewWithLogger(pool, logger)
 	svc := &service.FileService{
 		Repo:            repo,
 		Auth:            auth,
-		Storage:         storage,
+		Storage:         local.New(cfg.StoragePath),
 		Processor:       processor,
 		Logger:          logger,
 		HotMimePrefixes: cfg.BackupOutbox.HotMimePrefixes,
@@ -96,33 +90,7 @@ func buildFileService(pool *pgxpool.Pool, auth port.AuthPort, cfg *config.Config
 		logger.Info("continuous-backup outbox producer enabled",
 			zap.Int("hotMimePrefixes", len(cfg.BackupOutbox.HotMimePrefixes)))
 	}
-	return svc, nil
-}
-
-// buildStorage selects the storage backend from STORAGE_TYPE: "local"
-// (default) or "s3". An unknown value is a fatal misconfiguration.
-func buildStorage(cfg *config.Config, logger *zap.Logger) (port.StoragePort, error) {
-	switch cfg.StorageType {
-	case "s3":
-		logger.Info("storage backend: s3",
-			zap.String("endpoint", cfg.S3.Endpoint),
-			zap.String("bucket", cfg.S3.Bucket))
-		return s3.New(s3.Config{
-			Endpoint:  cfg.S3.Endpoint,
-			AccessKey: cfg.S3.AccessKey,
-			SecretKey: cfg.S3.SecretKey,
-			Bucket:    cfg.S3.Bucket,
-			Region:    cfg.S3.Region,
-			UseSSL:    cfg.S3.UseSSL,
-			StageDir:  cfg.S3.StageDir,
-			Logger:    logger,
-		})
-	case "local", "":
-		logger.Info("storage backend: local", zap.String("path", cfg.StoragePath))
-		return local.New(cfg.StoragePath), nil
-	default:
-		return nil, fmt.Errorf("unknown STORAGE_TYPE %q (want \"local\" or \"s3\")", cfg.StorageType)
-	}
+	return svc
 }
 
 func buildRouter(pool *pgxpool.Pool, nc *nats.Conn, cfg *config.Config, fileSvc *service.FileService, logger *zap.Logger) http.Handler { //nolint:unparam // nc can be nil when using h2c
