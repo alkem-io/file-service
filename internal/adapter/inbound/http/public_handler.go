@@ -57,6 +57,8 @@ var activeContentMIME = map[string]bool{
 	"application/atom+xml":      true,
 	"application/rdf+xml":       true,
 	"application/mathml+xml":    true,
+	"application/xslt+xml":      true,
+	"text/xsl":                  true,
 	"message/rfc822":            true,
 	"multipart/related":         true,
 	"application/x-mimearchive": true,

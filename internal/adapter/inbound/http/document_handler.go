@@ -795,7 +795,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 			// move can collide on reference, and the authorizationId unique
 			// constraint can collide on re-attribution. Keep the message
 			// generic rather than naming the wrong cause.
-			writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference, authorization, or content)")
+			writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference or authorization)")
 			return
 		}
 		h.Logger.Error("failed to update document", zap.Error(err))

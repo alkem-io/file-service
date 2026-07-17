@@ -349,6 +349,8 @@ func TestPublicHandler_ServeDisposition(t *testing.T) {
 		{"text/xml", "attachment"},
 		{"application/rss+xml", "attachment"},
 		{"application/atom+xml", "attachment"},
+		{"application/xslt+xml", "attachment"}, // XSLT stylesheet can execute generated script
+		{"text/xsl", "attachment"},             // legacy XSLT alias
 		{"message/rfc822", "attachment"},
 		{"text/html; charset=utf-8", "attachment"}, // params stripped before match
 		{"IMAGE/SVG+XML", "attachment"},            // normalization: case-insensitive match
