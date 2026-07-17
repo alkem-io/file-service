@@ -760,14 +760,14 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// structurally empty body ({} with no keys) is still a 400 above
 	// (len(present) == 0); only keys-present-but-no-change lands here.
 	if applied == 0 {
-		UpdateDocumentResponse{
-			ID:                doc.ID.String(),
-			StorageBucketID:   doc.StorageBucketID.String(),
-			TemporaryLocation: doc.TemporaryLocation,
-			DisplayName:       doc.DisplayName,
-			ImageWidth:        doc.ImageWidth,
-			ImageHeight:       doc.ImageHeight,
-		}.Render(w)
+		// Surface dims consistently with the effective-change path below
+		// (FR-015/FR-018): a legacy image row gets the SAME one-time lazy
+		// backfill. This does NOT bump the optimistic-lock version —
+		// BackfillIfNeeded persists content_metadata via a separate CAS, not
+		// the versioned UpdateDocumentMetadata — so the no-op stays
+		// version-stable and a concurrent actor is still never spuriously 409'd.
+		backfilled := h.Service.BackfillIfNeeded(r.Context(), &doc)
+		newUpdateDocumentResponse(backfilled).Render(w)
 		return
 	}
 
@@ -796,14 +796,21 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// dims (FR-015 / FR-018). Best-effort — never fails the PATCH.
 	updated = h.Service.BackfillIfNeeded(r.Context(), updated)
 
-	UpdateDocumentResponse{
-		ID:                updated.ID.String(),
-		StorageBucketID:   updated.StorageBucketID.String(),
-		TemporaryLocation: updated.TemporaryLocation,
-		DisplayName:       updated.DisplayName,
-		ImageWidth:        updated.ImageWidth,
-		ImageHeight:       updated.ImageHeight,
-	}.Render(w)
+	newUpdateDocumentResponse(updated).Render(w)
+}
+
+// newUpdateDocumentResponse single-sources the model.Document -> PATCH response
+// mapping shared by the no-op (200 idempotent) and effective-change paths, so
+// the two can't drift on the returned shape (incl. surfaced image dims).
+func newUpdateDocumentResponse(doc *model.Document) UpdateDocumentResponse {
+	return UpdateDocumentResponse{
+		ID:                doc.ID.String(),
+		StorageBucketID:   doc.StorageBucketID.String(),
+		TemporaryLocation: doc.TemporaryLocation,
+		DisplayName:       doc.DisplayName,
+		ImageWidth:        doc.ImageWidth,
+		ImageHeight:       doc.ImageHeight,
+	}
 }
 
 // validateDisplayName rejects renames that would corrupt the row or
