@@ -40,6 +40,20 @@ type DocumentHandler struct {
 	IdleTimeout   time.Duration
 }
 
+// writeLookupError maps a document-lookup failure to its HTTP response: a
+// model.ErrDocumentNotFound is a 404 with the "document not found" body; any
+// other error is logged (with logMsg) and surfaces as a 500 "internal error".
+// Shared by every read path that starts with a repo lookup (GetMeta,
+// ByReference, GetContent, Update) so the mapping can't drift between them.
+func (h *DocumentHandler) writeLookupError(w http.ResponseWriter, err error, logMsg string) {
+	if errors.Is(err, model.ErrDocumentNotFound) {
+		writeJSONError(w, http.StatusNotFound, "document not found")
+		return
+	}
+	h.Logger.Error(logMsg, zap.Error(err))
+	writeJSONError(w, http.StatusInternalServerError, "internal error")
+}
+
 // GetMeta handles GET /internal/file/{id}/meta
 func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
@@ -50,12 +64,7 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		h.Logger.Error("failed to lookup document", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		h.writeLookupError(w, err, "failed to lookup document")
 		return
 	}
 
@@ -89,12 +98,7 @@ func (h *DocumentHandler) ByReference(w http.ResponseWriter, r *http.Request) {
 		doc, err = h.Service.Repo.GetByReferenceInBucket(r.Context(), ref, bucketID)
 	}
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		h.Logger.Error("failed to lookup document by reference", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		h.writeLookupError(w, err, "failed to lookup document by reference")
 		return
 	}
 
@@ -111,12 +115,7 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		h.Logger.Error("failed to lookup document", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		h.writeLookupError(w, err, "failed to lookup document")
 		return
 	}
 
@@ -746,12 +745,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		h.Logger.Error("failed to lookup document", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		h.writeLookupError(w, err, "failed to lookup document")
 		return
 	}
 

@@ -30,7 +30,14 @@ type BackupOutboxRepo interface {
 	// via create/replace, so this is the only path that can enqueue its backup hint). Same error
 	// semantics as DocumentRepo.UpdateMetadata (0 rows → model.ErrDocumentNotFound, which the
 	// service maps to ErrConflict; a unique violation → model.ErrDuplicateKey).
-	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, externalID string, size int, priority int16) error
+	//
+	// The enqueued externalID/size are read from the row while it is UPDATE-locked inside this
+	// transaction (RETURNING), NOT passed in by the caller: a concurrent content-replace swaps
+	// externalID/size WITHOUT bumping version, so a handler-threaded snapshot could be stale and
+	// leave the durable content with no outbox row (an RPO gap). Those same authoritative values
+	// are returned so the caller can build the PATCH response without a re-read. Only priority is
+	// caller-supplied — it derives from the (immutable-on-PATCH) mime type.
+	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (externalID string, size int, err error)
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)

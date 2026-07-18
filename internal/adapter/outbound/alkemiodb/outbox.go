@@ -2,14 +2,44 @@ package alkemiodb
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
+
+// withOutboxTx runs the shared transactional-outbox protocol used by every backup-outbox
+// producer method (008-continuous-file-backup FR-001): Begin, run the caller's row DML, run the
+// caller's backup-outbox enqueue, Commit, then a best-effort NOTIFY. A failure in dml or enqueue
+// (or Begin/Commit) rolls the tx back via the deferred Rollback with NO NOTIFY — so a file row and
+// its outbox row always commit together or not at all. The dml closure owns its own error mapping
+// (unique violation → model.ErrDuplicateKey, 0 rows / pgx.ErrNoRows → model.ErrDocumentNotFound)
+// and may capture values the enqueue closure needs (e.g. the RETURNING externalID/size).
+func (a *Adapter) withOutboxTx(ctx context.Context, dml, enqueue func(q *queries.Queries) error) error {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	q := a.queries.WithTx(tx)
+
+	if err := dml(q); err != nil {
+		return err
+	}
+	if err := enqueue(q); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	a.notifyBackup(ctx)
+	return nil
+}
 
 // CreateWithOutbox inserts a document row AND enqueues its backup-outbox row in ONE transaction
 // (008-continuous-file-backup FR-001: no committed outbox entry without a file row, and every
@@ -23,35 +53,32 @@ func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, cont
 	if err != nil {
 		return uuid.Nil, err
 	}
-	tx, err := a.pool.Begin(ctx)
+	err = a.withOutboxTx(ctx,
+		func(q *queries.Queries) error {
+			// CreateDocument RETURNING id echoes the caller-generated doc.ID ($1); discard it.
+			if _, err := q.CreateDocument(ctx, createDocumentParams(doc, raw)); err != nil {
+				if isUniqueViolation(err) {
+					return model.ErrDuplicateKey
+				}
+				return err
+			}
+			return nil
+		},
+		func(q *queries.Queries) error {
+			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
+				FileId:      uuidToPgx(doc.ID),
+				ExternalID:  doc.ExternalID,
+				Priority:    priority,
+				CreatedBy:   uuidToPgxNullable(doc.CreatedBy),
+				CreatedDate: timeToPgx(doc.CreatedDate),
+				Size:        int64(doc.Size),
+			})
+		},
+	)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
-	q := a.queries.WithTx(tx)
-
-	id, err := q.CreateDocument(ctx, createDocumentParams(doc, raw))
-	if err != nil {
-		if isUniqueViolation(err) {
-			return uuid.Nil, model.ErrDuplicateKey
-		}
-		return uuid.Nil, err
-	}
-	if err := q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
-		FileId:      uuidToPgx(doc.ID),
-		ExternalID:  doc.ExternalID,
-		Priority:    priority,
-		CreatedBy:   uuidToPgxNullable(doc.CreatedBy),
-		CreatedDate: timeToPgx(doc.CreatedDate),
-		Size:        int64(doc.Size),
-	}); err != nil {
-		return uuid.Nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, err
-	}
-	a.notifyBackup(ctx)
-	return pgxToUUID(id), nil
+	return doc.ID, nil
 }
 
 // UpdateFileWithOutbox rewrites a document's content fields AND enqueues a backup-outbox row for
@@ -64,38 +91,31 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 	if err != nil {
 		return err
 	}
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := a.queries.WithTx(tx)
-
-	rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
-	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
-		}
-		return err
-	}
-	if rows == 0 {
-		return model.ErrDocumentNotFound
-	}
-	if err := q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
-		FileId:      uuidToPgx(id),
-		ExternalID:  externalID,
-		Priority:    priority,
-		CreatedBy:   uuidToPgxNullable(nil), // no actor breadcrumb on a content replace
-		CreatedDate: timeToPgxNow(),
-		Size:        int64(size),
-	}); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	a.notifyBackup(ctx)
-	return nil
+	return a.withOutboxTx(ctx,
+		func(q *queries.Queries) error {
+			rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+			if err != nil {
+				if isUniqueViolation(err) {
+					return model.ErrDuplicateKey
+				}
+				return err
+			}
+			if rows == 0 {
+				return model.ErrDocumentNotFound
+			}
+			return nil
+		},
+		func(q *queries.Queries) error {
+			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
+				FileId:      uuidToPgx(id),
+				ExternalID:  externalID,
+				Priority:    priority,
+				CreatedBy:   uuidToPgxNullable(nil), // no actor breadcrumb on a content replace
+				CreatedDate: timeToPgxNow(),
+				Size:        int64(size),
+			})
+		},
+	)
 }
 
 // UpdateMetadataWithOutbox applies the versioned PATCH metadata update AND enqueues a backup-outbox
@@ -103,42 +123,50 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 // NOTIFYs. Called when a PATCH flips a document temporary→durable (013 conversation media reaches
 // durability via a temporaryLocation:true→false flip — the re-home MOVE / re-share pin / outbound
 // flip). model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateMetadata
-// does. The outbox breadcrumb: createdBy is the re-attributed owner (meta.CreatedBy, null when the
-// PATCH leaves it unset) and createdDate is enqueue time (now) — the RPO-lag semantics the
+// does.
+//
+// The enqueued (and returned) externalID/size come from the versioned UPDATE's RETURNING clause —
+// the row's AUTHORITATIVE content identity read while it is UPDATE-locked in THIS transaction — not
+// from a caller-threaded snapshot. A concurrent content-replace swaps externalID/size WITHOUT
+// bumping version, so a snapshot taken by the handler before the update could be stale; reading it
+// in-tx closes that RPO gap (the replace either committed first — RETURNING sees the new hash — or
+// blocks on the row lock until this commits, then replaces on a now-durable row and enqueues its
+// own outbox). The outbox breadcrumb: createdBy is the re-attributed owner (meta.CreatedBy, null
+// when the PATCH leaves it unset) and createdDate is enqueue time (now) — the RPO-lag semantics the
 // consumer's backlog gauge expects.
-func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, externalID string, size int, priority int16) error {
-	tx, err := a.pool.Begin(ctx)
+func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (string, int, error) {
+	var externalID string
+	var size int
+	err := a.withOutboxTx(ctx,
+		func(q *queries.Queries) error {
+			row, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
+			if err != nil {
+				if isUniqueViolation(err) {
+					return model.ErrDuplicateKey
+				}
+				if errors.Is(err, pgx.ErrNoRows) {
+					return model.ErrDocumentNotFound
+				}
+				return err
+			}
+			externalID, size = row.ExternalID, int(row.Size)
+			return nil
+		},
+		func(q *queries.Queries) error {
+			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
+				FileId:      uuidToPgx(id),
+				ExternalID:  externalID, // AUTHORITATIVE post-update hash from the locked row (RETURNING)
+				Priority:    priority,
+				CreatedBy:   uuidToPgxNullable(meta.CreatedBy), // the re-attributed owner breadcrumb; nil if unset
+				CreatedDate: timeToPgxNow(),
+				Size:        int64(size),
+			})
+		},
+	)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := a.queries.WithTx(tx)
-
-	rows, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
-	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
-		}
-		return err
-	}
-	if rows == 0 {
-		return model.ErrDocumentNotFound
-	}
-	if err := q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
-		FileId:      uuidToPgx(id),
-		ExternalID:  externalID,
-		Priority:    priority,
-		CreatedBy:   uuidToPgxNullable(meta.CreatedBy), // the re-attributed owner breadcrumb; nil if unset
-		CreatedDate: timeToPgxNow(),
-		Size:        int64(size),
-	}); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	a.notifyBackup(ctx)
-	return nil
+	return externalID, size, nil
 }
 
 // PruneBackupOutbox deletes `done` outbox rows older than the cutoff, keeping the shared outbox

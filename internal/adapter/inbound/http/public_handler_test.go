@@ -93,7 +93,7 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) (string, int, error) {
 	m.updateMetadataCalls++
 	m.lastUpdateBucketID = meta.StorageBucketID
 	m.lastUpdateTemporary = meta.TemporaryLocation
@@ -103,23 +103,13 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	m.lastUpdateCreatedBy = meta.CreatedBy
 	m.lastUpdateExternalRef = meta.ExternalReference
 	if m.updateErr != nil {
-		return m.updateErr
+		return "", 0, m.updateErr
 	}
-	// Mirror real adapter behavior so the subsequent service GetByID
-	// reflects the update — otherwise tests can't tell whether the
-	// handler propagated the new values or returned stale ones.
-	m.doc.StorageBucketID = meta.StorageBucketID
-	m.doc.TemporaryLocation = meta.TemporaryLocation
-	m.doc.DisplayName = meta.DisplayName
-	if meta.AuthorizationID != nil {
-		m.doc.AuthorizationID = *meta.AuthorizationID
-	} else {
-		m.doc.AuthorizationID = uuid.Nil
-	}
-	m.doc.CreatedBy = meta.CreatedBy
-	m.doc.ExternalReference = meta.ExternalReference
-	m.doc.Version = version + 1
-	return nil
+	// Return the row's authoritative post-update externalID/size (RETURNING);
+	// a metadata PATCH leaves content fields untouched, so they equal the
+	// current doc's. The service builds the PATCH response from the threaded
+	// current doc + meta + these values — no post-update re-read.
+	return m.doc.ExternalID, m.doc.Size, nil
 }
 func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
 	m.lastRefValue = reference

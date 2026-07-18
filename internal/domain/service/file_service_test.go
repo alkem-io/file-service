@@ -102,9 +102,11 @@ func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expe
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
+func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
 	m.updateMetadataCalls++
-	return m.updateErr
+	// Mirror the adapter's RETURNING: the row's authoritative post-update
+	// externalID/size (unchanged by a metadata PATCH → the current doc's).
+	return m.doc.ExternalID, m.doc.Size, m.updateErr
 }
 func (m *mockRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	if m.findErr != nil {
@@ -773,8 +775,8 @@ func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
-	return nil
+func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
+	return "", 0, nil
 }
 func (m *mockRepoRace) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
@@ -1122,8 +1124,8 @@ func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
-	return nil
+func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
+	return "", 0, nil
 }
 func (m *copyRaceRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound

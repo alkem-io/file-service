@@ -13,13 +13,15 @@ import (
 
 // recordingOutbox is a fake BackupOutboxRepo that records which transactional path ran and the
 // priority it was handed — enough to assert the flag/temporary-location routing (FR-001).
+// UpdateMetadataWithOutbox returns the AUTHORITATIVE externalID/size the real adapter would read
+// in-tx from the locked row (RETURNING); returnExternalID/returnSize seed those.
 type recordingOutbox struct {
 	createCalls         int
 	updateCalls         int
 	updateMetadataCalls int
 	lastPriority        int16
-	lastMetaExternalID  string
-	lastMetaSize        int
+	returnExternalID    string // simulated post-update RETURNING externalID
+	returnSize          int    // simulated post-update RETURNING size
 	updateMetadataErr   error
 }
 
@@ -37,12 +39,10 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 	return nil
 }
 
-func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, externalID string, size int, priority int16) error {
+func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priority int16) (string, int, error) {
 	o.updateMetadataCalls++
 	o.lastPriority = priority
-	o.lastMetaExternalID = externalID
-	o.lastMetaSize = size
-	return o.updateMetadataErr
+	return o.returnExternalID, o.returnSize, o.updateMetadataErr
 }
 
 func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int64, error) {
@@ -144,84 +144,101 @@ func TestWriteReplaceRouting(t *testing.T) {
 	})
 }
 
+// Authoritative post-update content identity, read in-tx from the locked row (RETURNING) on both
+// paths. Deliberately DIVERGENT from the threaded `current` snapshot (metaRouteThreaded*), so any
+// regression that rebuilt the response from `current` — or reintroduced a stale-snapshot enqueue —
+// flips the assertions in assertMetadataRouting.
+const (
+	metaRouteThreadedExternalID, metaRouteThreadedSize = "hashThreaded", 99
+	metaRouteAuthExternalID, metaRouteAuthSize         = "hashAuthoritative", 200
+	metaRouteOfficeMime                                = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+
+type metadataRoutingCase struct {
+	name         string
+	wasTemporary bool   // the threaded current row's temporaryLocation before the PATCH
+	currentMime  string // the threaded current row's mime — drives the enqueued priority
+	repoMime     string // repo.doc's mime — OPPOSITE priority class, to catch a stray repo-based priority
+	outboxOn     bool
+	updateTemp   bool  // meta.TemporaryLocation (the PATCH target)
+	outboxErr    error // when set, UpdateMetadataWithOutbox fails — the metric-guard error path
+	wantOutbox   int   // expected UpdateMetadataWithOutbox calls
+	wantRepo     int   // expected plain Repo.UpdateMetadata calls
+	wantMetric   int64 // expected backupOutboxEnqueued delta (increments only on a SUCCESSFUL enqueue)
+	wantErr      bool
+	wantPriority int16 // priority derived from currentMime (NOT repoMime)
+}
+
+// assertMetadataRouting checks the outbox-vs-repo routing, the enqueue metric, the mime-derived
+// priority, and — the invariant this commit establishes — that a successful PATCH response carries
+// the AUTHORITATIVE post-update externalID/size (never the stale threaded `current`), proving the
+// response is built from the in-tx authoritative source AND is reload-free (no post-update
+// s.Repo.GetByID).
+func assertMetadataRouting(t *testing.T, tc metadataRoutingCase, updated *model.Document, err error, ob *recordingOutbox, repo *mockRepo, metricDelta int64) {
+	t.Helper()
+	if tc.wantErr != (err != nil) {
+		t.Fatalf("error = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if ob.updateMetadataCalls != tc.wantOutbox {
+		t.Fatalf("outbox calls = %d, want %d", ob.updateMetadataCalls, tc.wantOutbox)
+	}
+	if repo.updateMetadataCalls != tc.wantRepo {
+		t.Fatalf("repo calls = %d, want %d", repo.updateMetadataCalls, tc.wantRepo)
+	}
+	if metricDelta != tc.wantMetric {
+		t.Fatalf("enqueue counter delta = %d, want %d", metricDelta, tc.wantMetric)
+	}
+	if tc.wantOutbox == 1 && ob.lastPriority != tc.wantPriority {
+		t.Fatalf("priority = %d, want %d (derived from the THREADED current mime, not repo.doc's)", ob.lastPriority, tc.wantPriority)
+	}
+	if tc.wantErr {
+		return
+	}
+	if updated == nil {
+		t.Fatal("expected a non-nil updated document")
+	}
+	if updated.ExternalID != metaRouteAuthExternalID || updated.Size != metaRouteAuthSize {
+		t.Fatalf("response carries %q/%d, want AUTHORITATIVE %q/%d (never the stale threaded %q/%d)",
+			updated.ExternalID, updated.Size, metaRouteAuthExternalID, metaRouteAuthSize, metaRouteThreadedExternalID, metaRouteThreadedSize)
+	}
+}
+
 // TestUpdateMetadataOutboxRouting: 013 conversation media reaches durability via a metadata PATCH
 // flipping temporaryLocation true→false (re-home MOVE / re-share pin / outbound flip). Only that
 // transition — outbox on AND the row WAS temporary AND the update targets durable — enqueues a
 // backup-outbox row; every other PATCH takes the plain Repo.UpdateMetadata path with no enqueue.
+// It also pins the authoritative-source / reload-free response invariant (see assertMetadataRouting).
 func TestUpdateMetadataOutboxRouting(t *testing.T) {
-	const officeMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-	// The threaded `current` document (what the handler already loaded) and what a re-read of the
-	// repo would return are given DIVERGENT content fields on purpose: the outbox row must carry the
-	// THREADED values, so if anyone reintroduces the removed s.Repo.GetByID pre-read (reading
-	// repo.doc) the enqueued externalID/size/priority would flip to repo.doc's and these assertions
-	// would fail — genuinely guarding the no-pre-read invariant this commit establishes.
-	const threadedExternalID, threadedSize = "hashThreaded", 99
-	cases := []struct {
-		name         string
-		wasTemporary bool   // the threaded current row's temporaryLocation before the PATCH
-		currentMime  string // the threaded current row's mime — drives the enqueued priority
-		repoMime     string // what a (forbidden) re-read would see — OPPOSITE priority class, to catch it
-		outboxOn     bool
-		updateTemp   bool  // meta.TemporaryLocation (the PATCH target)
-		outboxErr    error // when set, UpdateMetadataWithOutbox fails — the metric-guard error path
-		wantOutbox   int   // expected UpdateMetadataWithOutbox calls
-		wantRepo     int   // expected plain Repo.UpdateMetadata calls
-		wantMetric   int64 // expected backupOutboxEnqueued delta (increments only on a SUCCESSFUL enqueue)
-		wantErr      bool
-		wantPriority int16 // priority derived from currentMime (NOT repoMime)
-	}{
-		{name: "transition-image-priority-0", wasTemporary: true, currentMime: "image/png", repoMime: officeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
-		{name: "transition-office-hot-priority-1", wasTemporary: true, currentMime: officeMime, repoMime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
+	cases := []metadataRoutingCase{
+		{name: "transition-image-priority-0", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
+		{name: "transition-office-hot-priority-1", wasTemporary: true, currentMime: metaRouteOfficeMime, repoMime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
 		{name: "outbox-off-uses-repo", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: false, wantRepo: 1},
 		{name: "already-durable-no-transition", wasTemporary: false, currentMime: "image/png", repoMime: "image/png", outboxOn: true, wantRepo: 1},
 		{name: "keeps-temporary-no-enqueue", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: true, updateTemp: true, wantRepo: 1},
 		// Metric-guard error path: a transition whose outbox write fails must propagate the error
 		// AND leave the counter untouched (the `if err == nil { Add(1) }` guard).
-		{name: "transition-outbox-error-no-metric", wasTemporary: true, currentMime: "image/png", repoMime: officeMime, outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
+		{name: "transition-outbox-error-no-metric", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// repo.doc is the post-update read source AND what a forbidden pre-read would return —
-			// deliberately divergent from `current` in every content field.
-			repo := &mockRepo{doc: model.Document{ExternalID: "hashRepoRead", Size: 7, MimeType: tc.repoMime, TemporaryLocation: tc.wasTemporary}}
-			ob := &recordingOutbox{updateMetadataErr: tc.outboxErr}
+			// repo.doc supplies the AUTHORITATIVE post-update externalID/size on the plain
+			// (non-outbox) path — the adapter reads them from the UPDATE's RETURNING. repoMime is
+			// the opposite priority class purely as a guard against a stray repo-based priority.
+			repo := &mockRepo{doc: model.Document{ExternalID: metaRouteAuthExternalID, Size: metaRouteAuthSize, MimeType: tc.repoMime, TemporaryLocation: tc.wasTemporary}}
+			// The outbox returns the same authoritative values it would read in-tx (RETURNING).
+			ob := &recordingOutbox{returnExternalID: metaRouteAuthExternalID, returnSize: metaRouteAuthSize, updateMetadataErr: tc.outboxErr}
 			s := &FileService{Repo: repo, HotMimePrefixes: []string{"application/vnd.openxmlformats-officedocument"}, Logger: nopLogger}
 			if tc.outboxOn {
 				s.Outbox = ob
 			}
-			// The handler loads the current document and threads it in; content fields (immutable on
-			// a metadata PATCH) come from here, NOT from a re-read.
-			current := model.Document{ExternalID: threadedExternalID, Size: threadedSize, MimeType: tc.currentMime, TemporaryLocation: tc.wasTemporary}
+			// The handler loads the current document and threads it in. Its content fields are the
+			// STALE snapshot — divergent from the authoritative post-update values on purpose.
+			current := model.Document{ExternalID: metaRouteThreadedExternalID, Size: metaRouteThreadedSize, MimeType: tc.currentMime, TemporaryLocation: tc.wasTemporary}
 			meta := model.DocumentMetadataUpdate{TemporaryLocation: tc.updateTemp}
 			before := backupOutboxEnqueued.Value()
 
-			_, err := s.UpdateDocumentMetadata(context.Background(), uuid.New(), meta, 1, current)
-			if tc.wantErr && err == nil {
-				t.Fatal("expected an error to propagate from the failed outbox enqueue")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("UpdateDocumentMetadata: %v", err)
-			}
-			if ob.updateMetadataCalls != tc.wantOutbox {
-				t.Fatalf("outbox calls = %d, want %d", ob.updateMetadataCalls, tc.wantOutbox)
-			}
-			if repo.updateMetadataCalls != tc.wantRepo {
-				t.Fatalf("repo calls = %d, want %d", repo.updateMetadataCalls, tc.wantRepo)
-			}
-			if got := backupOutboxEnqueued.Value() - before; got != tc.wantMetric {
-				t.Fatalf("enqueue counter delta = %d, want %d", got, tc.wantMetric)
-			}
-			if tc.wantOutbox == 1 {
-				// The row MUST carry the threaded current values, never repo.doc's — a reintroduced
-				// GetByID pre-read would surface repo.doc's ("hashRepoRead"/7/opposite priority) here.
-				if ob.lastMetaExternalID != threadedExternalID || ob.lastMetaSize != threadedSize {
-					t.Fatalf("outbox row must carry the THREADED externalID/size %q/%d, got %q/%d (a re-read would give repo.doc's)",
-						threadedExternalID, threadedSize, ob.lastMetaExternalID, ob.lastMetaSize)
-				}
-				if ob.lastPriority != tc.wantPriority {
-					t.Fatalf("priority = %d, want %d (derived from the THREADED mime, not repo.doc's)", ob.lastPriority, tc.wantPriority)
-				}
-			}
+			updated, err := s.UpdateDocumentMetadata(context.Background(), uuid.New(), meta, 1, current)
+			assertMetadataRouting(t, tc, updated, err, ob, repo, backupOutboxEnqueued.Value()-before)
 		})
 	}
 }

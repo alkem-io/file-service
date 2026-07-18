@@ -421,7 +421,7 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 	return result.RowsAffected(), nil
 }
 
-const updateDocumentMetadata = `-- name: UpdateDocumentMetadata :execrows
+const updateDocumentMetadata = `-- name: UpdateDocumentMetadata :one
 UPDATE file
 SET "storageBucketId"    = $2,
     "temporaryLocation"  = $3,
@@ -432,6 +432,7 @@ SET "storageBucketId"    = $2,
     "updatedDate"        = $8,
     version              = version + 1
 WHERE id = $1 AND version = $9
+RETURNING "externalID", size
 `
 
 type UpdateDocumentMetadataParams struct {
@@ -446,14 +447,30 @@ type UpdateDocumentMetadataParams struct {
 	Version           int32              `json:"version"`
 }
 
+type UpdateDocumentMetadataRow struct {
+	ExternalID string `json:"externalID"`
+	Size       int32  `json:"size"`
+}
+
 // Updates the mutable metadata fields atomically with optimistic locking.
 // Caller fills unchanged fields with their current values. This is the
 // "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
 // displayName it also re-points authorizationId, createdBy, and the opaque
 // externalReference. mimeType, externalID, size are not mutable here — they
 // change only via UpdateDocumentFile.
-func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocumentMetadataParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateDocumentMetadata,
+//
+// RETURNING "externalID", size yields the AUTHORITATIVE post-update content
+// identity read from the row while it is UPDATE-locked in this transaction.
+// The transactional backup-outbox producer enqueues that value, not a
+// handler-threaded snapshot, so a concurrent content-replace (which swaps
+// externalID/size WITHOUT bumping version) can't leave the outbox pointing at
+// a stale hash — it either committed before this UPDATE (RETURNING sees the
+// new hash) or blocks on the row lock until this tx commits (then replaces on
+// a now-durable row and enqueues its own outbox). 0 rows (version mismatch /
+// missing row) → no row returned (pgx.ErrNoRows), which the adapter maps to
+// model.ErrDocumentNotFound.
+func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocumentMetadataParams) (UpdateDocumentMetadataRow, error) {
+	row := q.db.QueryRow(ctx, updateDocumentMetadata,
 		arg.ID,
 		arg.StorageBucketId,
 		arg.TemporaryLocation,
@@ -464,10 +481,9 @@ func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocument
 		arg.UpdatedDate,
 		arg.Version,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	var i UpdateDocumentMetadataRow
+	err := row.Scan(&i.ExternalID, &i.Size)
+	return i, err
 }
 
 const updateDocumentMimeType = `-- name: UpdateDocumentMimeType :execrows

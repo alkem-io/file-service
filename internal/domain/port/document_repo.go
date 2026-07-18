@@ -42,11 +42,18 @@ type DocumentRepo interface {
 	// which covers both "row gone" and "version mismatch"; the service layer
 	// translates that into its concurrency conflict.
 	//
+	// It returns the AUTHORITATIVE post-update externalID and size — read from
+	// the row while it is UPDATE-locked in the same statement (RETURNING) — so
+	// the caller can build the response and (on the transactional path) enqueue
+	// the backup hint from the real durable content, never a stale
+	// handler-threaded snapshot that a concurrent content-replace could have
+	// invalidated. Both are zero-valued when the update matched no row.
+	//
 	// This is the "move + re-attribute" primitive: besides bucket/temporary-
 	// location/display-name it also re-points authorizationID, createdBy, and
 	// the opaque externalReference. The caller supplies every field's intended
 	// final value (the handler fills omitted fields from the current row).
-	UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error
+	UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) (externalID string, size int, err error)
 	// BackfillContentMetadata writes computed metadata atomically using
 	// compare-and-set: only succeeds if the row currently has empty
 	// content_metadata AND its externalID matches expectedExternalID. This

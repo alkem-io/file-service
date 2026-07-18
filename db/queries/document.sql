@@ -65,13 +65,24 @@ SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
     content_metadata = $6
 WHERE id = $1;
 
--- name: UpdateDocumentMetadata :execrows
+-- name: UpdateDocumentMetadata :one
 -- Updates the mutable metadata fields atomically with optimistic locking.
 -- Caller fills unchanged fields with their current values. This is the
 -- "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
 -- displayName it also re-points authorizationId, createdBy, and the opaque
 -- externalReference. mimeType, externalID, size are not mutable here — they
 -- change only via UpdateDocumentFile.
+--
+-- RETURNING "externalID", size yields the AUTHORITATIVE post-update content
+-- identity read from the row while it is UPDATE-locked in this transaction.
+-- The transactional backup-outbox producer enqueues that value, not a
+-- handler-threaded snapshot, so a concurrent content-replace (which swaps
+-- externalID/size WITHOUT bumping version) can't leave the outbox pointing at
+-- a stale hash — it either committed before this UPDATE (RETURNING sees the
+-- new hash) or blocks on the row lock until this tx commits (then replaces on
+-- a now-durable row and enqueues its own outbox). 0 rows (version mismatch /
+-- missing row) → no row returned (pgx.ErrNoRows), which the adapter maps to
+-- model.ErrDocumentNotFound.
 UPDATE file
 SET "storageBucketId"    = $2,
     "temporaryLocation"  = $3,
@@ -81,7 +92,8 @@ SET "storageBucketId"    = $2,
     "externalReference"  = $7,
     "updatedDate"        = $8,
     version              = version + 1
-WHERE id = $1 AND version = $9;
+WHERE id = $1 AND version = $9
+RETURNING "externalID", size;
 
 -- name: BackfillContentMetadata :execrows
 -- Compare-and-set: only writes when content_metadata is still empty AND

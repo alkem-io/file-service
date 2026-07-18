@@ -203,11 +203,13 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 }
 
 // UpdateMetadata mutates bucket/temporaryLocation/displayName under
-// optimistic locking (WHERE version = $given, SET version = version + 1).
-// 0 rows affected — row missing or version stale — returns
-// model.ErrDocumentNotFound; the service maps that to its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
-	rows, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
+// optimistic locking (WHERE version = $given, SET version = version + 1) and
+// returns the AUTHORITATIVE post-update externalID/size read from the locked
+// row (RETURNING). No matching row — row missing or version stale — surfaces as
+// pgx.ErrNoRows, mapped to model.ErrDocumentNotFound; the service maps that to
+// its conflict error.
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) (string, int, error) {
+	row, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
 		// A PATCH can collide on a uniqueness constraint: the partial
 		// UNIQUE("externalReference", "storageBucketId") when a move re-homes a
@@ -215,16 +217,15 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.D
 		// on re-attribution. (It never touches externalID, so it can't collide on
 		// the partial content index.) Map to ErrDuplicateKey so the service can
 		// surface a 409 rather than a 500.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-			return model.ErrDuplicateKey
+		if isUniqueViolation(err) {
+			return "", 0, model.ErrDuplicateKey
 		}
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, model.ErrDocumentNotFound
+		}
+		return "", 0, err
 	}
-	if rows == 0 {
-		return model.ErrDocumentNotFound
-	}
-	return nil
+	return row.ExternalID, int(row.Size), nil
 }
 
 // updateMetadataParams maps the PATCH "move + re-attribute" fields to the sqlc update params — the

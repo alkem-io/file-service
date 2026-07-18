@@ -266,13 +266,15 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	bucketID := uuid.New()
 	authID := uuid.New()
 	ref := "media-id-xyz"
-	mock.ExpectExec("UPDATE file SET").
+	// The versioned UPDATE now RETURNs the row's authoritative externalID/size (:one) — assert those
+	// flow back out of UpdateMetadata unchanged.
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", uuidToPgx(authID),
 			uuidToPgxNullable(nil), stringToPgxText(&ref), pgxmock.AnyArg(), int32(1)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(mock.NewRows([]string{"externalID", "size"}).AddRow("hashAuthoritative", int32(4242)))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+	gotExtID, gotSize, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 		StorageBucketID:   bucketID,
 		DisplayName:       "name.txt",
 		AuthorizationID:   &authID,
@@ -280,6 +282,9 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	}, 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if gotExtID != "hashAuthoritative" || gotSize != 4242 {
+		t.Fatalf("UpdateMetadata returned %q/%d, want the RETURNING externalID/size hashAuthoritative/4242", gotExtID, gotSize)
 	}
 }
 
@@ -290,14 +295,15 @@ func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
+	// 0 rows updated (version mismatch / missing row) → RETURNING yields no row → pgx.ErrNoRows.
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		WillReturnRows(mock.NewRows([]string{"externalID", "size"}))
 
 	a := New(mock)
 	auth := uuid.New()
-	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+	_, _, err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
 		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
 	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
@@ -351,14 +357,14 @@ func TestMock_UpdateMetadata_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
 	auth := uuid.New()
-	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+	_, _, err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
 		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
 	}, 1)
 	if err == nil {

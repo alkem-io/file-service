@@ -251,16 +251,21 @@ func TestUpdateMetadata(t *testing.T) {
 	origAuth := uuid.UUID(authID)
 
 	// Update with current version (optimistic lock). Preserve the row's
-	// authorizationId so this test does not mutate auth/ownership.
-	err = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+	// authorizationId so this test does not mutate auth/ownership. UpdateMetadata
+	// RETURNs the row's authoritative externalID/size; assert they are non-empty
+	// (a real row always has a content hash).
+	gotExtID, _, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 		StorageBucketID: origBucket, TemporaryLocation: !tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
 	}, int(version))
 	if err != nil {
 		t.Fatalf("UpdateMetadata: %v", err)
 	}
+	if gotExtID == "" {
+		t.Error("UpdateMetadata returned an empty externalID from RETURNING")
+	}
 	defer func() {
 		// Restore with incremented version
-		_ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		_, _, _ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 			StorageBucketID: origBucket, TemporaryLocation: tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
 		}, int(version+1))
 	}()
@@ -277,7 +282,7 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 	a := New(pool)
 
 	newAuth := uuid.New()
-	err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+	_, _, err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
 		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &newAuth,
 	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
