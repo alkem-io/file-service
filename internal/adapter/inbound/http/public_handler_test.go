@@ -93,7 +93,7 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) (string, int, error) {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) (model.Document, error) {
 	m.updateMetadataCalls++
 	m.lastUpdateBucketID = meta.StorageBucketID
 	m.lastUpdateTemporary = meta.TemporaryLocation
@@ -103,13 +103,26 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	m.lastUpdateCreatedBy = meta.CreatedBy
 	m.lastUpdateExternalRef = meta.ExternalReference
 	if m.updateErr != nil {
-		return "", 0, m.updateErr
+		return model.Document{}, m.updateErr
 	}
-	// Return the row's authoritative post-update externalID/size (RETURNING);
-	// a metadata PATCH leaves content fields untouched, so they equal the
-	// current doc's. The service builds the PATCH response from the threaded
-	// current doc + meta + these values — no post-update re-read.
-	return m.doc.ExternalID, m.doc.Size, nil
+	// Mirror the adapter's full-row RETURNING: the post-update row reflects the
+	// applied metadata SETs; content fields (externalID/size/mime/dims/
+	// content_metadata) are untouched by a metadata PATCH, so they carry over
+	// from the current row. The service builds the whole PATCH response from this
+	// one authoritative snapshot — no post-update re-read.
+	updated := m.doc
+	updated.StorageBucketID = meta.StorageBucketID
+	updated.TemporaryLocation = meta.TemporaryLocation
+	updated.DisplayName = meta.DisplayName
+	updated.CreatedBy = meta.CreatedBy
+	updated.ExternalReference = meta.ExternalReference
+	if meta.AuthorizationID != nil {
+		updated.AuthorizationID = *meta.AuthorizationID
+	} else {
+		updated.AuthorizationID = uuid.Nil
+	}
+	updated.Version = version + 1
+	return updated, nil
 }
 func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
 	m.lastRefValue = reference

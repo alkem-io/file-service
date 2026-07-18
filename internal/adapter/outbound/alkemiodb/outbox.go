@@ -125,18 +125,18 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 // flip). model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateMetadata
 // does.
 //
-// The enqueued (and returned) externalID/size come from the versioned UPDATE's RETURNING clause —
-// the row's AUTHORITATIVE content identity read while it is UPDATE-locked in THIS transaction — not
-// from a caller-threaded snapshot. A concurrent content-replace swaps externalID/size WITHOUT
-// bumping version, so a snapshot taken by the handler before the update could be stale; reading it
-// in-tx closes that RPO gap (the replace either committed first — RETURNING sees the new hash — or
-// blocks on the row lock until this commits, then replaces on a now-durable row and enqueues its
-// own outbox). The outbox breadcrumb: createdBy is the re-attributed owner (meta.CreatedBy, null
-// when the PATCH leaves it unset) and createdDate is enqueue time (now) — the RPO-lag semantics the
-// consumer's backlog gauge expects.
-func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (string, int, error) {
-	var externalID string
-	var size int
+// The enqueued externalID/size — and the whole returned document — come from the versioned UPDATE's
+// full-row RETURNING clause: the row's AUTHORITATIVE post-update state read while it is UPDATE-locked
+// in THIS transaction, NOT a caller-threaded snapshot. A concurrent content-replace swaps
+// externalID/size (and dims) WITHOUT bumping version, so a snapshot taken by the handler before the
+// update could be stale; reading it in-tx closes that RPO gap (the replace either committed first —
+// RETURNING sees the new hash — or blocks on the row lock until this commits, then replaces on a
+// now-durable row and enqueues its own outbox). The returned document lets the caller build the
+// PATCH response from one consistent snapshot (no reload). The outbox breadcrumb: createdBy is the
+// re-attributed owner (meta.CreatedBy, null when the PATCH leaves it unset) and createdDate is
+// enqueue time (now) — the RPO-lag semantics the consumer's backlog gauge expects.
+func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (model.Document, error) {
+	var doc model.Document
 	err := a.withOutboxTx(ctx,
 		func(q *queries.Queries) error {
 			row, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
@@ -149,24 +149,24 @@ func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, me
 				}
 				return err
 			}
-			externalID, size = row.ExternalID, int(row.Size)
+			doc = updateMetaRowToDocument(row)
 			return nil
 		},
 		func(q *queries.Queries) error {
 			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
 				FileId:      uuidToPgx(id),
-				ExternalID:  externalID, // AUTHORITATIVE post-update hash from the locked row (RETURNING)
+				ExternalID:  doc.ExternalID, // AUTHORITATIVE post-update hash from the locked row (RETURNING)
 				Priority:    priority,
 				CreatedBy:   uuidToPgxNullable(meta.CreatedBy), // the re-attributed owner breadcrumb; nil if unset
 				CreatedDate: timeToPgxNow(),
-				Size:        int64(size),
+				Size:        int64(doc.Size),
 			})
 		},
 	)
 	if err != nil {
-		return "", 0, err
+		return model.Document{}, err
 	}
-	return externalID, size, nil
+	return doc, nil
 }
 
 // PruneBackupOutbox deletes `done` outbox rows older than the cutoff, keeping the shared outbox

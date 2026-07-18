@@ -202,13 +202,15 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 	}
 }
 
-// UpdateMetadata mutates bucket/temporaryLocation/displayName under
-// optimistic locking (WHERE version = $given, SET version = version + 1) and
-// returns the AUTHORITATIVE post-update externalID/size read from the locked
-// row (RETURNING). No matching row — row missing or version stale — surfaces as
-// pgx.ErrNoRows, mapped to model.ErrDocumentNotFound; the service maps that to
-// its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) (string, int, error) {
+// UpdateMetadata mutates bucket/temporaryLocation/displayName under optimistic
+// locking (WHERE version = $given, SET version = version + 1) and returns the
+// AUTHORITATIVE post-update document mapped from the locked row's full RETURNING
+// — the applied SETs AND any concurrent content-replace already committed — so
+// the service can build the ENTIRE PATCH response from one consistent snapshot
+// (no reload, no torn externalID/size-vs-dims). No matching row — row missing or
+// version stale — surfaces as pgx.ErrNoRows, mapped to model.ErrDocumentNotFound;
+// the service maps that to its conflict error.
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) (model.Document, error) {
 	row, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
 		// A PATCH can collide on a uniqueness constraint: the partial
@@ -218,14 +220,14 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.D
 		// the partial content index.) Map to ErrDuplicateKey so the service can
 		// surface a 409 rather than a 500.
 		if isUniqueViolation(err) {
-			return "", 0, model.ErrDuplicateKey
+			return model.Document{}, model.ErrDuplicateKey
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", 0, model.ErrDocumentNotFound
+			return model.Document{}, model.ErrDocumentNotFound
 		}
-		return "", 0, err
+		return model.Document{}, err
 	}
-	return row.ExternalID, int(row.Size), nil
+	return updateMetaRowToDocument(row), nil
 }
 
 // updateMetadataParams maps the PATCH "move + re-attribute" fields to the sqlc update params — the

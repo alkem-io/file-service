@@ -574,14 +574,15 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
 // The caller passes the already-loaded current document (the handler reads it for the version
-// check + buildMetadataUpdate); this method reuses it for the temporary→durable transition check,
-// the outbox breadcrumb's mime-derived priority, and the immutable-on-PATCH content descriptors
-// (mime, dims) of the response. The response's externalID/size come from the versioned UPDATE's
-// RETURNING (the row's authoritative post-update identity), NOT from `current` and NOT from a
-// re-read: a concurrent content-replace can swap externalID/size WITHOUT bumping version, so the
-// threaded snapshot could be stale. No post-update reload runs.
+// check + buildMetadataUpdate); this method reuses it ONLY for the temporary→durable transition
+// check and the outbox breadcrumb's mime-derived priority. The returned document is the
+// AUTHORITATIVE post-update row (full RETURNING mapped once via documentFromRow), NOT a
+// current+meta merge and NOT a re-read: it reflects both the applied metadata SETs and any
+// concurrent content-replace already committed (which swaps externalID/size + dims WITHOUT bumping
+// version), so every response field — externalID, size, content_metadata, image dims — comes from
+// one consistent snapshot and can't tear. No post-update reload runs.
 func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int, current model.Document) (*model.Document, error) {
-	externalID, size, err := s.writeMetadataUpdate(ctx, documentID, meta, version, current)
+	doc, err := s.writeMetadataUpdate(ctx, documentID, meta, version, current)
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -589,61 +590,33 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 		}
 		return nil, err
 	}
-	doc := docAfterMetadataUpdate(current, meta, externalID, size)
 	return &doc, nil
 }
 
-// docAfterMetadataUpdate materializes the post-PATCH document reload-free: the mutable metadata
-// fields come from `meta` (the applied update), the content-identity fields (externalID, size)
-// from the AUTHORITATIVE in-transaction RETURNING values, and everything else — id, the immutable-
-// on-PATCH content descriptors (mimeType, content_metadata, image dims), createdDate, tagsetId —
-// from the loaded `current` row. version is the caller's version + 1 (the UPDATE bumped it).
-// Using the in-tx externalID/size (not current's) keeps the response — and the downstream lazy
-// backfill's Storage.Read(externalID) — correct even if a concurrent content-replace swapped the
-// content out from under the metadata PATCH.
-func docAfterMetadataUpdate(current model.Document, meta model.DocumentMetadataUpdate, externalID string, size int) model.Document {
-	doc := current
-	doc.StorageBucketID = meta.StorageBucketID
-	doc.TemporaryLocation = meta.TemporaryLocation
-	doc.DisplayName = meta.DisplayName
-	doc.CreatedBy = meta.CreatedBy
-	doc.ExternalReference = meta.ExternalReference
-	if meta.AuthorizationID != nil {
-		doc.AuthorizationID = *meta.AuthorizationID
-	} else {
-		doc.AuthorizationID = uuid.Nil
-	}
-	doc.ExternalID = externalID
-	doc.Size = size
-	doc.Version = current.Version + 1
-	doc.UpdatedDate = time.Now()
-	return doc
-}
-
 // writeMetadataUpdate applies the versioned PATCH, routing a temporary→durable transition through
-// the transactional backup-outbox path, and returns the AUTHORITATIVE post-update externalID/size
-// (read in-tx from the locked row, RETURNING). 013 conversation media (re-home MOVE / re-share pin
-// / outbound flip) reaches durability via THIS PATCH — a temporaryLocation:true→false flip, never
+// the transactional backup-outbox path, and returns the AUTHORITATIVE post-update document (mapped
+// from the locked row's full RETURNING). 013 conversation media (re-home MOVE / re-share pin /
+// outbound flip) reaches durability via THIS PATCH — a temporaryLocation:true→false flip, never
 // via create/replace — so without enqueuing its backup hint here it would escape the 008 continuous-
 // backup outbox entirely. A PATCH that keeps the row temporary (still staging), or one on an
 // already-durable row (no transition — already enqueued at create/replace), takes the plain
 // Repo.UpdateMetadata path and correctly enqueues nothing. The transition is decided from the
 // caller-supplied current document (no extra read — an extra read would be an availability
 // regression, failing a PATCH whose UPDATE would otherwise commit); priority is derived from
-// current.MimeType (immutable on a metadata PATCH). Both paths obtain externalID/size from the
-// same in-tx RETURNING, so a concurrent content-replace can neither strand the durable content
-// without an outbox row nor leave the response pointing at a stale hash. Returns
+// current.MimeType (immutable on a metadata PATCH). Both paths obtain the returned document from the
+// same in-tx full-row RETURNING, so a concurrent content-replace can neither strand the durable
+// content without an outbox row nor leave the response tearing on a stale hash/dims. Returns
 // model.ErrDocumentNotFound on a version mismatch / missing row (the caller maps it to ErrConflict)
 // on either path.
-func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int, current model.Document) (externalID string, size int, err error) {
+func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.UUID, meta model.DocumentMetadataUpdate, version int, current model.Document) (model.Document, error) {
 	// temporary→durable transition: outbox on AND the row WAS temporary AND the update targets a
 	// durable state. Enqueue the now-durable object's backup hint in the same commit as the UPDATE.
 	if s.Outbox != nil && current.TemporaryLocation && !meta.TemporaryLocation {
-		externalID, size, err = s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, s.priorityForMime(current.MimeType))
+		doc, err := s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, s.priorityForMime(current.MimeType))
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
-		return externalID, size, err
+		return doc, err
 	}
 	return s.Repo.UpdateMetadata(ctx, documentID, meta, version)
 }

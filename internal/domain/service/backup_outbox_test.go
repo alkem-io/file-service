@@ -13,15 +13,14 @@ import (
 
 // recordingOutbox is a fake BackupOutboxRepo that records which transactional path ran and the
 // priority it was handed — enough to assert the flag/temporary-location routing (FR-001).
-// UpdateMetadataWithOutbox returns the AUTHORITATIVE externalID/size the real adapter would read
-// in-tx from the locked row (RETURNING); returnExternalID/returnSize seed those.
+// UpdateMetadataWithOutbox returns the AUTHORITATIVE post-update document the real adapter would
+// map in-tx from the locked row's full RETURNING; returnDoc seeds it.
 type recordingOutbox struct {
 	createCalls         int
 	updateCalls         int
 	updateMetadataCalls int
 	lastPriority        int16
-	returnExternalID    string // simulated post-update RETURNING externalID
-	returnSize          int    // simulated post-update RETURNING size
+	returnDoc           model.Document // simulated post-update full-row RETURNING (authoritative)
 	updateMetadataErr   error
 }
 
@@ -39,10 +38,10 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 	return nil
 }
 
-func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priority int16) (string, int, error) {
+func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priority int16) (model.Document, error) {
 	o.updateMetadataCalls++
 	o.lastPriority = priority
-	return o.returnExternalID, o.returnSize, o.updateMetadataErr
+	return o.returnDoc, o.updateMetadataErr
 }
 
 func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int64, error) {
@@ -144,14 +143,21 @@ func TestWriteReplaceRouting(t *testing.T) {
 	})
 }
 
-// Authoritative post-update content identity, read in-tx from the locked row (RETURNING) on both
-// paths. Deliberately DIVERGENT from the threaded `current` snapshot (metaRouteThreaded*), so any
-// regression that rebuilt the response from `current` — or reintroduced a stale-snapshot enqueue —
-// flips the assertions in assertMetadataRouting.
+// Authoritative post-update content identity + dims, read in-tx from the locked row's full
+// RETURNING on both paths. Deliberately DIVERGENT from the threaded `current` snapshot
+// (metaRouteThreaded*), so any regression that rebuilt the response from `current` — or
+// reintroduced a stale-snapshot enqueue — flips the assertions in assertMetadataRouting.
 const (
 	metaRouteThreadedExternalID, metaRouteThreadedSize = "hashThreaded", 99
 	metaRouteAuthExternalID, metaRouteAuthSize         = "hashAuthoritative", 200
 	metaRouteOfficeMime                                = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+
+// Authoritative (post-replace) vs threaded (stale) image dims — both non-nil and divergent, so a
+// response that sources dims from `current` instead of the authoritative RETURNING row is caught.
+var (
+	metaRouteAuthW, metaRouteAuthH         = 200, 200
+	metaRouteThreadedW, metaRouteThreadedH = 100, 100
 )
 
 type metadataRoutingCase struct {
@@ -201,6 +207,13 @@ func assertMetadataRouting(t *testing.T, tc metadataRoutingCase, updated *model.
 		t.Fatalf("response carries %q/%d, want AUTHORITATIVE %q/%d (never the stale threaded %q/%d)",
 			updated.ExternalID, updated.Size, metaRouteAuthExternalID, metaRouteAuthSize, metaRouteThreadedExternalID, metaRouteThreadedSize)
 	}
+	// Dims must ride along from the SAME authoritative row — not the threaded `current` snapshot.
+	// This is the torn-response guard: externalID/size (new) can no longer disagree with dims (old).
+	if updated.ImageWidth == nil || updated.ImageHeight == nil ||
+		*updated.ImageWidth != metaRouteAuthW || *updated.ImageHeight != metaRouteAuthH {
+		t.Fatalf("response dims = %v×%v, want AUTHORITATIVE %d×%d (never the stale threaded %d×%d)",
+			updated.ImageWidth, updated.ImageHeight, metaRouteAuthW, metaRouteAuthH, metaRouteThreadedW, metaRouteThreadedH)
+	}
 }
 
 // TestUpdateMetadataOutboxRouting: 013 conversation media reaches durability via a metadata PATCH
@@ -221,19 +234,29 @@ func TestUpdateMetadataOutboxRouting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// repo.doc supplies the AUTHORITATIVE post-update externalID/size on the plain
-			// (non-outbox) path — the adapter reads them from the UPDATE's RETURNING. repoMime is
-			// the opposite priority class purely as a guard against a stray repo-based priority.
-			repo := &mockRepo{doc: model.Document{ExternalID: metaRouteAuthExternalID, Size: metaRouteAuthSize, MimeType: tc.repoMime, TemporaryLocation: tc.wasTemporary}}
-			// The outbox returns the same authoritative values it would read in-tx (RETURNING).
-			ob := &recordingOutbox{returnExternalID: metaRouteAuthExternalID, returnSize: metaRouteAuthSize, updateMetadataErr: tc.outboxErr}
+			// repo.doc supplies the AUTHORITATIVE post-update row on the plain (non-outbox) path —
+			// the adapter maps it from the UPDATE's full RETURNING (externalID/size + dims). repoMime
+			// is the opposite priority class purely as a guard against a stray repo-based priority.
+			authoritative := model.Document{
+				ExternalID: metaRouteAuthExternalID, Size: metaRouteAuthSize, MimeType: tc.repoMime,
+				TemporaryLocation: tc.wasTemporary,
+				ImageWidth:        &metaRouteAuthW, ImageHeight: &metaRouteAuthH,
+				ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &metaRouteAuthW, ImageHeight: &metaRouteAuthH},
+			}
+			repo := &mockRepo{doc: authoritative}
+			// The outbox returns the same authoritative row it would map in-tx (full RETURNING).
+			ob := &recordingOutbox{returnDoc: authoritative, updateMetadataErr: tc.outboxErr}
 			s := &FileService{Repo: repo, HotMimePrefixes: []string{"application/vnd.openxmlformats-officedocument"}, Logger: nopLogger}
 			if tc.outboxOn {
 				s.Outbox = ob
 			}
-			// The handler loads the current document and threads it in. Its content fields are the
-			// STALE snapshot — divergent from the authoritative post-update values on purpose.
-			current := model.Document{ExternalID: metaRouteThreadedExternalID, Size: metaRouteThreadedSize, MimeType: tc.currentMime, TemporaryLocation: tc.wasTemporary}
+			// The handler loads the current document and threads it in. Its content fields (incl.
+			// dims) are the STALE snapshot — divergent from the authoritative post-update row.
+			current := model.Document{
+				ExternalID: metaRouteThreadedExternalID, Size: metaRouteThreadedSize, MimeType: tc.currentMime,
+				TemporaryLocation: tc.wasTemporary,
+				ImageWidth:        &metaRouteThreadedW, ImageHeight: &metaRouteThreadedH,
+			}
 			meta := model.DocumentMetadataUpdate{TemporaryLocation: tc.updateTemp}
 			before := backupOutboxEnqueued.Value()
 

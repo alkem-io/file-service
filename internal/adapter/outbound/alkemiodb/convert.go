@@ -176,3 +176,12 @@ func refRowToDocument(row queries.GetDocumentByReferenceRow) model.Document {
 func refInBucketRowToDocument(row queries.GetDocumentByReferenceInBucketRow) model.Document {
 	return documentFromRow(documentRow(row))
 }
+
+// updateMetaRowToDocument maps the versioned metadata UPDATE's RETURNING row —
+// the authoritative post-update document (applied SETs + any concurrent
+// content-replace already committed) — to a model.Document, so the whole PATCH
+// response is built from one consistent snapshot rather than a current+meta
+// merge that could tear externalID/size against dims.
+func updateMetaRowToDocument(row queries.UpdateDocumentMetadataRow) model.Document {
+	return documentFromRow(documentRow(row))
+}

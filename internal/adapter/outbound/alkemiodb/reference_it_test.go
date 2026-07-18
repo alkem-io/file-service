@@ -114,7 +114,7 @@ func TestByReference_MoveResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	sender := uuid.New()
-	if _, _, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+	if _, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 		StorageBucketID:   convBucket,
 		TemporaryLocation: false,
 		DisplayName:       doc.DisplayName,

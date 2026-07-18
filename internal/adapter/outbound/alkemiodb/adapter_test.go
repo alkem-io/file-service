@@ -252,20 +252,25 @@ func TestUpdateMetadata(t *testing.T) {
 
 	// Update with current version (optimistic lock). Preserve the row's
 	// authorizationId so this test does not mutate auth/ownership. UpdateMetadata
-	// RETURNs the row's authoritative externalID/size; assert they are non-empty
-	// (a real row always has a content hash).
-	gotExtID, _, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+	// maps the row's authoritative post-update document from the full RETURNING;
+	// assert its content identity is non-empty AND the applied SETs are reflected
+	// (proving the whole row — not just externalID/size — comes back).
+	updated, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 		StorageBucketID: origBucket, TemporaryLocation: !tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
 	}, int(version))
 	if err != nil {
 		t.Fatalf("UpdateMetadata: %v", err)
 	}
-	if gotExtID == "" {
+	if updated.ExternalID == "" {
 		t.Error("UpdateMetadata returned an empty externalID from RETURNING")
+	}
+	if updated.TemporaryLocation != !tempLoc || updated.DisplayName != displayName {
+		t.Errorf("returned doc = {temp:%v, name:%q}, want the applied SETs {temp:%v, name:%q}",
+			updated.TemporaryLocation, updated.DisplayName, !tempLoc, displayName)
 	}
 	defer func() {
 		// Restore with incremented version
-		_, _, _ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		_, _ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
 			StorageBucketID: origBucket, TemporaryLocation: tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
 		}, int(version+1))
 	}()
@@ -282,7 +287,7 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 	a := New(pool)
 
 	newAuth := uuid.New()
-	_, _, err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+	_, err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
 		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &newAuth,
 	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {

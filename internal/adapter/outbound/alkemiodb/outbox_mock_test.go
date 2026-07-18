@@ -208,12 +208,30 @@ func TestMock_UpdateMetadataWithOutbox_Commits(t *testing.T) {
 	defer mock.Close()
 	id := uuid.New()
 
+	now := time.Now()
 	mock.ExpectBegin()
-	// The UPDATE is now :one (RETURNING externalID, size) — a Query, not an Exec. The returned
-	// hash/size (a value a concurrent content-replace could have swapped in) is what the enqueue
-	// must use, proving the outbox never carries a stale handler-threaded breadcrumb.
+	// The UPDATE is now :one RETURNING the FULL row — a Query, not an Exec. The returned hash/size
+	// (values a concurrent content-replace could have swapped in) drive BOTH the enqueue and the
+	// returned document, proving the outbox never carries a stale handler-threaded breadcrumb and the
+	// PATCH response is built from the same authoritative row.
 	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(9)...).
-		WillReturnRows(mock.NewRows([]string{"externalID", "size"}).AddRow("hashDur", int32(99)))
+		WillReturnRows(mock.NewRows(columns()).AddRow(
+			uuidToPgx(id),
+			"hashDur",
+			"application/x-yjs",
+			int32(99),
+			"wb.yjs",
+			pgtype.UUID{Valid: false},
+			false,
+			pgtype.UUID{Valid: false},
+			pgtype.UUID{Valid: false},
+			pgtype.UUID{Valid: false},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			int32(2),
+			[]byte("{}"),
+			pgtype.Text{Valid: false},
+		))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashDur", int16(1),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(99)).
@@ -221,12 +239,12 @@ func TestMock_UpdateMetadataWithOutbox_Commits(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
 
-	extID, size, err := New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, 1)
+	doc, err := New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, 1)
 	if err != nil {
 		t.Fatalf("UpdateMetadataWithOutbox: %v", err)
 	}
-	if extID != "hashDur" || size != 99 {
-		t.Fatalf("returned %q/%d, want the RETURNING authoritative externalID/size hashDur/99", extID, size)
+	if doc.ExternalID != "hashDur" || doc.Size != 99 {
+		t.Fatalf("returned %q/%d, want the RETURNING authoritative externalID/size hashDur/99", doc.ExternalID, doc.Size)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
@@ -245,10 +263,10 @@ func TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(9)...).
-		WillReturnRows(mock.NewRows([]string{"externalID", "size"}))
+		WillReturnRows(mock.NewRows(columns()))
 	mock.ExpectRollback()
 
-	_, _, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("want ErrDocumentNotFound, got %v", err)
 	}
@@ -272,7 +290,7 @@ func TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack(t *testing.T) {
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
-	_, _, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
 	}

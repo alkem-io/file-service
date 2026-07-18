@@ -102,11 +102,13 @@ func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expe
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
+func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
 	m.updateMetadataCalls++
-	// Mirror the adapter's RETURNING: the row's authoritative post-update
-	// externalID/size (unchanged by a metadata PATCH → the current doc's).
-	return m.doc.ExternalID, m.doc.Size, m.updateErr
+	// Mirror the adapter's full-row RETURNING: the AUTHORITATIVE post-update row
+	// (applied SETs + any concurrent content-replace already committed). Tests
+	// seed m.doc with that authoritative row, so the service builds the whole
+	// response from one consistent snapshot.
+	return m.doc, m.updateErr
 }
 func (m *mockRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	if m.findErr != nil {
@@ -775,8 +777,8 @@ func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
-	return "", 0, nil
+func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
+	return model.Document{}, nil
 }
 func (m *mockRepoRace) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
@@ -1124,8 +1126,8 @@ func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (string, int, error) {
-	return "", 0, nil
+func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
+	return model.Document{}, nil
 }
 func (m *copyRaceRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
@@ -1271,6 +1273,76 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+}
+
+// TestUpdateDocumentMetadata_ConcurrentReplace_ResponseIsConsistent is the
+// df9b411 regression guard. A concurrent content-replace commits first, swapping
+// externalID (h1→h2), size (100→200), and image dims (100×100→200×200) WITHOUT
+// bumping version. The versioned metadata UPDATE then RETURNs the FULL post-update
+// row — which reflects that new content — and the service builds the ENTIRE
+// response from THAT one authoritative snapshot. Every content field must come
+// from the returned row (NEW), never the stale `current` snapshot the handler
+// threaded in (OLD): the old `docAfterMetadataUpdate` merge tore externalID/size
+// (new) against dims/content_metadata (copied from `current`, old).
+func TestUpdateDocumentMetadata_ConcurrentReplace_ResponseIsConsistent(t *testing.T) {
+	newW, newH := 200, 200
+	// The authoritative post-update row the versioned UPDATE returns: NEW content
+	// (h2, 200 bytes, 200×200) plus the applied metadata SETs. This is exactly
+	// what documentFromRow produces from the full RETURNING.
+	authoritative := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "h2-new-blob",
+		MimeType:        "image/png",
+		Size:            200,
+		DisplayName:     "renamed.png",
+		ImageWidth:      &newW,
+		ImageHeight:     &newH,
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &newW, ImageHeight: &newH},
+		Version:         6,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{doc: authoritative}}
+
+	// The handler-threaded `current` snapshot is STALE: OLD content (h1, 100 bytes,
+	// 100×100). If any response field is sourced from it, the assertions below flip.
+	oldW, oldH := 100, 100
+	current := model.Document{
+		ID:              authoritative.ID,
+		ExternalID:      "h1-old-blob",
+		MimeType:        "image/png",
+		Size:            100,
+		DisplayName:     "legacy.png",
+		ImageWidth:      &oldW,
+		ImageHeight:     &oldH,
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &oldW, ImageHeight: &oldH},
+		Version:         5,
+	}
+
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), authoritative.ID,
+		model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "renamed.png"}, 5, current)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("expected a non-nil updated document")
+	}
+	if updated.ExternalID != "h2-new-blob" || updated.Size != 200 {
+		t.Fatalf("content identity = %q/%d, want the authoritative post-update h2-new-blob/200 (never the stale h1-old-blob/100)",
+			updated.ExternalID, updated.Size)
+	}
+	if updated.ImageWidth == nil || updated.ImageHeight == nil || *updated.ImageWidth != 200 || *updated.ImageHeight != 200 {
+		t.Fatalf("dims = %v×%v, want the authoritative 200×200 (never the stale 100×100 from `current`) — the torn-response regression",
+			derefInt(updated.ImageWidth), derefInt(updated.ImageHeight))
+	}
+	if !updated.ContentMetadata.Populated {
+		t.Fatal("content_metadata must come from the authoritative row (Populated=true), so BackfillIfNeeded routes on fresh state")
+	}
+}
+
+func derefInt(p *int) any {
+	if p == nil {
+		return "nil"
+	}
+	return *p
 }
 
 func TestServeFile_AuthError(t *testing.T) {

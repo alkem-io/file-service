@@ -73,16 +73,17 @@ WHERE id = $1;
 -- externalReference. mimeType, externalID, size are not mutable here — they
 -- change only via UpdateDocumentFile.
 --
--- RETURNING "externalID", size yields the AUTHORITATIVE post-update content
--- identity read from the row while it is UPDATE-locked in this transaction.
--- The transactional backup-outbox producer enqueues that value, not a
--- handler-threaded snapshot, so a concurrent content-replace (which swaps
--- externalID/size WITHOUT bumping version) can't leave the outbox pointing at
--- a stale hash — it either committed before this UPDATE (RETURNING sees the
--- new hash) or blocks on the row lock until this tx commits (then replaces on
--- a now-durable row and enqueues its own outbox). 0 rows (version mismatch /
--- missing row) → no row returned (pgx.ErrNoRows), which the adapter maps to
--- model.ErrDocumentNotFound.
+-- RETURNING the FULL row (mirrors GetDocumentByID's column list) yields the
+-- AUTHORITATIVE post-update document read while the row is UPDATE-locked in this
+-- transaction — the applied metadata SETs AND any concurrent content-replace
+-- already committed. The service maps it ONCE (documentFromRow) and builds the
+-- ENTIRE PATCH response from it, so externalID/size can never disagree with
+-- content_metadata/dims (a concurrent replace swaps externalID/size + dims
+-- WITHOUT bumping version; sourcing every field from this one locked row keeps
+-- them consistent). The transactional backup-outbox producer enqueues the same
+-- row's externalID/size, never a handler-threaded snapshot. 0 rows (version
+-- mismatch / missing row) → no row returned (pgx.ErrNoRows), which the adapter
+-- maps to model.ErrDocumentNotFound.
 UPDATE file
 SET "storageBucketId"    = $2,
     "temporaryLocation"  = $3,
@@ -93,7 +94,9 @@ SET "storageBucketId"    = $2,
     "updatedDate"        = $8,
     version              = version + 1
 WHERE id = $1 AND version = $9
-RETURNING "externalID", size;
+RETURNING id, "externalID", "mimeType", size, "displayName", "createdBy",
+          "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+          "createdDate", "updatedDate", version, content_metadata, "externalReference";
 
 -- name: BackfillContentMetadata :execrows
 -- Compare-and-set: only writes when content_metadata is still empty AND
