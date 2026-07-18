@@ -106,20 +106,13 @@ func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta 
 	return err
 }
 
-// writeReplace persists replaced content. When the producer is on it ALWAYS routes through the
-// transactional outbox path, which decides the enqueue from the row's AUTHORITATIVE in-transaction
-// "temporaryLocation" (the UPDATE's RETURNING value), NOT the caller's pre-loaded doc snapshot: a
-// replace that loaded the doc as temporary can race a concurrent temp→durable PATCH that commits
-// first, and branching on the stale snapshot would swap a now-durable row's content to a new hash
-// with no outbox row (the stranded-blob race). The outbox row is enqueued in the SAME commit only
-// when the locked row is durable; the returned bool reports whether that happened, so the metric
-// counts exactly one enqueue per durable replace. Producer off → the original Repo.UpdateFile,
-// unchanged. Priority uses the post-replace mime (mimeType), which the UPDATE itself sets, so it is
-// authoritative for this replace. Same error semantics either way.
-func (s *FileService) writeReplace(ctx context.Context, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
-	if s.Outbox != nil {
-		enqueued, err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
-		if err == nil && enqueued {
+// writeReplace persists replaced content — via the transactional outbox path (enqueue the new
+// content hash in the same commit) when the producer is on and the document is non-temporary,
+// else the original Repo.UpdateFile. Same error semantics either way.
+func (s *FileService) writeReplace(ctx context.Context, doc model.Document, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
+	if s.Outbox != nil && !doc.TemporaryLocation {
+		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
 		return err
@@ -532,7 +525,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 		Measured:    su.Measured,
 	}
 	contentMetadata := processResultToContentMetadata(result, su.MimeType)
-	err = s.writeReplace(ctx, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
+	err = s.writeReplace(ctx, doc, documentID, stored.ExternalID, su.MimeType, stored.Size, contentMetadata)
 	if err != nil {
 		// Never delete the newly-stored blob on failure: another concurrent
 		// request in any bucket may have already linked this externalID

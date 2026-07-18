@@ -81,50 +81,31 @@ func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, cont
 	return doc.ID, nil
 }
 
-// UpdateFileWithOutbox rewrites a document's content fields AND — when the row is DURABLE at
-// replace-commit time — enqueues a backup-outbox row for the NEW externalID in ONE transaction
-// (a durable replace = a new content hash = a new object to back up). model.ErrDuplicateKey /
-// model.ErrDocumentNotFound are surfaced exactly as UpdateFile does.
-//
-// The enqueue decision is made from the row's AUTHORITATIVE in-transaction "temporaryLocation" —
-// the UpdateDocumentFile RETURNING value read while the row is UPDATE-locked here — NOT the
-// caller's pre-loaded doc snapshot. A content-replace that loaded the doc as temporary can race a
-// concurrent temp→durable PATCH that commits FIRST; the snapshot would then be stale and the
-// replace would swap the durable row's content to a new hash with no outbox row (the stranded-blob
-// race). Deciding in-tx closes it both ways: replace-before-flip (temporary → skip the enqueue, the
-// later flip's own UpdateMetadataWithOutbox enqueues the then-current hash) and flip-before-replace
-// (durable → enqueue the new hash). The returned bool reports whether a row was enqueued (so the
-// service counts the metric only on a real enqueue). The outbox breadcrumb: createdBy is null
-// (unknown on a replace) and createdDate is enqueue time (now) — the RPO-lag semantics the
-// consumer's backlog gauge expects.
-func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) (bool, error) {
+// UpdateFileWithOutbox rewrites a document's content fields AND enqueues a backup-outbox row for
+// the NEW externalID in ONE transaction (a replace = a new content hash = a new object to back
+// up). model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateFile does.
+// The outbox breadcrumb: createdBy is null (unknown on a replace) and createdDate is enqueue time
+// (now) — the RPO-lag semantics the consumer's backlog gauge expects.
+func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
-		return false, err
+		return err
 	}
-	var enqueued bool
-	err = a.withOutboxTx(ctx,
+	return a.withOutboxTx(ctx,
 		func(q *queries.Queries) error {
-			temporaryLocation, err := q.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+			rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
 			if err != nil {
 				if isUniqueViolation(err) {
 					return model.ErrDuplicateKey
 				}
-				if errors.Is(err, pgx.ErrNoRows) {
-					return model.ErrDocumentNotFound
-				}
 				return err
 			}
-			// Enqueue only when the row is durable at replace-commit time. A still-temporary row's
-			// content isn't backed up yet; its later temporary→durable flip enqueues the then-current
-			// hash via UpdateMetadataWithOutbox.
-			enqueued = !temporaryLocation
+			if rows == 0 {
+				return model.ErrDocumentNotFound
+			}
 			return nil
 		},
 		func(q *queries.Queries) error {
-			if !enqueued {
-				return nil
-			}
 			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
 				FileId:      uuidToPgx(id),
 				ExternalID:  externalID,
@@ -135,10 +116,6 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 			})
 		},
 	)
-	if err != nil {
-		return false, err
-	}
-	return enqueued, nil
 }
 
 // UpdateMetadataWithOutbox applies the versioned PATCH metadata update AND enqueues a backup-outbox

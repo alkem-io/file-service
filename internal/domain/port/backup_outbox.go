@@ -20,14 +20,9 @@ type BackupOutboxRepo interface {
 	// Returns model.ErrDuplicateKey on the dedup race (no outbox row written), exactly as
 	// DocumentRepo.Create does, so the service's dedup path is unchanged.
 	CreateWithOutbox(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata, priority int16) (uuid.UUID, error)
-	// UpdateFileWithOutbox replaces a document's content and, when the row is DURABLE at
-	// replace-commit time, enqueues a backup hint for the new content hash atomically. The
-	// durability decision is read in-tx from the UPDATE's RETURNING "temporaryLocation" (the
-	// row while UPDATE-locked), NOT a caller snapshot: a replace that loaded the doc as temporary
-	// can race a concurrent temp→durable PATCH that commits first, so the snapshot could be stale
-	// and strand the now-durable content with no outbox row. Returns whether a backup row was
-	// enqueued (true only on a durable replace). Same error semantics as DocumentRepo.UpdateFile.
-	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) (enqueued bool, err error)
+	// UpdateFileWithOutbox replaces a document's content and enqueues a backup hint for the new
+	// content hash atomically. Same error semantics as DocumentRepo.UpdateFile.
+	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error
 	// UpdateMetadataWithOutbox applies the versioned metadata update AND enqueues a backup-outbox
 	// row for the now-durable document atomically (same commit), then NOTIFYs. Used when a PATCH
 	// transitions a document temporary→durable (013 conversation media reaches durability via a

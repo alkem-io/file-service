@@ -176,19 +176,15 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 	if err != nil {
 		return err
 	}
-	// The UPDATE ... RETURNING "temporaryLocation" is :one; a missing row yields
-	// pgx.ErrNoRows. The non-outbox path ignores the returned flag (only the
-	// transactional producer branches on it) — behaviour is identical to the prior
-	// rows==0 check: a missing row still surfaces as model.ErrDocumentNotFound.
-	_, err = a.queries.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.ErrDocumentNotFound
-		}
 		return err
+	}
+	if rows == 0 {
+		return model.ErrDocumentNotFound
 	}
 	return nil
 }

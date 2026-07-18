@@ -119,11 +119,9 @@ func TestMock_CreateWithOutbox_NotifyFailureNonFatal(t *testing.T) {
 	}
 }
 
-// TestMock_UpdateFileWithOutbox_DurableEnqueues: a content replace on a DURABLE row (the UPDATE's
-// RETURNING "temporaryLocation" is false) updates the row and enqueues the new hash in one
-// transaction, then NOTIFYs. The UPDATE is now :one (a Query), and the in-tx RETURNING flag — not
-// the caller's pre-loaded snapshot — is what gates the enqueue. Reports enqueued=true.
-func TestMock_UpdateFileWithOutbox_DurableEnqueues(t *testing.T) {
+// TestMock_UpdateFileWithOutbox_Commits: a content replace updates the row and enqueues the new
+// hash in one transaction, then NOTIFYs.
+func TestMock_UpdateFileWithOutbox_Commits(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -132,8 +130,7 @@ func TestMock_UpdateFileWithOutbox_DurableEnqueues(t *testing.T) {
 	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(6)...).
-		WillReturnRows(mock.NewRows([]string{"temporaryLocation"}).AddRow(false))
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashNew", int16(0),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(20)).
@@ -141,53 +138,17 @@ func TestMock_UpdateFileWithOutbox_DurableEnqueues(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
 
-	enqueued, err := New(mock).UpdateFileWithOutbox(context.Background(), id, "hashNew", "image/jpeg", 20, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "hashNew", "image/jpeg", 20, model.ContentMetadata{}, 0)
 	if err != nil {
 		t.Fatalf("UpdateFileWithOutbox: %v", err)
-	}
-	if !enqueued {
-		t.Fatal("a durable replace must report enqueued=true")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
 	}
 }
 
-// TestMock_UpdateFileWithOutbox_StillTemporary_NoEnqueue: a content replace whose in-tx RETURNING
-// "temporaryLocation" is true (still staging) commits the content UPDATE but enqueues NO outbox row
-// — a still-temporary doc's content isn't backed up yet; its later temporary→durable flip enqueues
-// the then-current hash. Reports enqueued=false. This is the guard for a replace that raced BEHIND
-// a concurrent temp→durable flip: the decision comes from the locked row, so a stale "was temporary"
-// snapshot can no longer strand the (still-temporary) content or double-enqueue it.
-func TestMock_UpdateFileWithOutbox_StillTemporary_NoEnqueue(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mock.Close()
-	id := uuid.New()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(6)...).
-		WillReturnRows(mock.NewRows([]string{"temporaryLocation"}).AddRow(true))
-	// No INSERT INTO file_backup_outbox — the enqueue closure is a no-op on a still-temporary row.
-	mock.ExpectCommit()
-	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
-
-	enqueued, err := New(mock).UpdateFileWithOutbox(context.Background(), id, "hashNew", "image/jpeg", 20, model.ContentMetadata{}, 0)
-	if err != nil {
-		t.Fatalf("UpdateFileWithOutbox: %v", err)
-	}
-	if enqueued {
-		t.Fatal("a still-temporary replace must report enqueued=false (no backup row)")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
-	}
-}
-
-// TestMock_UpdateFileWithOutbox_NotFoundRollsBack: 0 rows updated (RETURNING yields no row →
-// pgx.ErrNoRows) → ErrDocumentNotFound, the tx rolls back and no outbox row is enqueued.
+// TestMock_UpdateFileWithOutbox_NotFoundRollsBack: 0 rows updated → ErrDocumentNotFound, the tx
+// rolls back and no outbox row is enqueued.
 func TestMock_UpdateFileWithOutbox_NotFoundRollsBack(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
@@ -196,11 +157,10 @@ func TestMock_UpdateFileWithOutbox_NotFoundRollsBack(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(6)...).
-		WillReturnRows(mock.NewRows([]string{"temporaryLocation"}))
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectRollback()
 
-	_, err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "text/plain", 1, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "text/plain", 1, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("want ErrDocumentNotFound, got %v", err)
 	}
@@ -219,11 +179,11 @@ func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(6)...).
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
-	_, err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
 	}
