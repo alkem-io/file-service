@@ -36,10 +36,25 @@ type mockDocRepo struct {
 	lastUpdateTemporary   bool
 	lastUpdateDisplayName string
 	lastUpdateVersion     int
+	lastUpdateAuthID      *uuid.UUID
+	lastUpdateCreatedBy   *uuid.UUID
+	lastUpdateExternalRef *string
+
+	// by-reference lookups (013): refDoc served by both Get*ByReference;
+	// nil → ErrDocumentNotFound. refErr overrides. lastRefBucket records the
+	// bucket passed to the scoped form (nil ⇒ global form was used).
+	refDoc        *model.Document
+	refErr        error
+	lastRefValue  string
+	lastRefBucket *uuid.UUID
 
 	// Captured args from Create / UpdateFile content_metadata params (US1+).
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
+
+	// Captured full doc from the most recent Create (013: asserts the
+	// persisted externalReference is normalized to NULL on empty input).
+	lastCreateDoc model.Document
 
 	// Lazy-backfill capture (US1).
 	backfillCalls          int
@@ -64,6 +79,7 @@ func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ u
 }
 func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.lastCreateContentMetadata = contentMetadata
+	m.lastCreateDoc = doc
 	return doc.ID, m.createErr
 }
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
@@ -77,23 +93,59 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) (model.Document, error) {
 	m.updateMetadataCalls++
-	m.lastUpdateBucketID = bucketID
-	m.lastUpdateTemporary = temporary
-	m.lastUpdateDisplayName = displayName
+	m.lastUpdateBucketID = meta.StorageBucketID
+	m.lastUpdateTemporary = meta.TemporaryLocation
+	m.lastUpdateDisplayName = meta.DisplayName
 	m.lastUpdateVersion = version
+	m.lastUpdateAuthID = meta.AuthorizationID
+	m.lastUpdateCreatedBy = meta.CreatedBy
+	m.lastUpdateExternalRef = meta.ExternalReference
 	if m.updateErr != nil {
-		return m.updateErr
+		return model.Document{}, m.updateErr
 	}
-	// Mirror real adapter behavior so the subsequent service GetByID
-	// reflects the update — otherwise tests can't tell whether the
-	// handler propagated the new values or returned stale ones.
-	m.doc.StorageBucketID = bucketID
-	m.doc.TemporaryLocation = temporary
-	m.doc.DisplayName = displayName
-	m.doc.Version = version + 1
-	return nil
+	// Mirror the adapter's full-row RETURNING: the post-update row reflects the
+	// applied metadata SETs; content fields (externalID/size/mime/dims/
+	// content_metadata) are untouched by a metadata PATCH, so they carry over
+	// from the current row. The service builds the whole PATCH response from this
+	// one authoritative snapshot — no post-update re-read.
+	updated := m.doc
+	updated.StorageBucketID = meta.StorageBucketID
+	updated.TemporaryLocation = meta.TemporaryLocation
+	updated.DisplayName = meta.DisplayName
+	updated.CreatedBy = meta.CreatedBy
+	updated.ExternalReference = meta.ExternalReference
+	if meta.AuthorizationID != nil {
+		updated.AuthorizationID = *meta.AuthorizationID
+	} else {
+		updated.AuthorizationID = uuid.Nil
+	}
+	updated.Version = version + 1
+	return updated, nil
+}
+func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
+	m.lastRefValue = reference
+	m.lastRefBucket = nil
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, bucketID uuid.UUID) (model.Document, error) {
+	m.lastRefValue = reference
+	b := bucketID
+	m.lastRefBucket = &b
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return m.deleteResult, m.deleteErr
@@ -257,6 +309,87 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// Stored-XSS hardening (deny-list + nosniff; see activeContentMIME): the public
+// serve endpoint always sets X-Content-Type-Options: nosniff and force-downloads
+// ONLY the enumerable set of browser-active/script-capable content-types
+// (html/xhtml/svg, the XML family, syndication/RDF/MathML, MHTML/rfc822).
+// Everything else — inert media, documents, unknown types — serves inline for
+// in-browser preview parity with the TS file-service. This is the settled
+// design; the inline cases below include the delta-2 regression media types.
+func TestPublicHandler_ServeDisposition(t *testing.T) {
+	cases := []struct {
+		mime            string
+		wantDisposition string
+	}{
+		// Inert media / documents → inline (safe under nosniff, TS-parity preview).
+		{"image/png", "inline"},
+		{"image/jpeg", "inline"},
+		{"image/gif", "inline"},
+		{"image/webp", "inline"},
+		{"image/avif", "inline"},
+		{"application/pdf", "inline"},
+		{"text/plain", "inline"},
+		// delta-2 regression cases: an allow-list wrongly force-downloaded these.
+		{"image/bmp", "inline"},
+		{"image/tiff", "inline"},
+		{"image/heic", "inline"},
+		{"video/mp4", "inline"},
+		{"audio/mpeg", "inline"},
+		{"application/json", "inline"},
+		{"text/csv", "inline"},
+		{"application/octet-stream", "inline"},   // inert binary; nosniff prevents active render
+		{"application/x-unknown-type", "inline"}, // unknown/inert → inline is safe under nosniff
+		{"image/png; qs=0.5", "inline"},          // params stripped before match
+		{"IMAGE/PNG", "inline"},                  // normalization: case-insensitive match
+		// Browser-active / script-capable content-types → attachment.
+		{"text/html", "attachment"},
+		{"application/xhtml+xml", "attachment"},
+		{"image/svg+xml", "attachment"},
+		{"application/xml", "attachment"},
+		{"text/xml", "attachment"},
+		{"application/rss+xml", "attachment"},
+		{"application/atom+xml", "attachment"},
+		{"application/xslt+xml", "attachment"}, // XSLT stylesheet can execute generated script
+		{"text/xsl", "attachment"},             // legacy XSLT alias
+		{"message/rfc822", "attachment"},
+		{"text/html; charset=utf-8", "attachment"}, // params stripped before match
+		{"IMAGE/SVG+XML", "attachment"},            // normalization: case-insensitive match
+	}
+	for _, tc := range cases {
+		t.Run(tc.mime, func(t *testing.T) {
+			docID := uuid.New()
+			h := &PublicHandler{
+				Repo: &mockDocRepo{doc: model.Document{
+					ID:              docID,
+					ExternalID:      "abc123",
+					MimeType:        tc.mime,
+					AuthorizationID: uuid.New(),
+				}},
+				Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
+				Storage: &mockStorage{data: []byte("file-content")},
+				MaxAge:  86400,
+				Logger:  zap.NewNop(),
+			}
+
+			r := chi.NewRouter()
+			r.Get("/rest/storage/file/{id}", h.ServeDocument)
+			req := httptest.NewRequest(http.MethodGet, "/rest/storage/file/"+docID.String(), nil)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+			if got := rr.Header().Get("Content-Disposition"); got != tc.wantDisposition {
+				t.Errorf("Content-Disposition = %q, want %q for %s", got, tc.wantDisposition, tc.mime)
+			}
+		})
 	}
 }
 

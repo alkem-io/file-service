@@ -86,11 +86,43 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
+// GetByReference resolves the opaque externalReference across all buckets.
+// pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReference(ctx context.Context, reference string) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReference(ctx, stringToPgxText(&reference))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refRowToDocument(row), nil
+}
+
+// GetByReferenceInBucket resolves the opaque externalReference within one
+// bucket. pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, storageBucketID uuid.UUID) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReferenceInBucket(ctx, queries.GetDocumentByReferenceInBucketParams{
+		ExternalReference: stringToPgxText(&reference),
+		StorageBucketId:   uuidToPgx(storageBucketID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refInBucketRowToDocument(row), nil
+}
+
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
-// rules). A unique violation — another row already holds this content in the
-// bucket — surfaces as model.ErrDuplicateKey so the service can fall back to
-// its dedup path.
+// rules). Any DB unique violation surfaces as model.ErrDuplicateKey so the
+// service can run its best-effort race re-query. In prod the only such
+// constraint is the partial UNIQUE(externalReference, storageBucketId); there
+// is NO externalID content-unique index, so content-dedup is app-level and
+// best-effort — the service's by-content re-query branch is effectively inert
+// in prod and would only fire if such a content constraint existed.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -124,6 +156,7 @@ func createDocumentParams(doc model.Document, raw []byte) queries.CreateDocument
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
 		ContentMetadata:   raw,
+		ExternalReference: stringToPgxText(doc.ExternalReference),
 	}
 }
 
@@ -169,35 +202,48 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 	}
 }
 
-// UpdateMetadata mutates bucket/temporaryLocation/displayName under
-// optimistic locking (WHERE version = $given, SET version = version + 1).
-// 0 rows affected — row missing or version stale — returns
-// model.ErrDocumentNotFound; the service maps that to its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
-	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
+// UpdateMetadata mutates bucket/temporaryLocation/displayName under optimistic
+// locking (WHERE version = $given, SET version = version + 1) and returns the
+// AUTHORITATIVE post-update document mapped from the locked row's full RETURNING
+// — the applied SETs AND any concurrent content-replace already committed — so
+// the service can build the ENTIRE PATCH response from one consistent snapshot
+// (no reload, no torn externalID/size-vs-dims). No matching row — row missing or
+// version stale — surfaces as pgx.ErrNoRows, mapped to model.ErrDocumentNotFound;
+// the service maps that to its conflict error.
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) (model.Document, error) {
+	row, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
+	if err != nil {
+		// A PATCH can collide on a uniqueness constraint: the partial
+		// UNIQUE("externalReference", "storageBucketId") when a move re-homes a
+		// reference into a bucket that already holds it, or UNIQUE("authorizationId")
+		// on re-attribution. (It never touches externalID, so it can't collide on
+		// the partial content index.) Map to ErrDuplicateKey so the service can
+		// surface a 409 rather than a 500.
+		if isUniqueViolation(err) {
+			return model.Document{}, model.ErrDuplicateKey
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return updateMetaRowToDocument(row), nil
+}
+
+// updateMetadataParams maps the PATCH "move + re-attribute" fields to the sqlc update params — the
+// ONE owner, shared by UpdateMetadata and the transactional UpdateMetadataWithOutbox.
+func updateMetadataParams(id uuid.UUID, meta model.DocumentMetadataUpdate, version int) queries.UpdateDocumentMetadataParams {
+	return queries.UpdateDocumentMetadataParams{
 		ID:                uuidToPgx(id),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: temporaryLocation,
-		DisplayName:       displayName,
+		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
+		TemporaryLocation: meta.TemporaryLocation,
+		DisplayName:       meta.DisplayName,
+		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
+		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
+		ExternalReference: stringToPgxText(meta.ExternalReference),
 		UpdatedDate:       timeToPgxNow(),
 		Version:           safeInt32(version),
-	})
-	if err != nil {
-		// Defensive: keeps PATCH consistent with Create/UpdateFile if a
-		// uniqueness constraint is added later (e.g. (externalID,
-		// storageBucketId)). No such constraint exists in this repo's
-		// db/schema/document.sql today, but the production schema can
-		// diverge, and a 409 beats a 500 if it fires.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-			return model.ErrDuplicateKey
-		}
-		return err
 	}
-	if rows == 0 {
-		return model.ErrDocumentNotFound
-	}
-	return nil
 }
 
 // BackfillContentMetadata persists computed content_metadata on a row without

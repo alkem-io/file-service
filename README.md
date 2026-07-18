@@ -19,14 +19,27 @@ as a drop-in replacement with additional write/delete capabilities.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/rest/storage/document/:id` | Oathkeeper JWT | Serve file (public) |
-| POST | `/internal/document` | none (cluster) | Create document |
-| GET | `/internal/document/:id/meta` | none | Document metadata |
-| GET | `/internal/document/:id/content` | none | Read file content |
-| PUT | `/internal/document/:id/content` | none | Replace file content |
-| PATCH | `/internal/document/:id` | none | Update document location |
-| DELETE | `/internal/document/:id` | none | Delete document |
+| GET | `/rest/storage/file/:id` | Oathkeeper JWT | Serve file (public; `/rest/storage/document/:id` back-compat alias) |
+| POST | `/internal/file` | none (cluster) | Create document (multipart) |
+| POST | `/internal/file/copy` | none | Copy document into another bucket (zero-copy, shared blob) |
+| GET | `/internal/file/by-reference?ref=&bucketId=` | none | Resolve a document by opaque `externalReference` — global (no `bucketId`) or bucket-scoped |
+| GET | `/internal/file/:id/meta` | none | Document metadata |
+| GET | `/internal/file/:id/content` | none | Read file content |
+| PUT | `/internal/file/:id/content` | none | Replace file content |
+| PATCH | `/internal/file/:id` | none | Move + re-attribute (bucket, auth, createdBy, `externalReference`) |
+| DELETE | `/internal/file/:id` | none | Delete document |
 | GET | `/health` | none | Health check |
+
+### `externalReference` and verbatim store (013)
+
+- **`externalReference`** — a nullable, indexed, **opaque** string on each
+  document (the Synapse `media_id` for Matrix media). file-service never parses
+  it. Accepted on **create** (multipart field), **copy**, and **PATCH**; looked
+  up via `GET /internal/file/by-reference`. Distinct from `externalID` (the
+  content hash). `UNIQUE(externalReference, storageBucketId) WHERE NOT NULL`.
+- **`skipImageProcessing`** — a multipart create flag; when `true` the upload is
+  stored **byte-identical** (no HEIC/WebP transcode, EXIF rotate, or dimension
+  measure) so a provider's read-back stays exact. Must precede the file part.
 
 ## Prerequisites
 
@@ -67,9 +80,22 @@ make build
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `4003` | HTTP listen port |
-| `LOCAL_STORAGE_PATH` | `../server/.storage` | File storage root |
-| `STORAGE_TYPE` | `local` | Storage backend |
+| `LOCAL_STORAGE_PATH` | `../server/.storage` | File storage root (when `STORAGE_TYPE=local`) |
+| `STORAGE_TYPE` | `local` | Storage backend: `local` or `s3` |
+| `MAX_UPLOAD_SIZE` | `33554432` | Hard per-upload byte cap (≤ 1 GiB; set `52428800` = 50 MiB for Matrix media) |
 | `DOCUMENT_MAX_AGE` | `86400` | Cache-Control max-age (seconds) |
+
+### S3 backend (only when `STORAGE_TYPE=s3`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `S3_ENDPOINT` | (required) | S3 host[:port], no scheme (e.g. `s3.fr-par.scw.cloud`) |
+| `S3_ACCESS_KEY` | (required) | Access key |
+| `S3_SECRET_KEY` | (required) | Secret key |
+| `S3_BUCKET` | (required) | Bucket name (must already exist) |
+| `S3_REGION` | `` | Region |
+| `S3_USE_SSL` | `true` | Use HTTPS |
+| `S3_STAGE_DIR` | os temp dir | Local hash-while-upload staging dir |
 | `AUTH_BREAKER_FAILURE_THRESHOLD` | `3` | Circuit breaker threshold (h2c) |
 | `AUTH_BREAKER_TIMEOUT_SECONDS` | `15` | Circuit breaker open duration |
 | `AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS` | `2` | Half-open test requests |

@@ -16,7 +16,7 @@ import (
 func columns() []string {
 	return []string{"id", "externalID", "mimeType", "size", "displayName", "createdBy",
 		"temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-		"createdDate", "updatedDate", "version", "content_metadata"}
+		"createdDate", "updatedDate", "version", "content_metadata", "externalReference"}
 }
 
 func TestMock_GetByID_Found(t *testing.T) {
@@ -48,6 +48,7 @@ func TestMock_GetByID_Found(t *testing.T) {
 			pgtype.Timestamptz{Time: now, Valid: true},
 			int32(1),
 			[]byte("{}"),
+			pgtype.Text{Valid: false},
 		))
 
 	a := New(mock)
@@ -114,6 +115,7 @@ func TestMock_Create_Success(t *testing.T) {
 			pgxmock.AnyArg(), // createdDate
 			pgxmock.AnyArg(), // updatedDate
 			[]byte(`{}`),     // content_metadata: empty Populated=false → "{}"
+			pgxmock.AnyArg(), // externalReference
 		).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 
@@ -257,18 +259,57 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	defer mock.Close()
 
 	// Param order in UpdateDocumentMetadata: $1=id, $2=storageBucketId,
-	// $3=temporaryLocation, $4=displayName, $5=updatedDate, $6=version.
-	// Pin everything except updatedDate (timestamp computed in adapter).
+	// $3=temporaryLocation, $4=displayName, $5=authorizationId, $6=createdBy,
+	// $7=externalReference, $8=updatedDate, $9=version. Pin everything except
+	// updatedDate (timestamp computed in adapter).
 	docID := uuid.New()
 	bucketID := uuid.New()
-	mock.ExpectExec("UPDATE file SET").
-		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", pgxmock.AnyArg(), int32(1)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	authID := uuid.New()
+	ref := "media-id-xyz"
+	now := time.Now()
+	// The versioned UPDATE now RETURNs the row's authoritative FULL row (:one) — assert UpdateMetadata
+	// maps it to a consistent document: content identity (externalID/size) AND image dims (parsed from
+	// content_metadata) AND the applied SETs all come from that one locked row. A concurrent replace
+	// could have swapped externalID/size + dims together, so they must ride back together.
+	mock.ExpectQuery("UPDATE file SET").
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", uuidToPgx(authID),
+			uuidToPgxNullable(nil), stringToPgxText(&ref), pgxmock.AnyArg(), int32(1)).
+		WillReturnRows(mock.NewRows(columns()).AddRow(
+			uuidToPgx(docID),
+			"hashAuthoritative",
+			"image/png",
+			int32(4242),
+			"name.txt",
+			pgtype.UUID{Valid: false},
+			false,
+			uuidToPgx(bucketID),
+			uuidToPgx(authID),
+			pgtype.UUID{Valid: false},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			int32(2),
+			[]byte(`{"imageWidth":200,"imageHeight":200}`),
+			stringToPgxText(&ref),
+		))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), docID, bucketID, false, "name.txt", 1)
+	doc, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		StorageBucketID:   bucketID,
+		DisplayName:       "name.txt",
+		AuthorizationID:   &authID,
+		ExternalReference: &ref,
+	}, 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if doc.ExternalID != "hashAuthoritative" || doc.Size != 4242 {
+		t.Fatalf("UpdateMetadata returned %q/%d, want the RETURNING externalID/size hashAuthoritative/4242", doc.ExternalID, doc.Size)
+	}
+	if doc.DisplayName != "name.txt" {
+		t.Fatalf("returned displayName = %q, want the applied SET name.txt", doc.DisplayName)
+	}
+	if doc.ImageWidth == nil || doc.ImageHeight == nil || *doc.ImageWidth != 200 || *doc.ImageHeight != 200 {
+		t.Fatalf("returned dims = %v×%v, want 200×200 from the RETURNING content_metadata (consistent with the returned externalID/size)", doc.ImageWidth, doc.ImageHeight)
 	}
 }
 
@@ -279,12 +320,17 @@ func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	// 0 rows updated (version mismatch / missing row) → RETURNING yields no row → pgx.ErrNoRows.
+	mock.ExpectQuery("UPDATE file SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(mock.NewRows(columns()))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	auth := uuid.New()
+	_, err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
+	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -336,12 +382,16 @@ func TestMock_UpdateMetadata_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectQuery("UPDATE file SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	auth := uuid.New()
+	_, err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &auth,
+	}, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -398,7 +448,8 @@ func TestMock_Create_DBError(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			[]byte(`{}`), // content_metadata: empty Populated=false → "{}"
+			[]byte(`{}`),     // content_metadata: empty Populated=false → "{}"
+			pgxmock.AnyArg(), // externalReference
 		).
 		WillReturnError(errors.New("FK constraint violation"))
 

@@ -236,28 +236,49 @@ func TestUpdateMetadata(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	var id, bucketID [16]byte
+	// Seed a DEDICATED row (its own auth policy, a borrowed bucket FK) instead of
+	// picking a random shared row. UpdateMetadata's UPDATE unconditionally SETs
+	// createdBy/externalReference from the passed struct; run against a shared row
+	// with a partial update (CreatedBy/ExternalReference nil) it would NULL those
+	// columns on real fixture data — corrupting it for other tests. (Production is
+	// safe: the handler's buildMetadataUpdate fills absent createdBy/externalReference
+	// with the row's current values, so an omitted field is a no-op SET, never a
+	// clear.) cleanup tears this row down, so no restore is needed.
+	docID, _, cleanup := createTestRow(t, pool, nil)
+	defer cleanup()
+
+	// Read the seeded row's current mutable fields for the optimistic-lock update.
+	var bucketID, authID [16]byte
 	var tempLoc bool
 	var displayName string
 	var version int32
-	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "temporaryLocation", "displayName", version FROM file LIMIT 1`,
-	).Scan(&id, &bucketID, &tempLoc, &displayName, &version)
-	if err != nil {
-		t.Skip("no documents")
+	if err := pool.QueryRow(context.Background(),
+		`SELECT "storageBucketId", "authorizationId", "temporaryLocation", "displayName", version FROM file WHERE id = $1`,
+		docID,
+	).Scan(&bucketID, &authID, &tempLoc, &displayName, &version); err != nil {
+		t.Fatalf("read seeded row: %v", err)
 	}
-	docID := uuid.UUID(id)
 	origBucket := uuid.UUID(bucketID)
+	origAuth := uuid.UUID(authID)
 
-	// Update with current version (optimistic lock)
-	err = a.UpdateMetadata(context.Background(), docID, origBucket, !tempLoc, displayName, int(version))
+	// Update with current version (optimistic lock). Preserve the row's
+	// authorizationId so this test does not mutate auth/ownership. UpdateMetadata
+	// maps the row's authoritative post-update document from the full RETURNING;
+	// assert its content identity is non-empty AND the applied SETs are reflected
+	// (proving the whole row — not just externalID/size — comes back).
+	updated, err := a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		StorageBucketID: origBucket, TemporaryLocation: !tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
+	}, int(version))
 	if err != nil {
 		t.Fatalf("UpdateMetadata: %v", err)
 	}
-	defer func() {
-		// Restore with incremented version
-		_ = a.UpdateMetadata(context.Background(), docID, origBucket, tempLoc, displayName, int(version+1))
-	}()
+	if updated.ExternalID == "" {
+		t.Error("UpdateMetadata returned an empty externalID from RETURNING")
+	}
+	if updated.TemporaryLocation != !tempLoc || updated.DisplayName != displayName {
+		t.Errorf("returned doc = {temp:%v, name:%q}, want the applied SETs {temp:%v, name:%q}",
+			updated.TemporaryLocation, updated.DisplayName, !tempLoc, displayName)
+	}
 
 	doc, _ := a.GetByID(context.Background(), docID)
 	if doc.TemporaryLocation != !tempLoc {
@@ -270,7 +291,10 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	newAuth := uuid.New()
+	_, err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(), DisplayName: "name.txt", AuthorizationID: &newAuth,
+	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}

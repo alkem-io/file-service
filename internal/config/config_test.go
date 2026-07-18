@@ -19,7 +19,6 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("DOCUMENT_MAX_AGE", "")
 	t.Setenv("LOCAL_STORAGE_PATH", "")
-	t.Setenv("STORAGE_TYPE", "")
 	t.Setenv("AUTH_BREAKER_FAILURE_THRESHOLD", "")
 	t.Setenv("AUTH_BREAKER_TIMEOUT_SECONDS", "")
 	t.Setenv("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", "")
@@ -74,9 +73,6 @@ func TestLoad_MinimalValid(t *testing.T) {
 	}
 	if cfg.StoragePath != "../server/.storage" {
 		t.Errorf("StoragePath = %q", cfg.StoragePath)
-	}
-	if cfg.StorageType != "local" {
-		t.Errorf("StorageType = %q", cfg.StorageType)
 	}
 	if cfg.DocumentMaxAge.Seconds() != 86400 {
 		t.Errorf("DocumentMaxAge = %v", cfg.DocumentMaxAge)
@@ -419,4 +415,26 @@ func clearIngestEnv(t *testing.T) {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
+}
+
+// T013 (013): MAX_UPLOAD_SIZE=52428800 (50 MiB) is accepted — it is within the
+// 1 GiB validated ceiling and reconciles Synapse's max_upload_size: 50M.
+func TestLoad_MaxUploadSize_50MiB(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("MAX_UPLOAD_SIZE", "52428800")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ingest.MaxUploadSize != 52428800 {
+		t.Errorf("MaxUploadSize = %d, want 52428800", cfg.Ingest.MaxUploadSize)
+	}
+}
+
+// The 1 GiB ceiling is still enforced.
+func TestLoad_MaxUploadSize_AboveCeilingRejected(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("MAX_UPLOAD_SIZE", "1073741825") // 1 GiB + 1
+	requireLoadErr(t, "MAX_UPLOAD_SIZE")
 }

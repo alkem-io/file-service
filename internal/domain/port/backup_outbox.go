@@ -23,6 +23,26 @@ type BackupOutboxRepo interface {
 	// UpdateFileWithOutbox replaces a document's content and enqueues a backup hint for the new
 	// content hash atomically. Same error semantics as DocumentRepo.UpdateFile.
 	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error
+	// UpdateMetadataWithOutbox applies the versioned metadata update AND enqueues a backup-outbox
+	// row for the now-durable document atomically (same commit), then NOTIFYs. Used when a PATCH
+	// transitions a document temporary→durable (013 conversation media reaches durability via a
+	// temporaryLocation:true→false flip — the re-home MOVE / re-share pin / outbound flip — never
+	// via create/replace, so this is the only path that can enqueue its backup hint). Same error
+	// semantics as DocumentRepo.UpdateMetadata (0 rows → model.ErrDocumentNotFound, which the
+	// service maps to ErrConflict; a unique violation → model.ErrDuplicateKey).
+	//
+	// The enqueued externalID/size are read from the row while it is UPDATE-locked inside this
+	// transaction (full-row RETURNING), NOT passed in by the caller: a concurrent content-replace
+	// swaps externalID/size WITHOUT bumping version, so a handler-threaded snapshot could be stale
+	// and leave the durable content with no outbox row (an RPO gap). The whole AUTHORITATIVE
+	// post-update document is returned so the caller can build the PATCH response from one
+	// consistent snapshot without a re-read. Priority is likewise computed in-tx from the
+	// AUTHORITATIVE post-update mime via the caller-supplied priorityFor: a concurrent
+	// content-replace can upgrade a still-temporary row's mime (generic→concrete, non-hot→hot)
+	// WITHOUT bumping version, so deriving priority from a handler-threaded pre-update snapshot
+	// could enqueue a now-hot object at normal priority (behind the RPO budget hot protects) —
+	// computing it from the RETURNING row's mime closes that gap.
+	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priorityFor func(mimeType string) int16) (model.Document, error)
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)

@@ -19,7 +19,6 @@ import (
 type Config struct {
 	Port           int
 	StoragePath    string
-	StorageType    string
 	DocumentMaxAge time.Duration
 	AlkemioDB      DatabaseConfig
 	NATS           NATSConfig
@@ -171,7 +170,6 @@ func Load() (*Config, error) {
 	return &Config{
 		Port:           port,
 		StoragePath:    getenv("LOCAL_STORAGE_PATH", "../server/.storage"),
-		StorageType:    getenv("STORAGE_TYPE", "local"),
 		DocumentMaxAge: time.Duration(maxAgeSecs) * time.Second,
 		AuthTransport:  authTransport,
 		AuthServiceURL: authServiceURL,

@@ -68,6 +68,10 @@ type stubProcessor struct {
 	// application/octet-stream so image-MIME tests exercise the
 	// dims-on-response paths.
 	detectMIME string
+
+	// transcodeCalls counts TranscodeStream invocations, so ordering tests can
+	// prove the verbatim arm ran (0) vs the transcode arm (>0).
+	transcodeCalls int
 }
 
 func (p *stubProcessor) DetectMIME(_ []byte) string {
@@ -1170,6 +1174,121 @@ func TestDocumentMetaResponse_WithoutNullables(t *testing.T) {
 	}
 }
 
+// --- 013: image dimensions on /meta + by-reference responses ---
+
+// An image document surfaces imageWidth/imageHeight on the GET /meta wire body;
+// they're sourced from the same doc.ImageWidth/Height mirror of content_metadata
+// that the create/update responses use. The Alkemio server's by-reference lookup
+// consumes these to populate conversation attachment width/height.
+func TestDocumentHandler_GetMeta_Image_ReturnsDims(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		ExternalID:      "img-hash",
+		MimeType:        "image/jpeg",
+		Size:            123,
+		DisplayName:     "photo.jpg",
+		AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(),
+		ImageWidth:      intp(800),
+		ImageHeight:     intp(600),
+	}
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/meta", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["imageWidth"] != float64(800) {
+		t.Errorf("imageWidth = %v, want 800", body["imageWidth"])
+	}
+	if body["imageHeight"] != float64(600) {
+		t.Errorf("imageHeight = %v, want 600", body["imageHeight"])
+	}
+}
+
+// Non-image content must omit both dim keys entirely (omitempty), matching the
+// create/update contract.
+func TestDocumentHandler_GetMeta_NonImage_OmitsDims(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{
+		ID:              docID,
+		ExternalID:      "txt-hash",
+		MimeType:        "text/plain",
+		Size:            5,
+		DisplayName:     "notes.txt",
+		AuthorizationID: uuid.New(),
+		StorageBucketID: uuid.New(),
+	}
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/meta", h.GetMeta)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+docID.String()+"/meta", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["imageWidth"]; ok {
+		t.Errorf("imageWidth must be omitted for non-image content; got %v", body["imageWidth"])
+	}
+	if _, ok := body["imageHeight"]; ok {
+		t.Errorf("imageHeight must be omitted for non-image content; got %v", body["imageHeight"])
+	}
+}
+
+// The by-reference endpoint shares documentMetaResponse, so it must carry the
+// same dims — this is the exact path the Alkemio server uses to populate
+// conversation attachment width/height.
+func TestByReference_Image_ReturnsDims(t *testing.T) {
+	ref := "synapse-media-id-99"
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.refDoc = &model.Document{
+		ID:                docID,
+		ExternalID:        "img-hash",
+		MimeType:          "image/png",
+		Size:              456,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+		ImageWidth:        intp(1024),
+		ImageHeight:       intp(768),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref, nil)
+	w := httptest.NewRecorder()
+	h.ByReference(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var got DocumentMetaResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ImageWidth == nil || *got.ImageWidth != 1024 {
+		t.Errorf("imageWidth = %v, want 1024", got.ImageWidth)
+	}
+	if got.ImageHeight == nil || *got.ImageHeight != 768 {
+		t.Errorf("imageHeight = %v, want 768", got.ImageHeight)
+	}
+}
+
 func TestDocumentHandler_ReplaceContent_NotFound(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	repo.err = model.ErrDocumentNotFound
@@ -1248,7 +1367,7 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}` // effective change (fixture defaults false) so the update path runs
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1267,7 +1386,7 @@ func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}` // effective change (fixture defaults false) so the update path runs
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1522,10 +1641,11 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 	}
 }
 
-func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
-	// Renaming to the same name twice: handler/service does not branch on
-	// "no-op", but the row's version still advances (DB UPDATE always
-	// runs). The contract is "stable result", not "no DB write".
+func TestDocumentHandler_Patch_DisplayName_SameValueNoOp_Idempotent200(t *testing.T) {
+	// Renaming to the CURRENT name carries no effective change: an idempotent
+	// PATCH must return 200 with the current document and write NOTHING — no
+	// version+updatedDate bump on an unchanged row (which would spuriously 409 a
+	// concurrent actor) — while still succeeding for idempotent/retry callers.
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{
@@ -1539,20 +1659,26 @@ func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
 	r.Patch("/internal/file/{id}", h.Update)
 
 	body := `{"displayName": "stable.txt"}`
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
-		}
-		if repo.lastUpdateDisplayName != "stable.txt" {
-			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
-		}
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for same-value no-op; body=%s", rr.Code, rr.Body.String())
 	}
-	if repo.updateMetadataCalls != 2 {
-		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("UpdateMetadata calls = %d, want 0 (no write on same-value no-op)", repo.updateMetadataCalls)
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID != docID.String() {
+		t.Errorf("id = %q, want %q (current document echoed back)", resp.ID, docID.String())
+	}
+	if resp.DisplayName != "stable.txt" {
+		t.Errorf("displayName = %q, want %q (unchanged current value)", resp.DisplayName, "stable.txt")
 	}
 }
 
@@ -1738,7 +1864,7 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+	if !strings.Contains(rr.Body.String(), "update conflicts with an existing document") {
 		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
 	}
 }
@@ -2283,6 +2409,7 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 // TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
 // detectMIME override or the input type.
 func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	p.transcodeCalls++
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}
@@ -2349,5 +2476,626 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 		if !st.aborted {
 			t.Error("stage not aborted after oversized-field rejection")
 		}
+	}
+}
+
+// M3 (013): the verbatim-store contract is byte-exact only when
+// skipImageProcessing precedes the file part (the raw-store decision is taken
+// at stage time). A skipImageProcessing=true that arrives AFTER the file part
+// — when a transcodable image may already have been transcoded/rotated — must
+// be rejected with 400 rather than silently transcoded, signalling the broken
+// contract to the caller.
+func TestDocumentHandler_Create_SkipImageProcessing_AfterFile_Rejected(t *testing.T) {
+	h, _, storage, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png" // a transcodable type → the silent-transcode risk
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	// skipImageProcessing arrives AFTER the file — the misordered case.
+	_ = writer.WriteField("skipImageProcessing", "true")
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for misordered skipImageProcessing, body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "skipImageProcessing must be sent before the file part") {
+		t.Errorf("body = %q, want the ordering-contract message", rr.Body.String())
+	}
+	// FR-006: the early return must abort the already-open stage.
+	for _, st := range storage.stages {
+		if !st.aborted {
+			t.Error("stage not aborted after misordered-skip rejection")
+		}
+	}
+}
+
+// Counterpart to the misordered case: skipImageProcessing=true sent BEFORE the
+// file part is honored — the verbatim arm runs (no transcode) and the upload
+// succeeds. Proves the guard rejects only the unsafe ordering.
+func TestDocumentHandler_Create_SkipImageProcessing_BeforeFile_Verbatim(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("skipImageProcessing", "true") // metadata first
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	if proc.transcodeCalls != 0 {
+		t.Errorf("transcodeCalls = %d, want 0 (verbatim must not transcode)", proc.transcodeCalls)
+	}
+}
+
+// A skipImageProcessing=false arriving after the file part is harmless (false
+// is the staged default), so it must NOT be rejected — only true is unsafe.
+func TestDocumentHandler_Create_SkipImageProcessingFalse_AfterFile_Allowed(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.WriteField("skipImageProcessing", "false")
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for skip=false after file, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- 013: by-reference lookup + PATCH move (re-attribute) ---
+
+// withID attaches a chi route context carrying the "id" URL param, so a
+// handler that reads chi.URLParam("id") can be invoked directly without a router.
+func withID(req *http.Request, value string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", value)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// T004: GET /internal/file/by-reference resolves GLOBALLY (bucketId omitted)
+// and bucket-SCOPED (bucketId present), and 404s on a miss.
+func TestByReference_GlobalAndScoped(t *testing.T) {
+	ref := "synapse-media-id-42"
+	bucket := uuid.New()
+	docID := uuid.New()
+	refDoc := model.Document{
+		ID:                docID,
+		ExternalID:        "hash-abc",
+		MimeType:          "image/jpeg",
+		Size:              123,
+		StorageBucketID:   bucket,
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}
+
+	t.Run("global (no bucketId)", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = &refDoc
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref, nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if repo.lastRefBucket != nil {
+			t.Errorf("global lookup must not pass a bucket; got %v", *repo.lastRefBucket)
+		}
+		if repo.lastRefValue != ref {
+			t.Errorf("ref = %q, want %q", repo.lastRefValue, ref)
+		}
+		var got DocumentMetaResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.ID != docID.String() {
+			t.Errorf("id = %q, want %q", got.ID, docID.String())
+		}
+		if got.ExternalReference == nil || *got.ExternalReference != ref {
+			t.Errorf("externalReference = %v, want %q", got.ExternalReference, ref)
+		}
+	})
+
+	t.Run("scoped (bucketId present)", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = &refDoc
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref="+ref+"&bucketId="+bucket.String(), nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if repo.lastRefBucket == nil || *repo.lastRefBucket != bucket {
+			t.Errorf("scoped lookup must pass bucket %v; got %v", bucket, repo.lastRefBucket)
+		}
+	})
+
+	t.Run("missing ref → 400", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("invalid bucketId → 400", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref=x&bucketId=not-a-uuid", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("not found → 404", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = nil // → ErrDocumentNotFound
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref=missing", nil)
+		w := httptest.NewRecorder()
+		h.ByReference(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+// T008: PATCH /internal/file/{id} re-homes: sets storageBucketId, authorizationId,
+// createdBy, and externalReference in one call (the inbound move primitive).
+func TestUpdate_MovePlusReattribute(t *testing.T) {
+	docID := uuid.New()
+	newBucket := uuid.New()
+	newAuth := uuid.New()
+	newCreatedBy := uuid.New()
+	newRef := "media-id-moved"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	body := fmt.Sprintf(`{"storageBucketId":%q,"authorizationId":%q,"createdBy":%q,"externalReference":%q}`,
+		newBucket, newAuth, newCreatedBy, newRef)
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateBucketID != newBucket {
+		t.Errorf("bucket = %v, want %v", repo.lastUpdateBucketID, newBucket)
+	}
+	if repo.lastUpdateAuthID == nil || *repo.lastUpdateAuthID != newAuth {
+		t.Errorf("authorizationId = %v, want %v", repo.lastUpdateAuthID, newAuth)
+	}
+	if repo.lastUpdateCreatedBy == nil || *repo.lastUpdateCreatedBy != newCreatedBy {
+		t.Errorf("createdBy = %v, want %v", repo.lastUpdateCreatedBy, newCreatedBy)
+	}
+	if repo.lastUpdateExternalRef == nil || *repo.lastUpdateExternalRef != newRef {
+		t.Errorf("externalReference = %v, want %q", repo.lastUpdateExternalRef, newRef)
+	}
+}
+
+// json.Decode fills struct fields CASE-INSENSITIVELY, so the tri-state present-map
+// must resolve keys the same way: a case-variant key like "AuthorizationId" /
+// "CreatedBy" sets the struct field, so its re-attribute (auth re-point) AND its
+// clear (createdBy:null) must BOTH be applied — never silently dropped because the
+// present-map only looked for the canonical lowercase key. Regression: case-variant
+// keys half-applied a re-home (moved the row, retained the old authorizationId).
+func TestUpdate_CaseVariantKeys_ReattributeAndClearApplied(t *testing.T) {
+	docID := uuid.New()
+	newAuth := uuid.New()
+	oldCreatedBy := uuid.New()
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		CreatedBy:       &oldCreatedBy,
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	// Case-variant JSON keys: "AuthorizationId" re-points auth, "CreatedBy":null clears.
+	body := fmt.Sprintf(`{"AuthorizationId":%q,"CreatedBy":null}`, newAuth)
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	// The update must actually be applied (present-map saw the case-variant keys) — a
+	// dropped re-attribute/clear would leave applied==0 and skip UpdateMetadata entirely.
+	if repo.updateMetadataCalls != 1 {
+		t.Fatalf("UpdateMetadata calls = %d, want 1 (case-variant re-attribute/clear must not be dropped to a no-op)", repo.updateMetadataCalls)
+	}
+	if repo.lastUpdateAuthID == nil || *repo.lastUpdateAuthID != newAuth {
+		t.Errorf("authorizationId = %v, want %v (case-variant re-point must apply, not be dropped)", repo.lastUpdateAuthID, newAuth)
+	}
+	if repo.lastUpdateCreatedBy != nil {
+		t.Errorf("createdBy = %v, want nil (case-variant explicit-null clear must apply, not be dropped)", *repo.lastUpdateCreatedBy)
+	}
+}
+
+// externalReference is tri-state on PATCH: explicit null clears it.
+func TestUpdate_ClearExternalReference(t *testing.T) {
+	docID := uuid.New()
+	existingRef := "old-ref"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		Version:           1,
+		ExternalReference: &existingRef,
+		MimeType:          "image/jpeg",
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"externalReference":null}`))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateExternalRef != nil {
+		t.Errorf("externalReference = %v, want nil (explicit null clears)", *repo.lastUpdateExternalRef)
+	}
+}
+
+// A PATCH that doesn't touch authorizationId must leave a NULL-auth row NULL,
+// not rewrite it to the zero UUID (which would collide on UNIQUE(authorizationId)
+// and 409 a second such row). Symmetric with the nullable createdBy seed.
+func TestUpdate_LeavesNullAuthorizationIDNull(t *testing.T) {
+	docID := uuid.New()
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.Nil, // NULL authorizationId column
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	// PATCH only displayName — authorizationId omitted from the body.
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateAuthID != nil {
+		t.Errorf("authorizationId = %v, want nil (NULL must stay NULL, not become the zero UUID)", *repo.lastUpdateAuthID)
+	}
+}
+
+// Omitting externalReference keeps the row's current value (not cleared).
+func TestUpdate_KeepsExternalReferenceWhenOmitted(t *testing.T) {
+	docID := uuid.New()
+	existingRef := "keep-me"
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:                docID,
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		Version:           1,
+		ExternalReference: &existingRef,
+		MimeType:          "image/jpeg",
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.jpg"}`))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if repo.lastUpdateExternalRef == nil || *repo.lastUpdateExternalRef != existingRef {
+		t.Errorf("externalReference = %v, want %q (omitted ⇒ keep)", repo.lastUpdateExternalRef, existingRef)
+	}
+}
+
+// --- 013 review round 1 regression tests ---
+
+// FIX 1 (PATCH): an empty-string externalReference is neither "keep" (absent)
+// nor "clear" (explicit null), so it is rejected with 400 rather than persisted
+// as a non-NULL ” that would orphan the row from both identity systems.
+func TestUpdate_EmptyExternalReference_Rejected(t *testing.T) {
+	docID := uuid.New()
+	rr, repo := runPatch(t, docID, `{"externalReference":""}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for empty externalReference; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+	}
+}
+
+// FIX 1 (Copy): an empty externalReference is normalized to NULL — exactly like
+// Create — so a later identical-content upload can content-dedup against it.
+func TestCopy_EmptyExternalReference_PersistedAsNull(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	sourceID := uuid.New()
+	repo.doc = model.Document{
+		ID:          sourceID,
+		ExternalID:  "sha3-of-content",
+		MimeType:    "image/png",
+		Size:        42,
+		DisplayName: "banner.png",
+	}
+
+	empty := ""
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            sourceID.String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.New().String(),
+		ExternalReference:   &empty,
+	})
+
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.ExternalReference != nil {
+		t.Errorf("persisted externalReference = %v, want nil (empty ⇒ NULL)", *repo.lastCreateDoc.ExternalReference)
+	}
+}
+
+// FIX 2: a reference-bearing create that collides on a DIFFERENT unique
+// constraint (e.g. authorizationId) re-queries by reference, finds no winner,
+// and must surface a clean 409 — not a 500 "winner lookup failed".
+func TestCreate_ReferenceCreate_NonReferenceCollision_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	repo.createErr = model.ErrDuplicateKey // dup-key on a non-reference constraint
+	// refDoc left nil ⇒ GetByReferenceInBucket returns ErrDocumentNotFound (no winner).
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.WriteField("displayName", "test.txt")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.WriteField("externalReference", "fresh-media-id") // reference is new
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (collision on a different constraint), body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// FIX 3: a body whose only key is an explicit-null on a non-clearable field
+// merges nothing, so it is an idempotent 200 no-write — NOT a 400 — with the
+// current document echoed back and no version+updatedDate bump.
+func TestUpdate_ExplicitNullNoOp_Idempotent200(t *testing.T) {
+	docID := uuid.New()
+	rr, repo := runPatch(t, docID, `{"temporaryLocation":null}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for no-op explicit null; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (no write on no-op)", repo.updateMetadataCalls)
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID != docID.String() {
+		t.Errorf("id = %q, want %q (current document echoed back)", resp.ID, docID.String())
+	}
+}
+
+// FIX 4: externalReference is capped at the VARCHAR(256) column on every path,
+// so an over-length value is a clean 400 rather than a Postgres "value too
+// long" 500.
+func TestExternalReference_TooLong_Rejected(t *testing.T) {
+	tooLong := strings.Repeat("a", maxExternalReferenceLen+1)
+
+	t.Run("create", func(t *testing.T) {
+		h, _, _ := newDocHandler()
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, _ := writer.CreateFormFile("file", "test.txt")
+		_, _ = part.Write([]byte("hello"))
+		_ = writer.WriteField("displayName", "test.txt")
+		_ = writer.WriteField("storageBucketId", uuid.New().String())
+		_ = writer.WriteField("authorizationId", uuid.New().String())
+		_ = writer.WriteField("externalReference", tooLong)
+		_ = writer.Close()
+
+		r := chi.NewRouter()
+		r.Post("/internal/file", h.Create)
+		req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("copy", func(t *testing.T) {
+		h, repo, _ := newDocHandler()
+		sourceID := uuid.New()
+		repo.doc = model.Document{ID: sourceID, ExternalID: "sha3", MimeType: "image/png", Size: 1}
+		body, _ := json.Marshal(CopyDocumentRequest{
+			SourceID:            sourceID.String(),
+			DestinationBucketID: uuid.New().String(),
+			AuthorizationID:     uuid.New().String(),
+			ExternalReference:   &tooLong,
+		})
+		r := chi.NewRouter()
+		r.Post("/internal/file/copy", h.Copy)
+		req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("patch", func(t *testing.T) {
+		docID := uuid.New()
+		rr, repo := runPatch(t, docID, `{"externalReference":"`+tooLong+`"}`, func(r *mockDocRepo) {
+			r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+		})
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+		if repo.updateMetadataCalls != 0 {
+			t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+		}
+	})
+}
+
+// FIX 5: a duplicated skipImageProcessing=true — sent BEFORE the file and again
+// AFTER — honors the byte-exact contract (the pre-file value already established
+// verbatim), so the after-file duplicate must NOT trip the ordering guard.
+func TestDocumentHandler_Create_SkipImageProcessing_DuplicatedConsistent_Allowed(t *testing.T) {
+	h, _, _, proc := newDocHandlerWithProcessor()
+	proc.detectMIME = "image/png"
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("skipImageProcessing", "true") // established before the file
+	_ = writer.WriteField("displayName", "photo.png")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	part, _ := writer.CreateFormFile("file", "photo.png")
+	_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npayload"))
+	_ = writer.WriteField("skipImageProcessing", "true") // duplicate, consistent with pre-file value
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for consistent duplicate skip, body: %s", rr.Code, rr.Body.String())
+	}
+	if proc.transcodeCalls != 0 {
+		t.Errorf("transcodeCalls = %d, want 0 (verbatim honored)", proc.transcodeCalls)
+	}
+}
+
+// FIX 7: an over-cap PATCH body is bounded by http.MaxBytesReader and maps to
+// 413 rather than buffering unbounded input.
+func TestUpdate_OversizedBody_Rejected(t *testing.T) {
+	docID := uuid.New()
+	huge := strings.Repeat("a", (1<<20)+1024) // just over the 1 MiB cap
+	rr, repo := runPatch(t, docID, `{"displayName":"`+huge+`"}`, func(r *mockDocRepo) {
+		r.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(), Version: 1}
+	})
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for oversized PATCH body; body=%s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("updateMetadataCalls = %d, want 0 (rejected before write)", repo.updateMetadataCalls)
+	}
+}
+
+func TestBuildMetadataUpdate_AuthorizationIdCannotBeCleared(t *testing.T) {
+	base := model.Document{
+		ID:              uuid.New(),
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	present := map[string]struct{}{"authorizationId": {}}
+
+	// Explicit JSON null → clear → rejected (would orphan the document's auth).
+	if _, _, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: nil}, present); err == nil || !strings.Contains(err.Error(), "cannot be cleared") {
+		t.Fatalf("null authorizationId: want cannot-be-cleared error, got %v", err)
+	}
+
+	// Nil UUID string → rejected (reads back as the zero UUID → 403 forever).
+	zero := uuid.Nil.String()
+	if _, _, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: &zero}, present); err == nil || !strings.Contains(err.Error(), "nil UUID") {
+		t.Fatalf("nil-UUID authorizationId: want nil-UUID error, got %v", err)
+	}
+
+	// Valid re-attribution → applied.
+	newAuth := uuid.New().String()
+	meta, applied, err := buildMetadataUpdate(base, UpdateDocumentRequest{AuthorizationID: &newAuth}, present)
+	if err != nil || applied != 1 || meta.AuthorizationID == nil || meta.AuthorizationID.String() != newAuth {
+		t.Fatalf("valid re-attribution: applied=%d err=%v authz=%v", applied, err, meta.AuthorizationID)
 	}
 }

@@ -39,6 +39,25 @@ func parseContentMetadata(raw []byte) model.ContentMetadata {
 	return meta
 }
 
+// stringToPgxText maps an optional string to a nullable Postgres text value:
+// nil → SQL NULL. Used for the opaque externalReference column.
+func stringToPgxText(s *string) pgtype.Text {
+	if s == nil {
+		return pgtype.Text{Valid: false}
+	}
+	return pgtype.Text{String: *s, Valid: true}
+}
+
+// pgxTextToStringPtr maps a nullable Postgres text value back to *string:
+// SQL NULL → nil.
+func pgxTextToStringPtr(t pgtype.Text) *string {
+	if !t.Valid {
+		return nil
+	}
+	s := t.String
+	return &s
+}
+
 func uuidToPgx(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
 }
@@ -111,6 +130,7 @@ type documentRow struct {
 	UpdatedDate       pgtype.Timestamptz
 	Version           int32
 	ContentMetadata   []byte
+	ExternalReference pgtype.Text
 }
 
 func documentFromRow(r documentRow) model.Document {
@@ -128,6 +148,7 @@ func documentFromRow(r documentRow) model.Document {
 		CreatedDate:       pgxToTime(r.CreatedDate),
 		UpdatedDate:       pgxToTime(r.UpdatedDate),
 		Version:           int(r.Version),
+		ExternalReference: pgxTextToStringPtr(r.ExternalReference),
 	}
 	doc.ContentMetadata = parseContentMetadata(r.ContentMetadata)
 	// Mirror the dim fields onto the Document struct for handlers that
@@ -145,5 +166,22 @@ func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
 }
 
 func findRowToDocument(row queries.FindDocumentByExternalIDAndBucketRow) model.Document {
+	return documentFromRow(documentRow(row))
+}
+
+func refRowToDocument(row queries.GetDocumentByReferenceRow) model.Document {
+	return documentFromRow(documentRow(row))
+}
+
+func refInBucketRowToDocument(row queries.GetDocumentByReferenceInBucketRow) model.Document {
+	return documentFromRow(documentRow(row))
+}
+
+// updateMetaRowToDocument maps the versioned metadata UPDATE's RETURNING row —
+// the authoritative post-update document (applied SETs + any concurrent
+// content-replace already committed) — to a model.Document, so the whole PATCH
+// response is built from one consistent snapshot rather than a current+meta
+// merge that could tear externalID/size against dims.
+func updateMetaRowToDocument(row queries.UpdateDocumentMetadataRow) model.Document {
 	return documentFromRow(documentRow(row))
 }

@@ -121,8 +121,14 @@ type DocumentMetaResponse struct {
 	StorageBucketID   string    `json:"storageBucketId"`
 	AuthorizationID   string    `json:"authorizationId"`
 	TagsetID          *string   `json:"tagsetId,omitempty"`
+	ExternalReference *string   `json:"externalReference,omitempty"`
 	CreatedDate       time.Time `json:"createdDate"`
 	UpdatedDate       time.Time `json:"updatedDate"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions sourced from
+	// content_metadata for image rows. Both nil for non-images and for
+	// image rows whose metadata is empty/sentinel.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 // Render writes the response as JSON with HTTP 200.
@@ -132,15 +138,22 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// UpdateDocumentRequest is the body for PATCH /internal/file/:id.
-// All fields are optional; at least one must be present. Omitted fields
-// retain their current value. mimeType, externalID, and size are immutable
-// through this endpoint — see PUT /internal/file/{id}/content for content
-// replacement (which also updates mimeType and size).
+// UpdateDocumentRequest is the body for PATCH /internal/file/:id — the
+// "move + re-attribute" primitive. All fields are optional; at least one must
+// be present. Omitted fields retain their current value. mimeType, externalID,
+// and size are immutable through this endpoint — see PUT
+// /internal/file/{id}/content for content replacement.
+//
+// externalReference is tri-state: omitted → keep; a string → set; explicit
+// JSON null → clear. The presence map in the handler distinguishes "omitted"
+// from "null" (a plain *string cannot).
 type UpdateDocumentRequest struct {
 	StorageBucketID   *string `json:"storageBucketId,omitempty"`
 	TemporaryLocation *bool   `json:"temporaryLocation,omitempty"`
 	DisplayName       *string `json:"displayName,omitempty"`
+	AuthorizationID   *string `json:"authorizationId,omitempty"`
+	CreatedBy         *string `json:"createdBy,omitempty"`
+	ExternalReference *string `json:"externalReference,omitempty"`
 }
 
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.
@@ -151,7 +164,10 @@ type CopyDocumentRequest struct {
 	AuthorizationID     string  `json:"authorizationId"`
 	TagsetID            *string `json:"tagsetId,omitempty"`
 	CreatedBy           *string `json:"createdBy,omitempty"`
-	SkipDedup           bool    `json:"skipDedup,omitempty"`
+	// ExternalReference is the opaque caller reference set on the copied row
+	// (the re-share fork carries the same media_id). Omitted leaves it unset.
+	ExternalReference *string `json:"externalReference,omitempty"`
+	SkipDedup         bool    `json:"skipDedup,omitempty"`
 }
 
 // HealthResponse is returned by GET /health.

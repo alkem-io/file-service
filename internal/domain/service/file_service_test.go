@@ -19,21 +19,23 @@ var nopLogger = zap.NewNop()
 // --- Mocks ---
 
 type mockRepo struct {
-	doc           model.Document
-	getErr        error
-	findDoc       *model.Document // nil means "not found"
-	findErr       error           // if set, overrides findDoc
-	findCalls     int
-	lastFindExt   string
-	lastFindBkt   uuid.UUID
-	createErr     error
-	createErrOnce error // returned only on the first Create call
-	createCalls   int
-	updateErr     error
-	deleteResult  model.DeletedDocument
-	deleteErr     error
-	count         int
-	countErr      error
+	doc                 model.Document
+	getErr              error
+	findDoc             *model.Document // nil means "not found"
+	findErr             error           // if set, overrides findDoc
+	findCalls           int
+	lastFindExt         string
+	lastFindBkt         uuid.UUID
+	createErr           error
+	createErrOnce       error // returned only on the first Create call
+	createCalls         int
+	createdDocs         []model.Document // every doc passed to Create, in order
+	updateErr           error
+	updateMetadataCalls int
+	deleteResult        model.DeletedDocument
+	deleteErr           error
+	count               int
+	countErr            error
 
 	// Captured args from Create / UpdateFile content_metadata params.
 	lastCreateContentMetadata     model.ContentMetadata
@@ -81,6 +83,7 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
 	m.lastCreateContentMetadata = contentMetadata
+	m.createdDocs = append(m.createdDocs, doc)
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
 	}
@@ -99,8 +102,31 @@ func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expe
 	m.lastBackfillPayload = metadata
 	return m.backfillErr
 }
-func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
-	return m.updateErr
+func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
+	m.updateMetadataCalls++
+	// Mirror the adapter's full-row RETURNING: the AUTHORITATIVE post-update row
+	// (applied SETs + any concurrent content-replace already committed). Tests
+	// seed m.doc with that authoritative row, so the service builds the whole
+	// response from one consistent snapshot.
+	return m.doc, m.updateErr
+}
+func (m *mockRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
+	if m.findErr != nil {
+		return model.Document{}, m.findErr
+	}
+	if m.findDoc == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return *m.findDoc, nil
+}
+func (m *mockRepo) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	if m.findErr != nil {
+		return model.Document{}, m.findErr
+	}
+	if m.findDoc == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return *m.findDoc, nil
 }
 func (m *mockRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return m.deleteResult, m.deleteErr
@@ -416,6 +442,65 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 }
 
+// Reference-branch race: a reference-bearing create whose Create loses the race
+// on the partial UNIQUE(externalReference, storageBucketId). insertDocument must
+// re-resolve the winner via GetByReferenceInBucket (NOT by content) and return
+// it with Reused=true. Content-dedup (FindByExternalIDAndBucket) must never be
+// consulted on the reference path.
+func TestCreateDocument_ReferenceRace_ResolvesByReference(t *testing.T) {
+	winnerID := uuid.New()
+	winnerAuth := uuid.New()
+	bucket := uuid.New()
+	ref := "media-id-race"
+
+	findCalled := false
+	getRefCalls := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			findCalled = true
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		getByRef: func() (model.Document, error) {
+			getRefCalls++
+			return model.Document{
+				ID:                winnerID,
+				ExternalID:        "sha3-of-content",
+				StorageBucketID:   bucket,
+				AuthorizationID:   winnerAuth,
+				ExternalReference: &ref,
+			}, nil
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	input := model.CreateDocumentInput{
+		DisplayName:       "img.png",
+		StorageBucketID:   bucket,
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}
+	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Error("expected Reused=true after reference-branch race")
+	}
+	if doc.ID != winnerID {
+		t.Errorf("ID = %v, want winner %v", doc.ID, winnerID)
+	}
+	if doc.AuthorizationID != winnerAuth {
+		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+	if getRefCalls != 1 {
+		t.Errorf("expected GetByReferenceInBucket consulted exactly once, got %d", getRefCalls)
+	}
+	if findCalled {
+		t.Error("content-dedup (FindByExternalIDAndBucket) must not be consulted on the reference path")
+	}
+}
+
 // SkipDedup: true → fresh row inserted even when an existing row matches.
 // Lookup must NOT be called; existing row must NOT be returned/mutated.
 func TestCreateDocument_SkipDedup_InsertsFreshRowWhenContentExists(t *testing.T) {
@@ -553,10 +638,128 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 	}
 }
 
+// Reference-bearing rows are keyed by externalReference, not content: two
+// creates with the SAME bytes but DIFFERENT externalReference in one bucket
+// must produce TWO distinct rows (each by-reference-resolvable), bypassing
+// content-dedup — even though a content-dedup lookup WOULD have matched.
+func TestCreateDocument_DistinctReferencesSameContent_InsertTwoRows(t *testing.T) {
+	bucket := uuid.New()
+	// findDoc set deliberately: proves content-dedup is skipped, not merely absent.
+	repo := &mockRepo{
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	ref1, ref2 := "media-id-1", "media-id-2"
+	mk := func(ref string) model.CreateDocumentInput {
+		return model.CreateDocumentInput{
+			DisplayName:       "img.png",
+			StorageBucketID:   bucket,
+			AuthorizationID:   uuid.New(),
+			ExternalReference: &ref,
+		}
+	}
+
+	doc1, err := svc.CreateDocument(context.Background(), mk(ref1), []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("create ref1: %v", err)
+	}
+	doc2, err := svc.CreateDocument(context.Background(), mk(ref2), []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("create ref2: %v", err)
+	}
+
+	if repo.findCalls != 0 {
+		t.Errorf("content-dedup lookup must be skipped for reference creates, got %d FindByExternalIDAndBucket calls", repo.findCalls)
+	}
+	if repo.createCalls != 2 {
+		t.Fatalf("expected 2 Create calls (two distinct rows), got %d", repo.createCalls)
+	}
+	if doc1.Reused || doc2.Reused {
+		t.Errorf("reference creates must never report Reused; got %v / %v", doc1.Reused, doc2.Reused)
+	}
+	if doc1.ID == doc2.ID {
+		t.Error("expected two distinct row IDs")
+	}
+	// Each persisted row carries its own reference — both by-reference-resolvable.
+	if len(repo.createdDocs) != 2 {
+		t.Fatalf("captured %d created docs, want 2", len(repo.createdDocs))
+	}
+	got := []string{*repo.createdDocs[0].ExternalReference, *repo.createdDocs[1].ExternalReference}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 persisted references, got %d", len(got))
+	}
+	if got[0] != ref1 || got[1] != ref2 {
+		t.Errorf("persisted references = %v, want [%s %s]", got, ref1, ref2)
+	}
+	// Same blob underneath: both rows share the content hash.
+	if repo.createdDocs[0].ExternalID != repo.createdDocs[1].ExternalID {
+		t.Error("both rows must share the content-addressed blob (same externalID)")
+	}
+}
+
+// Copy with an externalReference (a re-share fork) bypasses content-dedup the
+// same way create does: a fresh row materializes even when the destination
+// bucket already holds the same bytes.
+func TestCopyDocument_WithReference_SkipsContentDedup(t *testing.T) {
+	bucket := uuid.New()
+	source := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            7,
+		DisplayName:     "img.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	// findDoc set: the destination bucket already has this content — would dedup
+	// without the reference guard.
+	repo := &mockRepo{
+		doc: source,
+		findDoc: &model.Document{
+			ID:              uuid.New(),
+			ExternalID:      "sha3-of-content",
+			StorageBucketID: bucket,
+			AuthorizationID: uuid.New(),
+		},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	ref := "media-id-reshare"
+	doc, err := svc.CopyDocument(context.Background(), source.ID, model.CopyDocumentInput{
+		DestinationBucketID: bucket,
+		AuthorizationID:     uuid.New(),
+		ExternalReference:   &ref,
+	})
+	if err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("content-dedup lookup must be skipped for reference copy, got %d calls", repo.findCalls)
+	}
+	if repo.createCalls != 1 {
+		t.Fatalf("expected 1 Create call, got %d", repo.createCalls)
+	}
+	if doc.Reused {
+		t.Error("reference copy must not report Reused")
+	}
+	if len(repo.createdDocs) != 1 || repo.createdDocs[0].ExternalReference == nil || *repo.createdDocs[0].ExternalReference != ref {
+		t.Errorf("copied row must carry the reference %q", ref)
+	}
+}
+
 // mockRepoRace is a minimal repo mock supporting a scripted FindByExternalIDAndBucket
-// and a fixed Create error — used for the concurrent race test.
+// and a fixed Create error — used for the concurrent race test. getByRef, when
+// set, scripts GetByReferenceInBucket for the reference-branch race test;
+// otherwise that lookup reports ErrDocumentNotFound.
 type mockRepoRace struct {
 	find      func() (model.Document, error)
+	getByRef  func() (model.Document, error)
 	createErr error
 }
 
@@ -574,8 +777,17 @@ func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
-	return nil
+func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
+	return model.Document{}, nil
+}
+func (m *mockRepoRace) GetByReference(_ context.Context, _ string) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockRepoRace) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	if m.getByRef != nil {
+		return m.getByRef()
+	}
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
 	return nil
@@ -914,8 +1126,14 @@ func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
-	return nil
+func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) (model.Document, error) {
+	return model.Document{}, nil
+}
+func (m *copyRaceRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *copyRaceRepo) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *copyRaceRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
 	return nil
@@ -1023,7 +1241,7 @@ func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, newBucket, false, "renamed.txt", 1)
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, model.DocumentMetadataUpdate{StorageBucketID: newBucket, DisplayName: "renamed.txt"}, 1, model.Document{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1037,7 +1255,7 @@ func TestUpdateDocumentMetadata_NotFound(t *testing.T) {
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1, model.Document{})
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
@@ -1051,10 +1269,80 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 1, model.Document{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
+}
+
+// TestUpdateDocumentMetadata_ConcurrentReplace_ResponseIsConsistent is the
+// df9b411 regression guard. A concurrent content-replace commits first, swapping
+// externalID (h1→h2), size (100→200), and image dims (100×100→200×200) WITHOUT
+// bumping version. The versioned metadata UPDATE then RETURNs the FULL post-update
+// row — which reflects that new content — and the service builds the ENTIRE
+// response from THAT one authoritative snapshot. Every content field must come
+// from the returned row (NEW), never the stale `current` snapshot the handler
+// threaded in (OLD): the old `docAfterMetadataUpdate` merge tore externalID/size
+// (new) against dims/content_metadata (copied from `current`, old).
+func TestUpdateDocumentMetadata_ConcurrentReplace_ResponseIsConsistent(t *testing.T) {
+	newW, newH := 200, 200
+	// The authoritative post-update row the versioned UPDATE returns: NEW content
+	// (h2, 200 bytes, 200×200) plus the applied metadata SETs. This is exactly
+	// what documentFromRow produces from the full RETURNING.
+	authoritative := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "h2-new-blob",
+		MimeType:        "image/png",
+		Size:            200,
+		DisplayName:     "renamed.png",
+		ImageWidth:      &newW,
+		ImageHeight:     &newH,
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &newW, ImageHeight: &newH},
+		Version:         6,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{doc: authoritative}}
+
+	// The handler-threaded `current` snapshot is STALE: OLD content (h1, 100 bytes,
+	// 100×100). If any response field is sourced from it, the assertions below flip.
+	oldW, oldH := 100, 100
+	current := model.Document{
+		ID:              authoritative.ID,
+		ExternalID:      "h1-old-blob",
+		MimeType:        "image/png",
+		Size:            100,
+		DisplayName:     "legacy.png",
+		ImageWidth:      &oldW,
+		ImageHeight:     &oldH,
+		ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &oldW, ImageHeight: &oldH},
+		Version:         5,
+	}
+
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), authoritative.ID,
+		model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "renamed.png"}, 5, current)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("expected a non-nil updated document")
+	}
+	if updated.ExternalID != "h2-new-blob" || updated.Size != 200 {
+		t.Fatalf("content identity = %q/%d, want the authoritative post-update h2-new-blob/200 (never the stale h1-old-blob/100)",
+			updated.ExternalID, updated.Size)
+	}
+	if updated.ImageWidth == nil || updated.ImageHeight == nil || *updated.ImageWidth != 200 || *updated.ImageHeight != 200 {
+		t.Fatalf("dims = %v×%v, want the authoritative 200×200 (never the stale 100×100 from `current`) — the torn-response regression",
+			derefInt(updated.ImageWidth), derefInt(updated.ImageHeight))
+	}
+	if !updated.ContentMetadata.Populated {
+		t.Fatal("content_metadata must come from the authoritative row (Populated=true), so BackfillIfNeeded routes on fresh state")
+	}
+}
+
+func derefInt(p *int) any {
+	if p == nil {
+		return "nil"
+	}
+	return *p
 }
 
 func TestServeFile_AuthError(t *testing.T) {
@@ -1263,7 +1551,7 @@ func TestUpdateDocumentMetadata_VersionConflict(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 3)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"}, 3, model.Document{})
 	if err == nil {
 		t.Fatal("expected error for version conflict")
 	}

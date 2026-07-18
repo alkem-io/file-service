@@ -43,7 +43,7 @@ func TestMock_CreateWithOutbox_Commits(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: docID, Valid: true}, "hashX", int16(1),
@@ -76,7 +76,7 @@ func TestMock_CreateWithOutbox_DedupRollsBack(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
@@ -100,7 +100,7 @@ func TestMock_CreateWithOutbox_NotifyFailureNonFatal(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -184,6 +184,124 @@ func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
 	mock.ExpectRollback()
 
 	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
+	if !errors.Is(err, model.ErrDuplicateKey) {
+		t.Fatalf("want ErrDuplicateKey, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestMock_UpdateMetadataWithOutbox_Commits: a temporary→durable PATCH applies the versioned
+// metadata update and enqueues the now-durable object's backup hint in ONE transaction, then
+// NOTIFYs. The versioned UPDATE RETURNs the row's AUTHORITATIVE externalID/size (read while the row
+// is UPDATE-locked in this tx); the enqueue MUST carry those RETURNING values — there is no
+// caller-passed externalID/size anymore. This is the stale-breadcrumb-race guard: a concurrent
+// content-replace that swapped externalID/size (without bumping version) is reflected here because
+// the hint is sourced from the locked row, not a handler snapshot. Also asserts the method returns
+// the same authoritative values for the reload-free PATCH response.
+func TestMock_UpdateMetadataWithOutbox_Commits(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	id := uuid.New()
+
+	now := time.Now()
+	mock.ExpectBegin()
+	// The UPDATE is now :one RETURNING the FULL row — a Query, not an Exec. The returned hash/size
+	// (values a concurrent content-replace could have swapped in) drive BOTH the enqueue and the
+	// returned document, proving the outbox never carries a stale handler-threaded breadcrumb and the
+	// PATCH response is built from the same authoritative row.
+	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(9)...).
+		WillReturnRows(mock.NewRows(columns()).AddRow(
+			uuidToPgx(id),
+			"hashDur",
+			"application/x-yjs",
+			int32(99),
+			"wb.yjs",
+			pgtype.UUID{Valid: false},
+			false,
+			pgtype.UUID{Valid: false},
+			pgtype.UUID{Valid: false},
+			pgtype.UUID{Valid: false},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			pgtype.Timestamptz{Time: now, Valid: true},
+			int32(2),
+			[]byte("{}"),
+			pgtype.Text{Valid: false},
+		))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashDur", int16(1),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(99)).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
+
+	// priorityFor is fed the AUTHORITATIVE post-update mime (the RETURNING row's "application/x-yjs"),
+	// not a caller snapshot — returning 1 only for that mime proves the enqueued int16(1) came from
+	// the locked row's mime.
+	priorityFor := func(mimeType string) int16 {
+		if mimeType == "application/x-yjs" {
+			return 1
+		}
+		return 0
+	}
+	doc, err := New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, priorityFor)
+	if err != nil {
+		t.Fatalf("UpdateMetadataWithOutbox: %v", err)
+	}
+	if doc.ExternalID != "hashDur" || doc.Size != 99 {
+		t.Fatalf("returned %q/%d, want the RETURNING authoritative externalID/size hashDur/99", doc.ExternalID, doc.Size)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack: a version mismatch / missing row (RETURNING
+// yields no row → pgx.ErrNoRows) → ErrDocumentNotFound, the tx rolls back and no outbox row is
+// enqueued.
+func TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(9)...).
+		WillReturnRows(mock.NewRows(columns()))
+	mock.ExpectRollback()
+
+	// The tx rolls back before the enqueue closure, so priorityFor is never invoked.
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, func(string) int16 { return 0 })
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("want ErrDocumentNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack: a unique violation on the metadata update
+// (a re-homed reference / re-attributed authorizationId collision) rolls the tx back (no outbox
+// row, no NOTIFY) and surfaces model.ErrDuplicateKey, matching UpdateMetadata.
+func TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE file").WithArgs(anyArgs(9)...).
+		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
+	mock.ExpectRollback()
+
+	// The tx rolls back before the enqueue closure, so priorityFor is never invoked.
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, func(string) int16 { return 0 })
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
 	}
