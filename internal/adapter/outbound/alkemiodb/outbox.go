@@ -134,8 +134,11 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 // now-durable row and enqueues its own outbox). The returned document lets the caller build the
 // PATCH response from one consistent snapshot (no reload). The outbox breadcrumb: createdBy is the
 // re-attributed owner (meta.CreatedBy, null when the PATCH leaves it unset) and createdDate is
-// enqueue time (now) — the RPO-lag semantics the consumer's backlog gauge expects.
-func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (model.Document, error) {
+// enqueue time (now) — the RPO-lag semantics the consumer's backlog gauge expects. Priority is
+// derived from the SAME authoritative row via priorityFor(doc.MimeType): a concurrent replace can
+// upgrade a still-temporary row's mime non-hot→hot without bumping version, so a pre-update snapshot
+// would under-prioritize the now-durable hot object.
+func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priorityFor func(mimeType string) int16) (model.Document, error) {
 	var doc model.Document
 	err := a.withOutboxTx(ctx,
 		func(q *queries.Queries) error {
@@ -155,8 +158,8 @@ func (a *Adapter) UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, me
 		func(q *queries.Queries) error {
 			return q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
 				FileId:      uuidToPgx(id),
-				ExternalID:  doc.ExternalID, // AUTHORITATIVE post-update hash from the locked row (RETURNING)
-				Priority:    priority,
+				ExternalID:  doc.ExternalID,                    // AUTHORITATIVE post-update hash from the locked row (RETURNING)
+				Priority:    priorityFor(doc.MimeType),         // priority from the SAME authoritative mime, not a stale snapshot
 				CreatedBy:   uuidToPgxNullable(meta.CreatedBy), // the re-attributed owner breadcrumb; nil if unset
 				CreatedDate: timeToPgxNow(),
 				Size:        int64(doc.Size),

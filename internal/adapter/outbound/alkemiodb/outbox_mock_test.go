@@ -239,7 +239,16 @@ func TestMock_UpdateMetadataWithOutbox_Commits(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
 
-	doc, err := New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, 1)
+	// priorityFor is fed the AUTHORITATIVE post-update mime (the RETURNING row's "application/x-yjs"),
+	// not a caller snapshot — returning 1 only for that mime proves the enqueued int16(1) came from
+	// the locked row's mime.
+	priorityFor := func(mimeType string) int16 {
+		if mimeType == "application/x-yjs" {
+			return 1
+		}
+		return 0
+	}
+	doc, err := New(mock).UpdateMetadataWithOutbox(context.Background(), id, model.DocumentMetadataUpdate{}, 1, priorityFor)
 	if err != nil {
 		t.Fatalf("UpdateMetadataWithOutbox: %v", err)
 	}
@@ -266,7 +275,8 @@ func TestMock_UpdateMetadataWithOutbox_NotFoundRollsBack(t *testing.T) {
 		WillReturnRows(mock.NewRows(columns()))
 	mock.ExpectRollback()
 
-	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
+	// The tx rolls back before the enqueue closure, so priorityFor is never invoked.
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, func(string) int16 { return 0 })
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("want ErrDocumentNotFound, got %v", err)
 	}
@@ -290,7 +300,8 @@ func TestMock_UpdateMetadataWithOutbox_DuplicateRollsBack(t *testing.T) {
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
-	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, 0)
+	// The tx rolls back before the enqueue closure, so priorityFor is never invoked.
+	_, err = New(mock).UpdateMetadataWithOutbox(context.Background(), uuid.New(), model.DocumentMetadataUpdate{}, 1, func(string) int16 { return 0 })
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
 	}

@@ -2724,6 +2724,50 @@ func TestUpdate_MovePlusReattribute(t *testing.T) {
 	}
 }
 
+// json.Decode fills struct fields CASE-INSENSITIVELY, so the tri-state present-map
+// must resolve keys the same way: a case-variant key like "AuthorizationId" /
+// "CreatedBy" sets the struct field, so its re-attribute (auth re-point) AND its
+// clear (createdBy:null) must BOTH be applied — never silently dropped because the
+// present-map only looked for the canonical lowercase key. Regression: case-variant
+// keys half-applied a re-home (moved the row, retained the old authorizationId).
+func TestUpdate_CaseVariantKeys_ReattributeAndClearApplied(t *testing.T) {
+	docID := uuid.New()
+	newAuth := uuid.New()
+	oldCreatedBy := uuid.New()
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{
+		ID:              docID,
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		CreatedBy:       &oldCreatedBy,
+		Version:         1,
+		MimeType:        "image/jpeg",
+	}
+
+	// Case-variant JSON keys: "AuthorizationId" re-points auth, "CreatedBy":null clears.
+	body := fmt.Sprintf(`{"AuthorizationId":%q,"CreatedBy":null}`, newAuth)
+	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(body))
+	req = withID(req, docID.String())
+	w := httptest.NewRecorder()
+	h.Update(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	// The update must actually be applied (present-map saw the case-variant keys) — a
+	// dropped re-attribute/clear would leave applied==0 and skip UpdateMetadata entirely.
+	if repo.updateMetadataCalls != 1 {
+		t.Fatalf("UpdateMetadata calls = %d, want 1 (case-variant re-attribute/clear must not be dropped to a no-op)", repo.updateMetadataCalls)
+	}
+	if repo.lastUpdateAuthID == nil || *repo.lastUpdateAuthID != newAuth {
+		t.Errorf("authorizationId = %v, want %v (case-variant re-point must apply, not be dropped)", repo.lastUpdateAuthID, newAuth)
+	}
+	if repo.lastUpdateCreatedBy != nil {
+		t.Errorf("createdBy = %v, want nil (case-variant explicit-null clear must apply, not be dropped)", *repo.lastUpdateCreatedBy)
+	}
+}
+
 // externalReference is tri-state on PATCH: explicit null clears it.
 func TestUpdate_ClearExternalReference(t *testing.T) {
 	docID := uuid.New()

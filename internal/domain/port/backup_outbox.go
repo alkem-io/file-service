@@ -36,9 +36,13 @@ type BackupOutboxRepo interface {
 	// swaps externalID/size WITHOUT bumping version, so a handler-threaded snapshot could be stale
 	// and leave the durable content with no outbox row (an RPO gap). The whole AUTHORITATIVE
 	// post-update document is returned so the caller can build the PATCH response from one
-	// consistent snapshot without a re-read. Only priority is caller-supplied — it derives from the
-	// (immutable-on-PATCH) mime type.
-	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priority int16) (model.Document, error)
+	// consistent snapshot without a re-read. Priority is likewise computed in-tx from the
+	// AUTHORITATIVE post-update mime via the caller-supplied priorityFor: a concurrent
+	// content-replace can upgrade a still-temporary row's mime (generic→concrete, non-hot→hot)
+	// WITHOUT bumping version, so deriving priority from a handler-threaded pre-update snapshot
+	// could enqueue a now-hot object at normal priority (behind the RPO budget hot protects) —
+	// computing it from the RETURNING row's mime closes that gap.
+	UpdateMetadataWithOutbox(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int, priorityFor func(mimeType string) int16) (model.Document, error)
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)

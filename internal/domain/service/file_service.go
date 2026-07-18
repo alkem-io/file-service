@@ -602,8 +602,11 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 // already-durable row (no transition — already enqueued at create/replace), takes the plain
 // Repo.UpdateMetadata path and correctly enqueues nothing. The transition is decided from the
 // caller-supplied current document (no extra read — an extra read would be an availability
-// regression, failing a PATCH whose UPDATE would otherwise commit); priority is derived from
-// current.MimeType (immutable on a metadata PATCH). Both paths obtain the returned document from the
+// regression, failing a PATCH whose UPDATE would otherwise commit); priority is derived in-tx from
+// the AUTHORITATIVE post-update mime (the RETURNING row's MimeType, via s.priorityForMime), NOT the
+// pre-update current.MimeType — a concurrent content-replace can upgrade a still-temporary row's
+// mime non-hot→hot without bumping version, so the pre-update snapshot could under-prioritize the
+// now-durable hot object. Both paths obtain the returned document from the
 // same in-tx full-row RETURNING, so a concurrent content-replace can neither strand the durable
 // content without an outbox row nor leave the response tearing on a stale hash/dims. Returns
 // model.ErrDocumentNotFound on a version mismatch / missing row (the caller maps it to ErrConflict)
@@ -612,7 +615,7 @@ func (s *FileService) writeMetadataUpdate(ctx context.Context, documentID uuid.U
 	// temporary→durable transition: outbox on AND the row WAS temporary AND the update targets a
 	// durable state. Enqueue the now-durable object's backup hint in the same commit as the UPDATE.
 	if s.Outbox != nil && current.TemporaryLocation && !meta.TemporaryLocation {
-		doc, err := s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, s.priorityForMime(current.MimeType))
+		doc, err := s.Outbox.UpdateMetadataWithOutbox(ctx, documentID, meta, version, s.priorityForMime)
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}

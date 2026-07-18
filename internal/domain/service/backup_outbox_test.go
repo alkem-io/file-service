@@ -38,9 +38,11 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 	return nil
 }
 
-func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priority int16) (model.Document, error) {
+func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priorityFor func(mimeType string) int16) (model.Document, error) {
 	o.updateMetadataCalls++
-	o.lastPriority = priority
+	// Mirror the real adapter: priority is computed in-tx from the AUTHORITATIVE post-update mime
+	// (returnDoc = the locked row's full RETURNING), NOT from any pre-update caller snapshot.
+	o.lastPriority = priorityFor(o.returnDoc.MimeType)
 	return o.returnDoc, o.updateMetadataErr
 }
 
@@ -163,8 +165,8 @@ var (
 type metadataRoutingCase struct {
 	name         string
 	wasTemporary bool   // the threaded current row's temporaryLocation before the PATCH
-	currentMime  string // the threaded current row's mime — drives the enqueued priority
-	repoMime     string // repo.doc's mime — OPPOSITE priority class, to catch a stray repo-based priority
+	currentMime  string // the threaded current (pre-update) row's mime — the STALE snapshot; must NOT drive priority
+	repoMime     string // the AUTHORITATIVE post-update (RETURNING) mime — drives the enqueued priority; OPPOSITE class from currentMime to catch a stale-snapshot priority
 	outboxOn     bool
 	updateTemp   bool  // meta.TemporaryLocation (the PATCH target)
 	outboxErr    error // when set, UpdateMetadataWithOutbox fails — the metric-guard error path
@@ -172,7 +174,7 @@ type metadataRoutingCase struct {
 	wantRepo     int   // expected plain Repo.UpdateMetadata calls
 	wantMetric   int64 // expected backupOutboxEnqueued delta (increments only on a SUCCESSFUL enqueue)
 	wantErr      bool
-	wantPriority int16 // priority derived from currentMime (NOT repoMime)
+	wantPriority int16 // priority derived from the AUTHORITATIVE post-update mime (repoMime / returnDoc), NOT the stale currentMime
 }
 
 // assertMetadataRouting checks the outbox-vs-repo routing, the enqueue metric, the mime-derived
@@ -195,7 +197,7 @@ func assertMetadataRouting(t *testing.T, tc metadataRoutingCase, updated *model.
 		t.Fatalf("enqueue counter delta = %d, want %d", metricDelta, tc.wantMetric)
 	}
 	if tc.wantOutbox == 1 && ob.lastPriority != tc.wantPriority {
-		t.Fatalf("priority = %d, want %d (derived from the THREADED current mime, not repo.doc's)", ob.lastPriority, tc.wantPriority)
+		t.Fatalf("priority = %d, want %d (must derive from the AUTHORITATIVE post-update mime, not the stale threaded current mime)", ob.lastPriority, tc.wantPriority)
 	}
 	if tc.wantErr {
 		return
@@ -220,23 +222,33 @@ func assertMetadataRouting(t *testing.T, tc metadataRoutingCase, updated *model.
 // flipping temporaryLocation true→false (re-home MOVE / re-share pin / outbound flip). Only that
 // transition — outbox on AND the row WAS temporary AND the update targets durable — enqueues a
 // backup-outbox row; every other PATCH takes the plain Repo.UpdateMetadata path with no enqueue.
-// It also pins the authoritative-source / reload-free response invariant (see assertMetadataRouting).
+// It also pins the authoritative-source / reload-free response invariant (see assertMetadataRouting)
+// AND that the enqueued priority derives from the AUTHORITATIVE post-update mime (the RETURNING row),
+// not the stale threaded current.MimeType — so a concurrent replace that upgrades a still-temporary
+// row non-hot→hot without bumping version can't back the now-hot object up at normal priority.
 func TestUpdateMetadataOutboxRouting(t *testing.T) {
 	cases := []metadataRoutingCase{
-		{name: "transition-image-priority-0", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
-		{name: "transition-office-hot-priority-1", wasTemporary: true, currentMime: metaRouteOfficeMime, repoMime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
+		// current mime is non-hot but the authoritative RETURNING mime is HOT (a concurrent replace
+		// upgraded the still-temporary row generic→concrete without bumping version) → HOT priority(1),
+		// proving priority tracks the authoritative post-update mime, not the stale snapshot.
+		{name: "transition-current-nonhot-authoritative-hot", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 1},
+		// Mirror image: current mime is HOT but the authoritative RETURNING mime is non-hot → NORMAL priority(0).
+		{name: "transition-current-hot-authoritative-nonhot", wasTemporary: true, currentMime: metaRouteOfficeMime, repoMime: "image/png", outboxOn: true, wantOutbox: 1, wantMetric: 1, wantPriority: 0},
 		{name: "outbox-off-uses-repo", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: false, wantRepo: 1},
 		{name: "already-durable-no-transition", wasTemporary: false, currentMime: "image/png", repoMime: "image/png", outboxOn: true, wantRepo: 1},
 		{name: "keeps-temporary-no-enqueue", wasTemporary: true, currentMime: "image/png", repoMime: "image/png", outboxOn: true, updateTemp: true, wantRepo: 1},
 		// Metric-guard error path: a transition whose outbox write fails must propagate the error
-		// AND leave the counter untouched (the `if err == nil { Add(1) }` guard).
-		{name: "transition-outbox-error-no-metric", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true},
+		// AND leave the counter untouched (the `if err == nil { Add(1) }` guard). Priority is still
+		// computed from the authoritative RETURNING mime (office → hot=1) before the failure.
+		{name: "transition-outbox-error-no-metric", wasTemporary: true, currentMime: "image/png", repoMime: metaRouteOfficeMime, outboxOn: true, outboxErr: ErrConflict, wantOutbox: 1, wantMetric: 0, wantErr: true, wantPriority: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// repo.doc supplies the AUTHORITATIVE post-update row on the plain (non-outbox) path —
-			// the adapter maps it from the UPDATE's full RETURNING (externalID/size + dims). repoMime
-			// is the opposite priority class purely as a guard against a stray repo-based priority.
+			// repo.doc supplies the AUTHORITATIVE post-update row on BOTH paths — the adapter maps it
+			// from the UPDATE's full RETURNING (externalID/size + dims + mime). repoMime is the
+			// authoritative post-update mime that drives the enqueued priority; it is the opposite
+			// priority class from currentMime so a regression that reverts to the stale-snapshot mime flips
+			// the priority assertion.
 			authoritative := model.Document{
 				ExternalID: metaRouteAuthExternalID, Size: metaRouteAuthSize, MimeType: tc.repoMime,
 				TemporaryLocation: tc.wasTemporary,

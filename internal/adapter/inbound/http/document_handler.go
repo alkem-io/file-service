@@ -1017,9 +1017,42 @@ func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocu
 	}
 	present = make(map[string]struct{}, len(keys))
 	for k := range keys {
-		present[k] = struct{}{}
+		present[canonicalPatchKey(k)] = struct{}{}
 	}
 	return present, true
+}
+
+// patchFieldNames is the full set of canonical JSON keys of UpdateDocumentRequest.
+// json.Decode fills the struct fields CASE-INSENSITIVELY (so "AuthorizationId"
+// sets body.AuthorizationID), so the present-map — which the tri-state fields
+// consult to tell "omitted" (keep) from "explicit null" (clear) — must resolve
+// each raw key the SAME way. Recording presence under the raw casing instead
+// would let a case-variant key set the struct field yet read as ABSENT, silently
+// dropping the re-attribute/clear it requested (a half-applied, security-relevant
+// re-home).
+var patchFieldNames = []string{
+	"storageBucketId",
+	"temporaryLocation",
+	"displayName",
+	"authorizationId",
+	"createdBy",
+	"externalReference",
+}
+
+// canonicalPatchKey maps a raw PATCH JSON key to the canonical field name it
+// resolves to under json.Decode's case-insensitive struct matching, so
+// present-detection agrees with what the decode already applied to the struct —
+// present["authorizationId"] is true whether the client sent "authorizationId",
+// "AuthorizationId", or "AUTHORIZATIONID". A key matching no known field is
+// returned unchanged: DisallowUnknownFields has already rejected any genuinely
+// unknown key, and the present-map is only ever looked up by canonical name.
+func canonicalPatchKey(raw string) string {
+	for _, name := range patchFieldNames {
+		if strings.EqualFold(raw, name) {
+			return name
+		}
+	}
+	return raw
 }
 
 // buildMetadataUpdate merges the PATCH fields over the row's current values to
