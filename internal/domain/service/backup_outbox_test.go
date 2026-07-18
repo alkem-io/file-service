@@ -22,6 +22,10 @@ type recordingOutbox struct {
 	lastPriority        int16
 	returnDoc           model.Document // simulated post-update full-row RETURNING (authoritative)
 	updateMetadataErr   error
+	// updateFileEnqueued is what UpdateFileWithOutbox reports back — the in-tx durability decision
+	// the real adapter derives from the UPDATE's RETURNING "temporaryLocation" (true = a durable
+	// replace enqueued a backup row; false = still-temporary, enqueued nothing).
+	updateFileEnqueued bool
 }
 
 var _ port.BackupOutboxRepo = (*recordingOutbox)(nil)
@@ -32,10 +36,10 @@ func (o *recordingOutbox) CreateWithOutbox(_ context.Context, _ model.Document, 
 	return uuid.New(), nil
 }
 
-func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata, priority int16) error {
+func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata, priority int16) (bool, error) {
 	o.updateCalls++
 	o.lastPriority = priority
-	return nil
+	return o.updateFileEnqueued, nil
 }
 
 func (o *recordingOutbox) UpdateMetadataWithOutbox(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int, priorityFor func(mimeType string) int16) (model.Document, error) {
@@ -113,34 +117,47 @@ func TestWriteCreateRouting(t *testing.T) {
 	})
 }
 
-// TestWriteReplaceRouting mirrors the create routing for the content-replace path.
+// TestWriteReplaceRouting covers the content-replace path. With the producer on, the replace ALWAYS
+// routes through the outbox-aware path (the enqueue-or-not decision is made in-tx from the row's
+// authoritative "temporaryLocation", never the pre-loaded snapshot); the metric counts only when a
+// backup row was actually enqueued (a durable replace). Producer off → the plain Repo.UpdateFile.
 func TestWriteReplaceRouting(t *testing.T) {
 	t.Run("producer-off-uses-repo", func(t *testing.T) {
 		repo, ob := &mockRepo{}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Logger: nopLogger} // Outbox nil
-		_ = s.writeReplace(context.Background(), model.Document{}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
+		_ = s.writeReplace(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
 		if repo.updateFileCalls != 1 || ob.updateCalls != 0 {
 			t.Fatalf("off: repo=%d outbox=%d (want repo=1 outbox=0)", repo.updateFileCalls, ob.updateCalls)
 		}
 	})
-	t.Run("producer-on-nontemporary-uses-outbox", func(t *testing.T) {
-		repo, ob := &mockRepo{}, &recordingOutbox{}
+	t.Run("producer-on-durable-enqueues-and-counts", func(t *testing.T) {
+		// In-tx RETURNING temporaryLocation=false (durable): the outbox row is enqueued and the
+		// metric moves once.
+		repo, ob := &mockRepo{}, &recordingOutbox{updateFileEnqueued: true}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
 		before := backupOutboxEnqueued.Value()
-		_ = s.writeReplace(context.Background(), model.Document{}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
+		_ = s.writeReplace(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
 		if ob.updateCalls != 1 || repo.updateFileCalls != 0 {
 			t.Fatalf("outbox=%d repo=%d (want outbox=1 repo=0)", ob.updateCalls, repo.updateFileCalls)
 		}
 		if got := backupOutboxEnqueued.Value() - before; got != 1 {
-			t.Fatalf("a committed replace-enqueue must count once (T011): got +%d", got)
+			t.Fatalf("a durable replace-enqueue must count once (T011): got +%d", got)
 		}
 	})
-	t.Run("producer-on-temporary-uses-repo", func(t *testing.T) {
-		repo, ob := &mockRepo{}, &recordingOutbox{}
+	t.Run("producer-on-still-temporary-skips-enqueue", func(t *testing.T) {
+		// In-tx RETURNING temporaryLocation=true (still staging): the replace still routes through
+		// the outbox-aware path (the authoritative decision is made in-tx), but enqueues nothing and
+		// the metric stays put. It must NOT fall back to the plain Repo path — that pre-loaded-snapshot
+		// branch was the stranded-blob race.
+		repo, ob := &mockRepo{}, &recordingOutbox{updateFileEnqueued: false}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
-		_ = s.writeReplace(context.Background(), model.Document{TemporaryLocation: true}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
-		if repo.updateFileCalls != 1 || ob.updateCalls != 0 {
-			t.Fatalf("temporary must NOT enqueue: repo=%d outbox=%d", repo.updateFileCalls, ob.updateCalls)
+		before := backupOutboxEnqueued.Value()
+		_ = s.writeReplace(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
+		if ob.updateCalls != 1 || repo.updateFileCalls != 0 {
+			t.Fatalf("still-temporary must route through the outbox path, not Repo: outbox=%d repo=%d", ob.updateCalls, repo.updateFileCalls)
+		}
+		if got := backupOutboxEnqueued.Value() - before; got != 0 {
+			t.Fatalf("a still-temporary replace must NOT count an enqueue (T011): got +%d", got)
 		}
 	})
 }

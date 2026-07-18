@@ -151,10 +151,12 @@ func TestMock_UpdateFile_Success(t *testing.T) {
 	defer mock.Close()
 
 	// Param order: id, externalID, mimeType, size, updatedDate, content_metadata.
-	// Content metadata is the empty-Populated case → marshals to "{}".
-	mock.ExpectExec("UPDATE file SET").
+	// Content metadata is the empty-Populated case → marshals to "{}". The UPDATE is
+	// now :one (RETURNING "temporaryLocation"), so it's a Query; the non-outbox path
+	// ignores the returned flag.
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(mock.NewRows([]string{"temporaryLocation"}).AddRow(false))
 
 	a := New(mock)
 	err = a.UpdateFile(context.Background(), uuid.New(), "newhash", "image/jpeg", 999, model.ContentMetadata{})
@@ -173,9 +175,10 @@ func TestMock_UpdateFile_NotFound(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
+	// A missing row → the :one RETURNING yields no row → pgx.ErrNoRows → ErrDocumentNotFound.
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		WillReturnRows(mock.NewRows([]string{"temporaryLocation"}))
 
 	a := New(mock)
 	err = a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
@@ -364,7 +367,7 @@ func TestMock_UpdateFile_DBError(t *testing.T) {
 	}
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE file SET").
+	mock.ExpectQuery("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
 		WillReturnError(errors.New("connection reset"))
 

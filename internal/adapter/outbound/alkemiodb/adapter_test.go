@@ -236,17 +236,28 @@ func TestUpdateMetadata(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	var id, bucketID, authID [16]byte
+	// Seed a DEDICATED row (its own auth policy, a borrowed bucket FK) instead of
+	// picking a random shared row. UpdateMetadata's UPDATE unconditionally SETs
+	// createdBy/externalReference from the passed struct; run against a shared row
+	// with a partial update (CreatedBy/ExternalReference nil) it would NULL those
+	// columns on real fixture data — corrupting it for other tests. (Production is
+	// safe: the handler's buildMetadataUpdate fills absent createdBy/externalReference
+	// with the row's current values, so an omitted field is a no-op SET, never a
+	// clear.) cleanup tears this row down, so no restore is needed.
+	docID, _, cleanup := createTestRow(t, pool, nil)
+	defer cleanup()
+
+	// Read the seeded row's current mutable fields for the optimistic-lock update.
+	var bucketID, authID [16]byte
 	var tempLoc bool
 	var displayName string
 	var version int32
-	err := pool.QueryRow(context.Background(),
-		`SELECT id, "storageBucketId", "authorizationId", "temporaryLocation", "displayName", version FROM file WHERE "authorizationId" IS NOT NULL LIMIT 1`,
-	).Scan(&id, &bucketID, &authID, &tempLoc, &displayName, &version)
-	if err != nil {
-		t.Skip("no documents")
+	if err := pool.QueryRow(context.Background(),
+		`SELECT "storageBucketId", "authorizationId", "temporaryLocation", "displayName", version FROM file WHERE id = $1`,
+		docID,
+	).Scan(&bucketID, &authID, &tempLoc, &displayName, &version); err != nil {
+		t.Fatalf("read seeded row: %v", err)
 	}
-	docID := uuid.UUID(id)
 	origBucket := uuid.UUID(bucketID)
 	origAuth := uuid.UUID(authID)
 
@@ -268,12 +279,6 @@ func TestUpdateMetadata(t *testing.T) {
 		t.Errorf("returned doc = {temp:%v, name:%q}, want the applied SETs {temp:%v, name:%q}",
 			updated.TemporaryLocation, updated.DisplayName, !tempLoc, displayName)
 	}
-	defer func() {
-		// Restore with incremented version
-		_, _ = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
-			StorageBucketID: origBucket, TemporaryLocation: tempLoc, DisplayName: displayName, AuthorizationID: &origAuth,
-		}, int(version+1))
-	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
 	if doc.TemporaryLocation != !tempLoc {

@@ -57,13 +57,25 @@ INSERT INTO file (id, "externalID", "mimeType", size, "displayName", "createdBy"
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, $14)
 RETURNING id;
 
--- name: UpdateDocumentFile :execrows
+-- name: UpdateDocumentFile :one
 -- Updates content fields. content_metadata replaces any prior value (Replace
 -- emits fresh dims via Process; the old row's content_metadata is discarded).
+--
+-- RETURNING "temporaryLocation" is the AUTHORITATIVE in-tx durability state of the
+-- row read while it is UPDATE-locked in this transaction. The transactional
+-- backup-outbox producer enqueues the new content hash ONLY when this is false
+-- (durable): a content-replace that loaded the doc as temporary can race a
+-- concurrent temp→durable PATCH that commits FIRST, so the pre-loaded snapshot is
+-- stale; deciding the enqueue from this locked-row flag (never the snapshot) closes
+-- the stranded-blob race in both orderings — replace-before-flip (temporary → no
+-- enqueue, the flip's own outbox row covers the then-current hash) and
+-- flip-before-replace (durable → the replace enqueues the new hash). 0 rows
+-- (missing row) → no row returned (pgx.ErrNoRows) → model.ErrDocumentNotFound.
 UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
     content_metadata = $6
-WHERE id = $1;
+WHERE id = $1
+RETURNING "temporaryLocation";
 
 -- name: UpdateDocumentMetadata :one
 -- Updates the mutable metadata fields atomically with optimistic locking.
