@@ -230,19 +230,19 @@ paths:
           description: OK
         "400":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -483,21 +483,15 @@ paths:
                 format: binary
                 type: string
           description: OK
-        "400":
-          content:
-            application/octet-stream:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Bad Request
         "404":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -630,33 +624,27 @@ paths:
           description: OK
         "304":
           description: Not Modified
-        "400":
-          content:
-            application/octet-stream:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Bad Request
         "403":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Forbidden
         "404":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
         "503":
           content:
-            application/octet-stream:
+            application/json:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Service Unavailable

@@ -81,7 +81,7 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	content, err := h.Service.Storage.Read(doc.ExternalID)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage", false)
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 
@@ -112,7 +112,14 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	// is a retryable 500; a 404 is just "no such blob" and the worker decides what that means.
 	rc, size, err := h.Service.Storage.ReadStream(hash)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage", true)
+		// The key here is the client's URL {hash}, so a malformed one is a 400 (client error).
+		// This is the ONLY read path where that's true — GetContent/ServeDocument read a stored
+		// key — so the 400 lives here, not in the shared helper (keeps it off their API contract).
+		if errors.Is(err, port.ErrInvalidKey) {
+			writeJSONError(w, http.StatusBadRequest, "invalid content hash")
+			return
+		}
+		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage")
 		return
 	}
 	defer func() { _ = rc.Close() }()

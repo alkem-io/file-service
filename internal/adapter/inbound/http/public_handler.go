@@ -72,7 +72,7 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	// Read file from storage
 	content, err := h.Storage.Read(doc.ExternalID)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage", false)
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 
