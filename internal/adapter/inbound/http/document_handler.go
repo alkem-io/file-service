@@ -121,13 +121,10 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadRequest, "invalid content hash")
 		case errors.Is(err, os.ErrNotExist):
 			writeJSONError(w, http.StatusNotFound, "blob not found")
-		case errors.Is(err, port.ErrStoreUnavailable):
-			// A store outage (unmounted volume / wiped root) is a RETRYABLE 503, never
-			// a 404 — a 404 here would tell the backup/replication reader the object is
-			// gone, turning a mount outage into spurious mass source-deletion.
-			h.Logger.Error("blob read: storage unavailable", zap.Error(err))
-			writeJSONError(w, http.StatusServiceUnavailable, "storage unavailable")
 		default:
+			// Any other backend failure (e.g. an NFS EIO/ESTALE outage) is a 500 —
+			// retryable, NOT a 404. file-service does not guess whether an absence is a
+			// store outage; the worker cross-checks the alkemio `file` corpus on a 404.
 			h.Logger.Error("failed to read blob from storage", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
@@ -140,9 +137,12 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to
-	// N×blobsize. Any mid-stream read failure truncates the body against the
-	// declared Content-Length, which the caller's hash verifier catches.
-	_, _ = io.Copy(w, rc)
+	// N×blobsize. A mid-stream read failure truncates the body against the declared
+	// Content-Length (the caller's hash verifier catches it); log it since the 200
+	// header is already sent and no error status can be returned.
+	if _, err := io.Copy(w, rc); err != nil {
+		h.Logger.Warn("blob stream truncated mid-copy", zap.String("hash", hash), zap.Error(err))
+	}
 }
 
 // createFields collects the multipart metadata fields by name (spec 020:

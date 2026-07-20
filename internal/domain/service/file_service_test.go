@@ -1310,7 +1310,7 @@ func (m *dedupMockStorage) Read(id string) ([]byte, error) { return m.inner.Read
 func (m *dedupMockStorage) ReadStream(id string) (io.ReadCloser, int64, error) {
 	return m.inner.ReadStream(id)
 }
-func (m *dedupMockStorage) Delete(_ string) error { m.deleted = true; return nil }
+func (m *dedupMockStorage) Delete(_ string) error          { m.deleted = true; return nil }
 func (m *dedupMockStorage) Exists(id string) (bool, error) { return m.inner.Exists(id) }
 
 func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {

@@ -2419,18 +2419,6 @@ func TestDocumentHandler_GetBlobContent_InvalidKey(t *testing.T) {
 	}
 }
 
-// A store OUTAGE (unmounted volume / wiped root) must be a retryable 503, NOT a 404 —
-// a 404 would tell the backup/replication reader the object is gone, turning a mount
-// outage into spurious mass source-deletion in the DR signal.
-func TestDocumentHandler_GetBlobContent_StoreUnavailable(t *testing.T) {
-	h, _, storage := newDocHandler()
-	storage.err = port.ErrStoreUnavailable
-
-	if rr := serveBlob(h, blobHash); rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rr.Code)
-	}
-}
-
 // An unexpected backend error is a 500 (the branch none of the mapped sentinels cover).
 func TestDocumentHandler_GetBlobContent_InternalError(t *testing.T) {
 	h, _, storage := newDocHandler()

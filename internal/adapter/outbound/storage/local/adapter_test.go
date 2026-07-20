@@ -533,25 +533,16 @@ func TestReadStream(t *testing.T) {
 	}
 }
 
-// A genuinely absent blob (store healthy) is os.ErrNotExist; a whole-store outage (base
-// dir gone) is ErrStoreUnavailable — the distinction the backup reader relies on to not
-// treat a mount outage as mass object-deletion.
-func TestReadClassifiesStoreOutageVsAbsentBlob(t *testing.T) {
+// A genuinely absent blob is os.ErrNotExist, for both Read and ReadStream. file-service does
+// not try to distinguish absence from a store outage (an empty root is ambiguous); that call
+// is the worker's, via the corpus cross-check.
+func TestReadAbsentBlobIsNotExist(t *testing.T) {
 	valid := "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
-
-	healthy := New(t.TempDir()) // base dir exists, blob absent
-	if _, err := healthy.Read(valid); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("absent blob, healthy store: err = %v, want os.ErrNotExist", err)
+	a := New(t.TempDir())
+	if _, err := a.Read(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Read absent blob: err = %v, want os.ErrNotExist", err)
 	}
-	if _, _, err := healthy.ReadStream(valid); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("absent blob, healthy store (stream): err = %v, want os.ErrNotExist", err)
-	}
-
-	gone := New(filepath.Join(t.TempDir(), "unmounted")) // base dir does not exist
-	if _, err := gone.Read(valid); !errors.Is(err, port.ErrStoreUnavailable) {
-		t.Errorf("store outage: err = %v, want ErrStoreUnavailable", err)
-	}
-	if _, _, err := gone.ReadStream(valid); !errors.Is(err, port.ErrStoreUnavailable) {
-		t.Errorf("store outage (stream): err = %v, want ErrStoreUnavailable", err)
+	if _, _, err := a.ReadStream(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ReadStream absent blob: err = %v, want os.ErrNotExist", err)
 	}
 }
