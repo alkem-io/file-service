@@ -96,6 +96,63 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
+// GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
+// read. It returns the immutable blob stored under a SHA3-256 content hash,
+// independent of any document row. The store is already content-addressed
+// (Storage.Read keys on the hash); this exposes that read over the API.
+//
+// This is the read path the backup/replication worker uses (workspace#008,
+// FR-008): the outbox records an object's content hash, and the blob under a
+// hash never changes, so a fetch-by-hash is version-exact — it returns the
+// EXACT bytes that were enqueued, never whichever version the (mutable)
+// document currently points at, which is what GET /file/{id}/content returns.
+// A hash with no blob (e.g. a version superseded and refcount-deleted) is a
+// clean 404, distinguishable by the caller from a transport failure.
+func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	if !isContentHash(hash) {
+		writeJSONError(w, http.StatusBadRequest, "invalid content hash")
+		return
+	}
+
+	content, err := h.Service.Storage.Read(hash)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSONError(w, http.StatusNotFound, "blob not found")
+		} else {
+			h.Logger.Error("failed to read blob from storage", zap.Error(err))
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // raw bytes, never a document to render
+	w.WriteHeader(http.StatusOK)
+	// gosec G705 taints this because the {hash} URL param flows into Storage.Read: the
+	// response body is the stored BLOB, not the hash; the hash is validated alphanumeric
+	// (isContentHash) so it cannot escape the store, and it is served nosniff octet-stream.
+	_, _ = w.Write(content) //nolint:gosec // body is stored bytes, not reflected input; validated hash + nosniff
+}
+
+// isContentHash reports whether s is a syntactically valid content-addressed
+// key: 32–128 alphanumerics, matching the storage layer's externalID rule.
+// The alphanumeric-only constraint also blocks any path-separator or
+// traversal metacharacter before the value reaches the filesystem.
+func isContentHash(s string) bool {
+	if len(s) < 32 || len(s) > 128 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // createFields collects the multipart metadata fields by name (spec 020:
 // the fields trail the file part — research R4). Typed struct rather than a
 // map: direct field reads keep generated API docs clean (map-index string

@@ -198,6 +198,59 @@ info:
   version: 0.2.0
 openapi: 3.1.1
 paths:
+  /internal/blob/{hash}/content:
+    get:
+      description: |-
+        GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
+        read. It returns the immutable blob stored under a SHA3-256 content hash,
+        independent of any document row. The store is already content-addressed
+        (Storage.Read keys on the hash); this exposes that read over the API.
+
+        This is the read path the backup/replication worker uses (workspace#008,
+        FR-008): the outbox records an object's content hash, and the blob under a
+        hash never changes, so a fetch-by-hash is version-exact — it returns the
+        EXACT bytes that were enqueued, never whichever version the (mutable)
+        document currently points at, which is what GET /file/{id}/content returns.
+        A hash with no blob (e.g. a version superseded and refcount-deleted) is a
+        clean 404, distinguishable by the caller from a transport failure.
+      operationId: DocumentHandler.GetBlobContent
+      parameters:
+        - in: path
+          name: hash
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
+          description: OK
+        "400":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Internal Server Error
+      summary: |-
+        GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
+        read.
+      tags:
+        - /internal
   /internal/file:
     post:
       description: |-

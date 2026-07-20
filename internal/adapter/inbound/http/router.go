@@ -68,6 +68,11 @@ func NewRouter(deps Deps) *chi.Mux {
 		r.Post("/file/copy", deps.DocumentHandler.Copy)
 		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
 		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
+		// Content-addressed read: the immutable blob under a SHA3-256 hash, independent of
+		// any document row. The backup/replication worker (workspace#008) reads by hash so a
+		// fetch is version-exact and races no content edit — unlike /file/{id}/content, which
+		// returns whatever blob the mutable document currently points at.
+		r.Get("/blob/{hash}/content", deps.DocumentHandler.GetBlobContent)
 		r.Put("/file/{id}/content", deps.DocumentHandler.ReplaceContent)
 		r.Delete("/file/{id}", deps.DocumentHandler.Delete)
 		r.Patch("/file/{id}", deps.DocumentHandler.Update)

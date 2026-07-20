@@ -2351,3 +2351,60 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 		}
 	}
 }
+
+// serveBlob wires just the by-hash route and runs one GET /internal/blob/{hash}/content.
+func serveBlob(h *DocumentHandler, hash string) *httptest.ResponseRecorder {
+	r := chi.NewRouter()
+	r.Get("/internal/blob/{hash}/content", h.GetBlobContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/blob/"+hash+"/content", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr
+}
+
+// A content-addressed read returns the blob bytes for a valid hash — with NO document
+// lookup (repo is untouched): the whole point is that the fetch is keyed by the immutable
+// content hash, not by a mutable document id.
+func TestDocumentHandler_GetBlobContent_Found(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.data = []byte("blob-bytes")
+
+	const hash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	rr := serveBlob(h, hash)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if got := rr.Body.String(); got != "blob-bytes" {
+		t.Fatalf("body = %q, want %q", got, "blob-bytes")
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+}
+
+// A hash with no blob (e.g. a version superseded and refcount-deleted) is a clean 404,
+// so the worker can map it to source-gone rather than a false integrity failure.
+func TestDocumentHandler_GetBlobContent_NotFound(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = os.ErrNotExist
+
+	const hash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	rr := serveBlob(h, hash)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// A syntactically invalid hash is rejected at the handler (400) before it can reach the
+// filesystem — the alphanumeric-only rule is also the path-traversal guard.
+func TestDocumentHandler_GetBlobContent_InvalidHash(t *testing.T) {
+	h, _, _ := newDocHandler()
+	for _, bad := range []string{"short", "..%2f..%2fetc", strings.Repeat("z", 200)} {
+		rr := serveBlob(h, bad)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("hash %q: status = %d, want 400", bad, rr.Code)
+		}
+	}
+}
