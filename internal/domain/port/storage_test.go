@@ -1,13 +1,17 @@
 package port_test
 
 import (
+	"io"
 	"testing"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
 	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
-// StoragePortContractTest exercises any StoragePort implementation.
+// StoragePortContractTest exercises any StoragePort implementation. One subtest per port method,
+// so its branch count is inherent contract coverage, not complexity to refactor.
+//
+//nolint:gocyclo // per-method subtests; splitting fragments the single-entry contract, not worth it
 func StoragePortContractTest(t *testing.T, storage port.StoragePort) {
 	t.Helper()
 
@@ -30,6 +34,26 @@ func StoragePortContractTest(t *testing.T, storage port.StoragePort) {
 		}
 		if string(data) != string(content) {
 			t.Error("content mismatch")
+		}
+	})
+
+	t.Run("ReadStream", func(t *testing.T) {
+		content := []byte("stream contract content")
+		stored, err := storage.Save(content)
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		rc, size, err := storage.ReadStream(stored.ExternalID)
+		if err != nil {
+			t.Fatalf("ReadStream: %v", err)
+		}
+		defer func() { _ = rc.Close() }()
+		if size != int64(len(content)) {
+			t.Errorf("ReadStream size = %d, want %d", size, len(content))
+		}
+		got, _ := io.ReadAll(rc)
+		if string(got) != string(content) {
+			t.Errorf("ReadStream content = %q, want %q", got, content)
 		}
 	})
 

@@ -2446,3 +2446,22 @@ func TestDocumentHandler_GetBlobContent_MidStreamErrorAborts(t *testing.T) {
 	_ = serveBlob(h, blobHash)
 	t.Fatal("expected panic(http.ErrAbortHandler) on a mid-stream read failure")
 }
+
+// A STORED externalID that fails the storage key rules (a corrupt/mis-migrated `file` row) is a
+// SERVER data problem on the by-id read path — a logged 500, NOT a 400 that blames the client
+// (only the by-hash endpoint, where the key is the client's URL, maps ErrInvalidKey→400).
+func TestDocumentHandler_GetContent_InvalidStoredKeyIs500(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), ExternalID: "not-a-valid-key", MimeType: "text/plain"}
+	storage.err = port.ErrInvalidKey
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/content", h.GetContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+repo.doc.ID.String()+"/content", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("a malformed STORED key must be a 500 (server data problem), got %d", rr.Code)
+	}
+}

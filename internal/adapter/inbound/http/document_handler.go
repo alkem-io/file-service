@@ -81,7 +81,7 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	content, err := h.Service.Storage.Read(doc.ExternalID)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage", false)
 		return
 	}
 
@@ -109,10 +109,10 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	// isValidExternalID), so the handler never drifts from what the store serves; the shared
 	// writeStorageReadError maps the failure. file-service does NOT try to tell an absent blob
 	// from a store outage (storage can't, so it doesn't claim to) — a non-ENOENT backend error
-	// is a retryable 500, and the worker cross-checks the alkemio `file` corpus on a 404.
+	// is a retryable 500; a 404 is just "no such blob" and the worker decides what that means.
 	rc, size, err := h.Service.Storage.ReadStream(hash)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage")
+		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage", true)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -122,16 +122,39 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to N×blobsize.
-	// HTTP fundamentally cannot retract the already-sent 200 if a backend read (e.g. NFS
-	// EIO/ESTALE) fails mid-stream, so instead we make the failure UNMISTAKABLE, not silent:
-	// the declared Content-Length means a short body is a detectable truncation, and
-	// panic(http.ErrAbortHandler) aborts the connection abnormally so no client can mistake the
-	// partial response for a clean EOF. Belt-and-suspenders: the sole consumer (the backup
-	// worker) hash-verifies every byte, so it can never persist a truncated blob — it retries.
-	if _, err := io.Copy(w, rc); err != nil {
-		h.Logger.Warn("blob stream truncated mid-copy — aborting connection", zap.String("hash", hash), zap.Error(err))
-		panic(http.ErrAbortHandler)
+	// HTTP can't retract the already-sent 200, so a mid-stream failure is handled by its SIDE,
+	// which io.Copy alone conflates — hence the read wrapper:
+	//   - BACKEND read fault (NFS EIO/ESTALE): a genuine truncation. Make it loud and
+	//     panic(http.ErrAbortHandler) so the connection aborts abnormally and no client mistakes
+	//     the short body (vs the declared Content-Length) for a clean EOF. The sole consumer (the
+	//     backup worker) also hash-verifies every byte, so it can never persist a truncated blob.
+	//   - CLIENT write failure (a routine worker cancel/timeout/disconnect): benign — the response
+	//     is moot. Don't warn (that would be alert-fatigue noise masking the real EIO signal).
+	src := &readErrCapture{r: rc}
+	if _, err := io.Copy(w, src); err != nil {
+		if src.err != nil {
+			h.Logger.Warn("blob stream truncated by a backend read fault — aborting connection",
+				zap.String("hash", hash), zap.Error(src.err))
+			panic(http.ErrAbortHandler)
+		}
+		// else: io.Copy failed on the write side — the client went away. Nothing to do.
 	}
+}
+
+// readErrCapture records a non-EOF error from the wrapped reader so a caller can tell a source
+// (backend) read failure from a destination (client) write failure after io.Copy returns — which
+// io.Copy itself does not distinguish.
+type readErrCapture struct {
+	r   io.Reader
+	err error
+}
+
+func (c *readErrCapture) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		c.err = err
+	}
+	return n, err
 }
 
 // createFields collects the multipart metadata fields by name (spec 020:
