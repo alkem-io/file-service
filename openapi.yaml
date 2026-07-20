@@ -246,6 +246,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
+        "503":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Service Unavailable
       summary: |-
         GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
         read.

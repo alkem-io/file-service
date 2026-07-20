@@ -110,47 +110,39 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 // clean 404, distinguishable by the caller from a transport failure.
 func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	if !isContentHash(hash) {
-		writeJSONError(w, http.StatusBadRequest, "invalid content hash")
-		return
-	}
 
-	content, err := h.Service.Storage.Read(hash)
+	// Storage owns key validation AND store-health classification — one definition
+	// (the deliberately legacy-CID-permissive isValidExternalID), so the handler
+	// never drifts from what the store will actually serve. It maps the sentinels:
+	rc, size, err := h.Service.Storage.ReadStream(hash)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, port.ErrInvalidKey):
+			writeJSONError(w, http.StatusBadRequest, "invalid content hash")
+		case errors.Is(err, os.ErrNotExist):
 			writeJSONError(w, http.StatusNotFound, "blob not found")
-		} else {
+		case errors.Is(err, port.ErrStoreUnavailable):
+			// A store outage (unmounted volume / wiped root) is a RETRYABLE 503, never
+			// a 404 — a 404 here would tell the backup/replication reader the object is
+			// gone, turning a mount outage into spurious mass source-deletion.
+			h.Logger.Error("blob read: storage unavailable", zap.Error(err))
+			writeJSONError(w, http.StatusServiceUnavailable, "storage unavailable")
+		default:
 			h.Logger.Error("failed to read blob from storage", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
+	defer func() { _ = rc.Close() }()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff") // raw bytes, never a document to render
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	// gosec G705 taints this because the {hash} URL param flows into Storage.Read: the
-	// response body is the stored BLOB, not the hash; the hash is validated alphanumeric
-	// (isContentHash) so it cannot escape the store, and it is served nosniff octet-stream.
-	_, _ = w.Write(content) //nolint:gosec // body is stored bytes, not reflected input; validated hash + nosniff
-}
-
-// isContentHash reports whether s is a syntactically valid content-addressed
-// key: 32–128 alphanumerics, matching the storage layer's externalID rule.
-// The alphanumeric-only constraint also blocks any path-separator or
-// traversal metacharacter before the value reaches the filesystem.
-func isContentHash(s string) bool {
-	if len(s) < 32 || len(s) > 128 {
-		return false
-	}
-	for _, c := range s {
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-		default:
-			return false
-		}
-	}
-	return true
+	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to
+	// N×blobsize. Any mid-stream read failure truncates the body against the
+	// declared Content-Length, which the caller's hash verifier catches.
+	_, _ = io.Copy(w, rc)
 }
 
 // createFields collects the multipart metadata fields by name (spec 020:

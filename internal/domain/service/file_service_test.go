@@ -178,6 +178,13 @@ func (m *mockStorage) Read(externalID string) ([]byte, error) {
 	}
 	return m.data, m.readErr
 }
+func (m *mockStorage) ReadStream(externalID string) (io.ReadCloser, int64, error) {
+	b, err := m.Read(externalID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
 func (m *mockStorage) Delete(_ string) error         { m.deleted = true; return m.deleteErr }
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
@@ -1300,7 +1307,10 @@ func (m *dedupMockStorage) Save(content []byte) (model.StoredFile, error) {
 	return model.StoredFile{ExternalID: hash, Size: len(content), Created: false}, nil
 }
 func (m *dedupMockStorage) Read(id string) ([]byte, error) { return m.inner.Read(id) }
-func (m *dedupMockStorage) Delete(_ string) error          { m.deleted = true; return nil }
+func (m *dedupMockStorage) ReadStream(id string) (io.ReadCloser, int64, error) {
+	return m.inner.ReadStream(id)
+}
+func (m *dedupMockStorage) Delete(_ string) error { m.deleted = true; return nil }
 func (m *dedupMockStorage) Exists(id string) (bool, error) { return m.inner.Exists(id) }
 
 func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {

@@ -2362,15 +2362,16 @@ func serveBlob(h *DocumentHandler, hash string) *httptest.ResponseRecorder {
 	return rr
 }
 
-// A content-addressed read returns the blob bytes for a valid hash — with NO document
-// lookup (repo is untouched): the whole point is that the fetch is keyed by the immutable
-// content hash, not by a mutable document id.
+const blobHash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+
+// A content-addressed read returns the blob bytes for a valid hash, served nosniff with an
+// accurate Content-Length — and with NO document lookup: the endpoint's whole reason to exist
+// is a version-exact, DB-independent read keyed by the immutable content hash.
 func TestDocumentHandler_GetBlobContent_Found(t *testing.T) {
-	h, _, storage := newDocHandler()
+	h, repo, storage := newDocHandler()
 	storage.data = []byte("blob-bytes")
 
-	const hash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
-	rr := serveBlob(h, hash)
+	rr := serveBlob(h, blobHash)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -2381,6 +2382,18 @@ func TestDocumentHandler_GetBlobContent_Found(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
 	}
+	// The gosec-G705 suppression's rationale depends on this header; assert it so a
+	// regression that drops it fails loudly rather than shipping green.
+	if ns := rr.Header().Get("X-Content-Type-Options"); ns != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", ns)
+	}
+	if cl := rr.Header().Get("Content-Length"); cl != "10" {
+		t.Errorf("Content-Length = %q, want 10", cl)
+	}
+	// The "no document lookup" invariant, defended by assertion, not just a comment.
+	if repo.getByIDCalls != 0 {
+		t.Errorf("blob read did a document lookup (GetByID called %d×); it must be DB-independent", repo.getByIDCalls)
+	}
 }
 
 // A hash with no blob (e.g. a version superseded and refcount-deleted) is a clean 404,
@@ -2389,22 +2402,41 @@ func TestDocumentHandler_GetBlobContent_NotFound(t *testing.T) {
 	h, _, storage := newDocHandler()
 	storage.err = os.ErrNotExist
 
-	const hash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
-	rr := serveBlob(h, hash)
-
-	if rr.Code != http.StatusNotFound {
+	if rr := serveBlob(h, blobHash); rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
 	}
 }
 
-// A syntactically invalid hash is rejected at the handler (400) before it can reach the
-// filesystem — the alphanumeric-only rule is also the path-traversal guard.
-func TestDocumentHandler_GetBlobContent_InvalidHash(t *testing.T) {
-	h, _, _ := newDocHandler()
-	for _, bad := range []string{"short", "..%2f..%2fetc", strings.Repeat("z", 200)} {
-		rr := serveBlob(h, bad)
-		if rr.Code != http.StatusBadRequest {
-			t.Errorf("hash %q: status = %d, want 400", bad, rr.Code)
-		}
+// A malformed key (rejected by the storage layer as ErrInvalidKey) maps to 400.
+// The actual key-validation rules (traversal/char-class) are owned and tested at the
+// storage layer (adapter_test.go isValidExternalID); the handler only maps the sentinel.
+func TestDocumentHandler_GetBlobContent_InvalidKey(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = port.ErrInvalidKey
+
+	if rr := serveBlob(h, "not-a-hash"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// A store OUTAGE (unmounted volume / wiped root) must be a retryable 503, NOT a 404 —
+// a 404 would tell the backup/replication reader the object is gone, turning a mount
+// outage into spurious mass source-deletion in the DR signal.
+func TestDocumentHandler_GetBlobContent_StoreUnavailable(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = port.ErrStoreUnavailable
+
+	if rr := serveBlob(h, blobHash); rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+}
+
+// An unexpected backend error is a 500 (the branch none of the mapped sentinels cover).
+func TestDocumentHandler_GetBlobContent_InternalError(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = errors.New("disk on fire")
+
+	if rr := serveBlob(h, blobHash); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
 	}
 }

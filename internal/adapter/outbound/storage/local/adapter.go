@@ -58,13 +58,49 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 // before touching the filesystem.
 func (a *Adapter) Read(externalID string) ([]byte, error) {
 	if !isValidExternalID(externalID) {
-		return nil, fmt.Errorf("invalid external ID: %s", externalID)
+		return nil, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
 	}
 	data, err := os.ReadFile(a.filePath(externalID))
 	if err != nil {
-		return nil, fmt.Errorf("read file %s: %w", externalID, err)
+		return nil, a.classifyReadErr(externalID, err)
 	}
 	return data, nil
+}
+
+// ReadStream opens the blob for streaming so the caller never holds the whole
+// blob in memory. The returned *os.File is the io.ReadCloser; size comes from
+// the same open handle's Stat (no TOCTOU against a concurrent replace, which
+// publishes a NEW hash under a NEW name — this name is immutable once written).
+func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
+	if !isValidExternalID(externalID) {
+		return nil, 0, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
+	}
+	f, err := os.Open(a.filePath(externalID)) //nolint:gosec // path = basePath + validated content id (isValidExternalID rejects traversal)
+	if err != nil {
+		return nil, 0, a.classifyReadErr(externalID, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("stat blob %s: %w", externalID, err)
+	}
+	return f, fi.Size(), nil
+}
+
+// classifyReadErr disambiguates a read failure. A bare ENOENT is ambiguous: the
+// blob is genuinely absent OR the whole store is gone (volume unmounted / root
+// wiped), which makes EVERY read ENOENT. We stat the base directory to tell them
+// apart, so a store outage surfaces as ErrStoreUnavailable (retryable) instead of
+// masquerading as an authoritative per-object not-found — the distinction the
+// backup/replication reader depends on to not record a live store as deleted.
+func (a *Adapter) classifyReadErr(externalID string, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		if fi, statErr := os.Stat(a.basePath); statErr != nil || !fi.IsDir() {
+			return fmt.Errorf("read %q: store root %q: %w", externalID, a.basePath, port.ErrStoreUnavailable)
+		}
+		return fmt.Errorf("read %q: %w", externalID, err) // genuine absence; wraps os.ErrNotExist
+	}
+	return fmt.Errorf("read file %s: %w", externalID, err)
 }
 
 // Delete removes the blob. Idempotent: a missing file is success, so

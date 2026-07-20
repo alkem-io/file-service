@@ -3,6 +3,7 @@ package local
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -505,4 +506,52 @@ func globNames(t *testing.T, dir string, keep func(string) bool) []string {
 		}
 	}
 	return out
+}
+
+// ReadStream returns the blob bytes + size and rejects a traversal key with ErrInvalidKey.
+func TestReadStream(t *testing.T) {
+	a := New(t.TempDir())
+	stored, err := a.Save([]byte("stream me"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, size, err := a.ReadStream(stored.ExternalID)
+	if err != nil {
+		t.Fatalf("ReadStream: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	if size != int64(len("stream me")) {
+		t.Errorf("size = %d, want %d", size, len("stream me"))
+	}
+	b, _ := io.ReadAll(rc)
+	if string(b) != "stream me" {
+		t.Errorf("body = %q", b)
+	}
+
+	if _, _, err := a.ReadStream("../etc/passwd"); !errors.Is(err, port.ErrInvalidKey) {
+		t.Errorf("traversal key: err = %v, want ErrInvalidKey", err)
+	}
+}
+
+// A genuinely absent blob (store healthy) is os.ErrNotExist; a whole-store outage (base
+// dir gone) is ErrStoreUnavailable — the distinction the backup reader relies on to not
+// treat a mount outage as mass object-deletion.
+func TestReadClassifiesStoreOutageVsAbsentBlob(t *testing.T) {
+	valid := "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+
+	healthy := New(t.TempDir()) // base dir exists, blob absent
+	if _, err := healthy.Read(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("absent blob, healthy store: err = %v, want os.ErrNotExist", err)
+	}
+	if _, _, err := healthy.ReadStream(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("absent blob, healthy store (stream): err = %v, want os.ErrNotExist", err)
+	}
+
+	gone := New(filepath.Join(t.TempDir(), "unmounted")) // base dir does not exist
+	if _, err := gone.Read(valid); !errors.Is(err, port.ErrStoreUnavailable) {
+		t.Errorf("store outage: err = %v, want ErrStoreUnavailable", err)
+	}
+	if _, _, err := gone.ReadStream(valid); !errors.Is(err, port.ErrStoreUnavailable) {
+		t.Errorf("store outage (stream): err = %v, want ErrStoreUnavailable", err)
+	}
 }

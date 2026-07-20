@@ -2,9 +2,24 @@ package port
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+)
+
+var (
+	// ErrInvalidKey is returned when an externalID fails the storage key rules
+	// (path-traversal guard / length bound). Distinct from a genuinely absent
+	// blob, so a handler can answer 400 rather than 404/500.
+	ErrInvalidKey = errors.New("invalid storage key")
+	// ErrStoreUnavailable is returned when the storage backend itself is
+	// unreachable — e.g. the local volume is unmounted or its root directory is
+	// gone, so every read would surface as not-found. Callers MUST treat this as
+	// a RETRYABLE outage, never as an authoritative "object deleted": a
+	// backup/replication reader that conflates a mount outage with a missing
+	// object would record still-existing objects as gone across the whole store.
+	ErrStoreUnavailable = errors.New("storage backend unavailable")
 )
 
 // StoragePort abstracts the file storage backend (local filesystem, S3, etc.).
@@ -14,9 +29,15 @@ type StoragePort interface {
 	// identity. Saving bytes that already exist is not an error: the
 	// existing blob is reused and StoredFile.Created reports false.
 	Save(content []byte) (model.StoredFile, error)
-	// Read returns the whole blob. Wraps the backend's not-found error
-	// (os.ErrNotExist for the local adapter) when no blob has this id.
+	// Read returns the whole blob. Error contract: ErrInvalidKey (malformed id),
+	// os.ErrNotExist (blob genuinely absent, store healthy), ErrStoreUnavailable
+	// (backend outage — retryable, NOT an authoritative absence).
 	Read(externalID string) ([]byte, error)
+	// ReadStream opens the blob for streaming (constant memory — the caller does
+	// not hold the whole blob resident), returning the content, its size, and a
+	// closer the caller MUST close. Same error contract as Read. Prefer this for
+	// bulk/high-concurrency readers so N concurrent fetches don't cost N×blobsize.
+	ReadStream(externalID string) (io.ReadCloser, int64, error)
 	// Delete removes the blob. Idempotent: deleting an id that does not
 	// exist returns nil, so refcount-driven cleanup can race harmlessly.
 	Delete(externalID string) error

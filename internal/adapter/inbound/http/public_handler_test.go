@@ -29,6 +29,7 @@ type mockDocRepo struct {
 	deleteResult model.DeletedDocument
 	deleteErr    error
 	count        int
+	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
 	// Captured args from the most recent UpdateMetadata call.
 	updateMetadataCalls   int
@@ -50,6 +51,7 @@ type mockDocRepo struct {
 }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	m.getByIDCalls++
 	return m.doc, m.err
 }
 func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
@@ -137,6 +139,17 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	return model.StoredFile{ExternalID: "hash", Size: len(content), Created: true}, nil
 }
 func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
+
+// ReadStream mirrors Read's error contract for the streaming path: m.err (if set)
+// is returned as-is (tests set it to port.ErrInvalidKey / os.ErrNotExist /
+// port.ErrStoreUnavailable to drive the handler's status mapping), else m.data
+// is served over a bytes reader.
+func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
+	if m.err != nil {
+		return nil, 0, m.err
+	}
+	return io.NopCloser(bytes.NewReader(m.data)), int64(len(m.data)), nil
+}
 func (m *mockStorage) Delete(_ string) error         { return nil }
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
