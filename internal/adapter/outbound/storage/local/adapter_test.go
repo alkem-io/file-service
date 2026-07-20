@@ -546,3 +546,17 @@ func TestReadAbsentBlobIsNotExist(t *testing.T) {
 		t.Errorf("ReadStream absent blob: err = %v, want os.ErrNotExist", err)
 	}
 }
+
+// ReadStream must reject a directory at a blob path (os.Open+Stat both succeed on a dir, unlike
+// Read's os.ReadFile) BEFORE the handler commits a 200 + Content-Length.
+func TestReadStreamRejectsDirectory(t *testing.T) {
+	base := t.TempDir()
+	name := "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	if err := os.Mkdir(filepath.Join(base, name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	a := New(base)
+	if _, _, err := a.ReadStream(name); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadStream on a directory must return a non-nil, non-NotExist error, got %v", err)
+	}
+}

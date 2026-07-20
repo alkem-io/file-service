@@ -2382,8 +2382,8 @@ func TestDocumentHandler_GetBlobContent_Found(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
 	}
-	// The gosec-G705 suppression's rationale depends on this header; assert it so a
-	// regression that drops it fails loudly rather than shipping green.
+	// Raw stored bytes are served nosniff so a browser can't be tricked into rendering them
+	// as HTML; assert it so a regression that drops the header fails loudly, not green.
 	if ns := rr.Header().Get("X-Content-Type-Options"); ns != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", ns)
 	}

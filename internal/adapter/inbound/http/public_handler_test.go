@@ -141,9 +141,9 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
 
 // ReadStream mirrors Read's error contract for the streaming path: m.err (if set)
-// is returned as-is (tests set it to port.ErrInvalidKey / os.ErrNotExist /
-// port.ErrStoreUnavailable to drive the handler's status mapping), else m.data
-// is served over a bytes reader.
+// is returned as-is (tests set it to port.ErrInvalidKey / os.ErrNotExist / a generic
+// error to drive the handler's 400/404/500 mapping), else m.data is served over a
+// bytes reader.
 func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
 	if m.err != nil {
 		return nil, 0, m.err

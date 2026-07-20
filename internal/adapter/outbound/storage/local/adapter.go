@@ -90,6 +90,13 @@ func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 		_ = f.Close()
 		return nil, 0, fmt.Errorf("stat blob %s: %w", externalID, err)
 	}
+	if fi.IsDir() {
+		// os.Open + Stat both succeed on a directory (unlike Read's os.ReadFile, which
+		// EISDIRs). Guard it here so a directory at a blob path fails BEFORE the handler
+		// commits a 200 + Content-Length and only io.Copy discovers EISDIR mid-stream.
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("read %q: blob path is a directory, not a file", externalID)
+	}
 	return f, fi.Size(), nil
 }
 

@@ -111,9 +111,11 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 
-	// Storage owns key validation AND store-health classification — one definition
-	// (the deliberately legacy-CID-permissive isValidExternalID), so the handler
-	// never drifts from what the store will actually serve. It maps the sentinels:
+	// Storage owns key validation — one definition (the deliberately legacy-CID-permissive
+	// isValidExternalID), so the handler never drifts from what the store will actually serve.
+	// The handler maps: ErrInvalidKey→400, os.ErrNotExist→404, anything else→500. It does NOT
+	// try to tell an absent blob from a store outage (storage can't, so it doesn't claim to) —
+	// a non-ENOENT backend error is a retryable 500; the worker cross-checks the corpus on a 404.
 	rc, size, err := h.Service.Storage.ReadStream(hash)
 	if err != nil {
 		switch {
