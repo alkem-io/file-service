@@ -124,12 +124,30 @@ func (m *mockAuth) CheckPrivilege(_ context.Context, actorID, privilege, authPol
 }
 
 type mockStorage struct {
-	data    []byte
-	err     error
-	saveErr error
-	saved   []byte // captures the last Save/stage payload (replace-path rejection tests)
-	stages  []*httpMockStage
+	data       []byte
+	err        error
+	saveErr    error
+	saved      []byte // captures the last Save/stage payload (replace-path rejection tests)
+	stages     []*httpMockStage
+	streamBody io.ReadCloser // if set, ReadStream returns this (to inject a mid-stream read failure)
+	streamSize int64         // Content-Length ReadStream reports when streamBody is set
 }
+
+// failingReadCloser yields `head` then fails — a mid-stream backend read fault (NFS EIO/ESTALE).
+type failingReadCloser struct {
+	head []byte
+	pos  int
+}
+
+func (f *failingReadCloser) Read(p []byte) (int, error) {
+	if f.pos < len(f.head) {
+		n := copy(p, f.head[f.pos:])
+		f.pos += n
+		return n, nil
+	}
+	return 0, errors.New("backend read fault mid-stream")
+}
+func (f *failingReadCloser) Close() error { return nil }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	m.saved = content
@@ -147,6 +165,9 @@ func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
 func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
 	if m.err != nil {
 		return nil, 0, m.err
+	}
+	if m.streamBody != nil {
+		return m.streamBody, m.streamSize, nil
 	}
 	return io.NopCloser(bytes.NewReader(m.data)), int64(len(m.data)), nil
 }

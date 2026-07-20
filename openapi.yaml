@@ -483,6 +483,12 @@ paths:
                 format: binary
                 type: string
           description: OK
+        "400":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
         "404":
           content:
             application/octet-stream:
@@ -624,6 +630,12 @@ paths:
           description: OK
         "304":
           description: Not Modified
+        "400":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
         "403":
           content:
             application/octet-stream:

@@ -13,7 +13,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -82,12 +81,7 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 
 	content, err := h.Service.Storage.Read(doc.ExternalID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeJSONError(w, http.StatusNotFound, "file not found on storage")
-		} else {
-			h.Logger.Error("failed to read file from storage", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 
@@ -111,25 +105,14 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 
-	// Storage owns key validation — one definition (the deliberately legacy-CID-permissive
-	// isValidExternalID), so the handler never drifts from what the store will actually serve.
-	// The handler maps: ErrInvalidKey→400, os.ErrNotExist→404, anything else→500. It does NOT
-	// try to tell an absent blob from a store outage (storage can't, so it doesn't claim to) —
-	// a non-ENOENT backend error is a retryable 500; the worker cross-checks the corpus on a 404.
+	// Storage owns key validation (one definition — the deliberately legacy-CID-permissive
+	// isValidExternalID), so the handler never drifts from what the store serves; the shared
+	// writeStorageReadError maps the failure. file-service does NOT try to tell an absent blob
+	// from a store outage (storage can't, so it doesn't claim to) — a non-ENOENT backend error
+	// is a retryable 500, and the worker cross-checks the alkemio `file` corpus on a 404.
 	rc, size, err := h.Service.Storage.ReadStream(hash)
 	if err != nil {
-		switch {
-		case errors.Is(err, port.ErrInvalidKey):
-			writeJSONError(w, http.StatusBadRequest, "invalid content hash")
-		case errors.Is(err, os.ErrNotExist):
-			writeJSONError(w, http.StatusNotFound, "blob not found")
-		default:
-			// Any other backend failure (e.g. an NFS EIO/ESTALE outage) is a 500 —
-			// retryable, NOT a 404. file-service does not guess whether an absence is a
-			// store outage; the worker cross-checks the alkemio `file` corpus on a 404.
-			h.Logger.Error("failed to read blob from storage", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage")
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -138,12 +121,16 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("X-Content-Type-Options", "nosniff") // raw bytes, never a document to render
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to
-	// N×blobsize. A mid-stream read failure truncates the body against the declared
-	// Content-Length (the caller's hash verifier catches it); log it since the 200
-	// header is already sent and no error status can be returned.
+	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to N×blobsize.
+	// HTTP fundamentally cannot retract the already-sent 200 if a backend read (e.g. NFS
+	// EIO/ESTALE) fails mid-stream, so instead we make the failure UNMISTAKABLE, not silent:
+	// the declared Content-Length means a short body is a detectable truncation, and
+	// panic(http.ErrAbortHandler) aborts the connection abnormally so no client can mistake the
+	// partial response for a clean EOF. Belt-and-suspenders: the sole consumer (the backup
+	// worker) hash-verifies every byte, so it can never persist a truncated blob — it retries.
 	if _, err := io.Copy(w, rc); err != nil {
-		h.Logger.Warn("blob stream truncated mid-copy", zap.String("hash", hash), zap.Error(err))
+		h.Logger.Warn("blob stream truncated mid-copy — aborting connection", zap.String("hash", hash), zap.Error(err))
+		panic(http.ErrAbortHandler)
 	}
 }
 

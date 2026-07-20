@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -73,12 +72,7 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	// Read file from storage
 	content, err := h.Storage.Read(doc.ExternalID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeJSONError(w, http.StatusNotFound, "file not found on storage")
-		} else {
-			h.Logger.Error("failed to read file from storage", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 

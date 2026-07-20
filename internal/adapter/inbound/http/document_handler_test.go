@@ -2428,3 +2428,21 @@ func TestDocumentHandler_GetBlobContent_InternalError(t *testing.T) {
 		t.Fatalf("status = %d, want 500", rr.Code)
 	}
 }
+
+// A backend read that fails MID-STREAM (after 200 + Content-Length are committed) must abort the
+// connection via panic(http.ErrAbortHandler) — so a truncated body can't be mistaken for a clean
+// success — rather than silently returning a short 200.
+func TestDocumentHandler_GetBlobContent_MidStreamErrorAborts(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.streamBody = &failingReadCloser{head: []byte("partial")}
+	storage.streamSize = 999 // declared Content-Length the body will fall short of
+
+	defer func() {
+		err, ok := recover().(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("mid-stream read failure must panic(http.ErrAbortHandler), got %v", err)
+		}
+	}()
+	_ = serveBlob(h, blobHash)
+	t.Fatal("expected panic(http.ErrAbortHandler) on a mid-stream read failure")
+}
