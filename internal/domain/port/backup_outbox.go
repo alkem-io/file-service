@@ -26,9 +26,11 @@ type BackupOutboxRepo interface {
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)
-	// DeletePendingByHash drops still-pending outbox rows for a content hash whose blob
-	// file-service has just deleted (refcount→0) — orphan hygiene at the owner: those rows
-	// point at bytes that no longer exist, so the consumer's fetch could only 404. Returns
-	// the number removed.
-	DeletePendingByHash(ctx context.Context, externalID string) (int64, error)
+	// DeletePendingForFile drops THIS file's still-pending outbox row(s) for a content hash
+	// whose blob file-service has just deleted (refcount→0) — orphan hygiene at the owner: the
+	// row points at bytes that no longer exist, so the consumer's fetch could only 404. Scoped
+	// to (fileID, externalID), never the hash alone: a concurrent re-upload of the same content
+	// enqueues a pending row with the same externalID but a different fileID, and must not be
+	// touched. Returns the number removed.
+	DeletePendingForFile(ctx context.Context, fileID uuid.UUID, externalID string) (int64, error)
 }

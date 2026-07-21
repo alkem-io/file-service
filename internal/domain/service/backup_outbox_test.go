@@ -18,7 +18,7 @@ type recordingOutbox struct {
 	createCalls      int
 	updateCalls      int
 	lastPriority     int16
-	deletePendingFor []string // hashes passed to DeletePendingByHash (orphan hygiene)
+	deletePendingFor []string // "<fileID>|<hash>" passed to DeletePendingForFile (orphan hygiene)
 }
 
 var _ port.BackupOutboxRepo = (*recordingOutbox)(nil)
@@ -39,40 +39,48 @@ func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int
 	return 0, nil
 }
 
-func (o *recordingOutbox) DeletePendingByHash(_ context.Context, externalID string) (int64, error) {
-	o.deletePendingFor = append(o.deletePendingFor, externalID)
+func (o *recordingOutbox) DeletePendingForFile(_ context.Context, fileID uuid.UUID, externalID string) (int64, error) {
+	o.deletePendingFor = append(o.deletePendingFor, fileID.String()+"|"+externalID)
 	return 1, nil
 }
 
-// When the last reference to a blob is deleted and the producer is ON, the pending outbox rows
-// for that hash are dropped too (orphan hygiene: the bytes are gone, a fetch could only 404).
-// With the producer OFF (Outbox nil) the cleanup is skipped entirely — no behaviour change.
+// When the last reference to a blob is deleted and the producer is ON, THIS file's pending outbox
+// hint is dropped too (orphan hygiene: the bytes are gone, a fetch could only 404) — scoped to
+// (fileID, externalID), never the hash alone. With the producer OFF (Outbox nil) the cleanup is
+// skipped entirely — no behaviour change.
 func TestCleanupOrphanedBlobDropsPendingOutboxRows(t *testing.T) {
+	fileID := uuid.New()
 	outbox := &recordingOutbox{}
 	s := &FileService{
 		Storage: &mockStorage{data: []byte("x")},
 		Outbox:  outbox,
 		Logger:  nopLogger,
 	}
-	s.cleanupOrphanedBlob(context.Background(), "somehash")
-	if len(outbox.deletePendingFor) != 1 || outbox.deletePendingFor[0] != "somehash" {
-		t.Fatalf("pending outbox rows not dropped for the deleted blob: %v", outbox.deletePendingFor)
+	before := backupOutboxOrphaned.Value()
+	s.cleanupOrphanedBlob(context.Background(), fileID, "somehash")
+	want := fileID.String() + "|somehash"
+	if len(outbox.deletePendingFor) != 1 || outbox.deletePendingFor[0] != want {
+		t.Fatalf("pending outbox row not dropped for (fileID, hash): got %v, want [%q]", outbox.deletePendingFor, want)
+	}
+	// The orphan-hygiene deletion is metered (parity with enqueue/prune).
+	if got := backupOutboxOrphaned.Value() - before; got != 1 {
+		t.Fatalf("orphan-hygiene delete must count once, got +%d", got)
 	}
 
 	// Producer off → nil Outbox → no panic, no cleanup call.
 	sOff := &FileService{Storage: &mockStorage{data: []byte("x")}, Logger: nopLogger}
-	sOff.cleanupOrphanedBlob(context.Background(), "somehash")
+	sOff.cleanupOrphanedBlob(context.Background(), fileID, "somehash")
 
-	// Blob delete FAILING must keep the rows: while the blob exists they are still backable.
+	// Blob delete FAILING must keep the row: while the blob exists it is still backable.
 	failing := &recordingOutbox{}
 	sFail := &FileService{
 		Storage: &mockStorage{data: []byte("x"), deleteErr: errors.New("fs busy")},
 		Outbox:  failing,
 		Logger:  nopLogger,
 	}
-	sFail.cleanupOrphanedBlob(context.Background(), "somehash")
+	sFail.cleanupOrphanedBlob(context.Background(), fileID, "somehash")
 	if len(failing.deletePendingFor) != 0 {
-		t.Fatal("outbox rows must be kept when the blob delete failed (blob still backable)")
+		t.Fatal("outbox row must be kept when the blob delete failed (blob still backable)")
 	}
 }
 

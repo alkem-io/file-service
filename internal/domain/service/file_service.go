@@ -89,6 +89,10 @@ func (s *FileService) priorityForMime(mimeType string) int16 {
 var (
 	backupOutboxEnqueued = expvar.NewInt("file_backup_outbox_enqueued_total")
 	backupOutboxPruned   = expvar.NewInt("file_backup_outbox_pruned_total")
+	// Orphan-hygiene deletions are a third producer-side mutation of the outbox depth; count them
+	// like the other two so an operator reconciling backlog from /internal/debug/vars (enqueued −
+	// pruned − orphaned) stays accurate and a hygiene-firing spike is visible, not silent.
+	backupOutboxOrphaned = expvar.NewInt("file_backup_outbox_orphaned_total")
 )
 
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
@@ -407,20 +411,24 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		s.cleanupOrphanedBlob(ctx, deleted.ExternalID)
+		s.cleanupOrphanedBlob(ctx, documentID, deleted.ExternalID)
 	}
 
 	return &deleted, nil
 }
 
 // cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), and —
-// when the backup producer is on — drops any still-pending backup-outbox rows for that hash:
-// they point at bytes that no longer exist, so the consumer's fetch could only ever 404
+// when the backup producer is on — drops fileID's own still-pending backup-outbox hint for that
+// hash: it points at bytes that no longer exist, so the consumer's fetch could only ever 404
 // (file-service is the master of orphans; it deleted the blob, so it removes the dead hint too).
-// Both steps are best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover
-// pending row is caught by the consumer's own 404→skip backstop. The outbox cleanup runs only
-// after a successful blob delete — while the blob exists, pending rows are still backable.
-func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) {
+// The outbox delete is scoped to (fileID, externalID), NOT the hash alone: under content
+// addressing a concurrent re-upload of the same content enqueues a pending row with the same
+// externalID but a different fileID, and deleting by hash would silently wipe that live
+// document's backup hint — an unrecoverable DR gap. Both steps are best-effort warn-only
+// cleanup: a leftover blob is GC-able, and a leftover pending row is caught by the consumer's
+// own 404→skip backstop. The outbox cleanup runs only after a successful blob delete — while the
+// blob exists, pending rows are still backable.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, fileID uuid.UUID, externalID string) {
 	if err := s.Storage.Delete(externalID); err != nil {
 		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
 		return
@@ -428,12 +436,13 @@ func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string
 	if s.Outbox == nil {
 		return
 	}
-	if n, err := s.Outbox.DeletePendingByHash(ctx, externalID); err != nil {
-		s.Logger.Warn("cleanup: failed to drop pending outbox rows for deleted blob",
-			zap.String("externalID", externalID), zap.Error(err))
+	if n, err := s.Outbox.DeletePendingForFile(ctx, fileID, externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to drop pending outbox row for deleted blob",
+			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Error(err))
 	} else if n > 0 {
-		s.Logger.Info("cleanup: dropped pending outbox rows for deleted blob",
-			zap.String("externalID", externalID), zap.Int64("rows", n))
+		backupOutboxOrphaned.Add(n)
+		s.Logger.Info("cleanup: dropped pending outbox row for deleted blob",
+			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Int64("rows", n))
 	}
 }
 
@@ -538,7 +547,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			s.Logger.Warn("cleanup: failed to count references for old file",
 				zap.String("externalID", oldExternalID), zap.Error(countErr))
 		} else if count == 0 {
-			s.cleanupOrphanedBlob(ctx, oldExternalID)
+			s.cleanupOrphanedBlob(ctx, documentID, oldExternalID)
 		}
 	}
 

@@ -104,9 +104,12 @@ func (a *Adapter) PruneBackupOutbox(ctx context.Context, olderThan time.Time) (i
 	return a.queries.PruneBackupOutboxDone(ctx, timeToPgx(olderThan))
 }
 
-// DeletePendingByHash implements port.BackupOutboxRepo (orphan hygiene — see the query doc).
-func (a *Adapter) DeletePendingByHash(ctx context.Context, externalID string) (int64, error) {
-	return a.queries.DeleteBackupOutboxPendingByHash(ctx, externalID)
+// DeletePendingForFile implements port.BackupOutboxRepo (orphan hygiene — see the query doc).
+func (a *Adapter) DeletePendingForFile(ctx context.Context, fileID uuid.UUID, externalID string) (int64, error) {
+	return a.queries.DeleteBackupOutboxPendingForFile(ctx, queries.DeleteBackupOutboxPendingForFileParams{
+		FileId:     uuidToPgx(fileID),
+		ExternalID: externalID,
+	})
 }
 
 // notifyBackup emits NOTIFY on the backup channel after a committed enqueue. Best-effort — it

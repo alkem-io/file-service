@@ -14,11 +14,14 @@ VALUES ($1, $2, $3, $4, $5, $6);
 DELETE FROM file_backup_outbox
 WHERE status = 'done' AND "createdDate" < $1;
 
--- name: DeleteBackupOutboxPendingByHash :execrows
--- Orphan hygiene: when the LAST file row referencing a blob is deleted and the blob itself is
--- removed (refcount→0), any still-pending outbox row for that hash points at bytes that no
--- longer exist — the consumer's fetch could only ever 404. file-service is the one deleting the
--- blob, so it removes the dead hint too (master-of-orphans). in_progress rows are left to the
--- consumer's own 404→skip backstop; done/skipped/dead_letter are history, untouched.
+-- name: DeleteBackupOutboxPendingForFile :execrows
+-- Orphan hygiene: when THIS file's last-referenced blob is removed (refcount→0), its own
+-- still-pending outbox hint points at bytes that no longer exist — the consumer's fetch could
+-- only ever 404. file-service is the one deleting the blob, so it removes the dead hint too
+-- (master-of-orphans). Scoped to ("fileId", "externalID"), NOT to the hash alone: content
+-- addressing means a concurrent re-upload of the SAME content enqueues a pending row with the
+-- SAME "externalID" but a DIFFERENT "fileId" — deleting by hash would silently wipe that live
+-- document's backup hint. in_progress rows are left to the consumer's own 404→skip backstop;
+-- done/skipped/dead_letter are history, untouched.
 DELETE FROM file_backup_outbox
-WHERE "externalID" = $1 AND status = 'pending';
+WHERE "fileId" = $1 AND "externalID" = $2 AND status = 'pending';
