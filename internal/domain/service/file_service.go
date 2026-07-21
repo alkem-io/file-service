@@ -424,7 +424,11 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // The outbox delete is scoped to (fileID, externalID), NOT the hash alone: under content
 // addressing a concurrent re-upload of the same content enqueues a pending row with the same
 // externalID but a different fileID, and deleting by hash would silently wipe that live
-// document's backup hint — an unrecoverable DR gap. Both steps are best-effort warn-only
+// document's backup hint — an unrecoverable DR gap. The benign corollary: if two documents in
+// different buckets shared a hash and are deleted at different times, the earlier one's pending
+// row is left behind when the blob finally goes (count→0) — the consumer's 404→skip backstop
+// retires it. That one wasted fetch is the deliberate trade for never touching a live row.
+// Both steps are best-effort warn-only
 // cleanup: a leftover blob is GC-able, and a leftover pending row is caught by the consumer's
 // own 404→skip backstop. The outbox cleanup runs only after a successful blob delete — while the
 // blob exists, pending rows are still backable.
