@@ -222,7 +222,10 @@ func TestMock_DeletePendingForFile_ScopedAndGuarded(t *testing.T) {
 	defer mock.Close()
 	fileID := uuid.New()
 
-	mock.ExpectExec("AND NOT EXISTS").
+	// Match the FULL guard predicate, not just the "AND NOT EXISTS" marker, so a subtly-wrong
+	// guard (dropped externalID predicate, or wrong subquery table) also fails — not only a total
+	// removal of the clause.
+	mock.ExpectExec(`NOT EXISTS \(SELECT 1 FROM file f WHERE f\.id = \$1 AND f\."externalID" = \$2\)`).
 		WithArgs(pgtype.UUID{Bytes: fileID, Valid: true}, "somehash").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
