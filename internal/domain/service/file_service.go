@@ -218,8 +218,8 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// Propagate the source's content_metadata verbatim — copy doesn't
 	// re-run Process, so dims, the {_decodeFailed:true} sentinel, and any
 	// forward-fit per-content-type fields must ride along from the source
-	// row. Source has been backfilled above when it was a legacy image row
-	// (FR-014).
+	// row. A legacy source with empty content_metadata copies that emptiness
+	// verbatim; the boot sweep populates both rows off the request path.
 	contentMetadata := source.ContentMetadata
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }

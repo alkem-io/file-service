@@ -16,6 +16,13 @@ import (
 
 var nopLogger = zap.NewNop()
 
+// faultyReadCloser fails on the first Read — a storage transport fault mid-header (EIO / NFS blip),
+// as opposed to bytes that are simply undecodable.
+type faultyReadCloser struct{}
+
+func (f *faultyReadCloser) Read([]byte) (int, error) { return 0, errors.New("EIO: volume read fault") }
+func (f *faultyReadCloser) Close() error             { return nil }
+
 // --- Mocks ---
 
 type mockRepo struct {
@@ -154,6 +161,10 @@ type mockStorage struct {
 	// Read falls back to the flat data/readErr pair.
 	dataByID map[string][]byte
 
+	// streamBody, when set, is what ReadStream hands back — used to inject a mid-stream read fault.
+	streamBody io.ReadCloser
+	streamSize int64
+
 	// Streaming-stage controls (spec 020).
 	openStageErr   error
 	stageWriteErr  error
@@ -182,6 +193,9 @@ func (m *mockStorage) Read(externalID string) ([]byte, error) {
 	return m.data, m.readErr
 }
 func (m *mockStorage) ReadStream(externalID string) (io.ReadCloser, int64, error) {
+	if m.streamBody != nil {
+		return m.streamBody, m.streamSize, nil
+	}
 	b, err := m.Read(externalID)
 	if err != nil {
 		return nil, 0, err
@@ -207,7 +221,8 @@ type mockProcessor struct {
 	measureDimsW   *int
 	measureDimsH   *int
 	measureDimsErr error
-	measurePanic   bool // MeasureDims panics (simulates a CGo decode blowing up on a malformed blob)
+	measurePanic   bool   // MeasureDims panics for every row
+	panicOnContent []byte // MeasureDims panics only for the row whose bytes match (poison-row tests)
 
 	// detectMIME override — when non-empty, replaces the default
 	// application/octet-stream (replace-path reconciliation tests).
@@ -237,9 +252,12 @@ func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 		Measured:    true,
 	}, nil
 }
-func (m *mockProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
-	if m.measurePanic {
-		panic("simulated CGo decode panic on a malformed blob")
+func (m *mockProcessor) MeasureDims(r io.Reader, _ string) (*int, *int, error) {
+	// Drain the reader as a real decoder does — the sweep wraps it to tell a storage read fault
+	// apart from a decode failure, and that wrapper only sees a fault if the bytes are pulled.
+	b, _ := io.ReadAll(r)
+	if m.measurePanic || (len(m.panicOnContent) > 0 && bytes.Equal(b, m.panicOnContent)) {
+		panic("simulated decode panic on a malformed blob")
 	}
 	return m.measureDimsW, m.measureDimsH, m.measureDimsErr
 }

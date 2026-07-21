@@ -1967,7 +1967,30 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 	}
 }
 
-// --- Phase 7: lazy-backfill on Copy and PATCH for legacy image rows ---
+// The PATCH response must surface the row's stored dims. Since dims now come from content_metadata
+// (populated at write time or by the boot sweep — never a decode on this path), this guards the
+// handler's field mapping, which the deleted lazy-backfill tests were the only thing exercising.
+func TestDocumentHandler_Patch_ResponseCarriesStoredDims(t *testing.T) {
+	docID := uuid.New()
+	w, h := 800, 600
+	rr, _ := runPatch(t, docID, `{"displayName":"renamed"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{
+			ID: docID, ExternalID: "abc", MimeType: "image/jpeg",
+			ImageWidth: &w, ImageHeight: &h,
+			ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
+		}
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp UpdateDocumentResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ImageWidth == nil || *resp.ImageWidth != 800 || resp.ImageHeight == nil || *resp.ImageHeight != 600 {
+		t.Fatalf("dims = (%v, %v), want 800x600 from the stored row", resp.ImageWidth, resp.ImageHeight)
+	}
+}
 
 func TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims(t *testing.T) {
 	h, repo, _, processor := newDocHandlerWithProcessor()

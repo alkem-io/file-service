@@ -275,6 +275,11 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 	}
 	if found {
 		existing.Reused = true
+		// The dedup hit is over the SAME bytes we just transcoded, so the dims are already in hand.
+		// Heal a legacy row here rather than waiting for the sweep: this is a plain compare-and-set
+		// with values we already computed — NOT a decode on the request path, which is what belongs
+		// exclusively to the write path / the sweep.
+		s.healKnownDims(ctx, existing, contentMetadata)
 		return existing, nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)

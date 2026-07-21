@@ -186,7 +186,13 @@ func runDimsBackfill(ctx context.Context, fileSvc *service.FileService, logger *
 	httpAdapter.DimsBackfillOps.Add("measured", int64(sum.Measured))
 	httpAdapter.DimsBackfillOps.Add("decode_failed", int64(sum.DecodeFailed))
 	httpAdapter.DimsBackfillOps.Add("skipped", int64(sum.Skipped))
+	if sum.Aborted {
+		// Surfaced as a counter so an operator can see the sweep gave up (partial pass) rather than
+		// inferring convergence from a "completed" line.
+		httpAdapter.DimsBackfillOps.Add("aborted", 1)
+	}
 	logger.Info("dims-backfill metrics recorded",
+		zap.Bool("aborted", sum.Aborted),
 		zap.Int("measured", sum.Measured),
 		zap.Int("decode_failed", sum.DecodeFailed),
 		zap.Int("skipped", sum.Skipped))

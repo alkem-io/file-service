@@ -95,6 +95,80 @@ func TestRunDimsBackfill_PanicOnOneRow_IsContained(t *testing.T) {
 	}
 }
 
+// [7] The compare-and-set must be keyed on the externalID the sweep MEASURED — that is what stops a
+// concurrent content replace from having the old blob's dims written over its new content.
+func TestRunDimsBackfill_PersistsCASOnMeasuredExternalID(t *testing.T) {
+	w, h := 10, 20
+	rows := oneImageRow()
+	repo := &mockRepo{imagesNeedingDims: rows}
+	svc := newDimsSvc(repo, &mockStorage{data: []byte("x")}, &mockProcessor{measureDimsW: &w, measureDimsH: &h})
+
+	svc.RunDimsBackfill(context.Background())
+	if repo.lastBackfillExternalID != rows[0].ExternalID {
+		t.Fatalf("CAS externalID = %q, want the measured row's %q", repo.lastBackfillExternalID, rows[0].ExternalID)
+	}
+	if repo.lastBackfillID != rows[0].ID {
+		t.Fatalf("CAS id = %v, want %v", repo.lastBackfillID, rows[0].ID)
+	}
+}
+
+// [8] A poison row must not stop the sweep: with a panicking row BETWEEN two good ones, both good
+// rows are still measured (the cursor advances past the failure rather than wedging on it).
+func TestRunDimsBackfill_ContinuesPastPoisonRow(t *testing.T) {
+	w, h := 4, 5
+	rows := []model.Document{
+		{ID: uuid.New(), ExternalID: "good1", MimeType: "image/jpeg"},
+		{ID: uuid.New(), ExternalID: "poison", MimeType: "image/jpeg"},
+		{ID: uuid.New(), ExternalID: "good2", MimeType: "image/jpeg"},
+	}
+	repo := &mockRepo{imagesNeedingDims: rows}
+	proc := &mockProcessor{measureDimsW: &w, measureDimsH: &h, panicOnContent: []byte{2}}
+	svc := newDimsSvc(repo, &mockStorage{dataByID: map[string][]byte{"good1": {1}, "poison": {2}, "good2": {3}}}, proc)
+
+	sum := svc.RunDimsBackfill(context.Background())
+	if sum.Measured != 2 || sum.Skipped != 1 {
+		t.Fatalf("summary = %+v, want measured=2 skipped=1 (swept past the poison row)", sum)
+	}
+}
+
+// [9] A persist failure must NOT be counted as a success — the row stays unpopulated for a future
+// run, so it has to land in Skipped (both the measured and the sentinel branch).
+func TestRunDimsBackfill_PersistFailure_CountsSkipped(t *testing.T) {
+	w, h := 1, 2
+	t.Run("measured-persist-fails", func(t *testing.T) {
+		repo := &mockRepo{imagesNeedingDims: oneImageRow(), backfillErr: errors.New("db down")}
+		svc := newDimsSvc(repo, &mockStorage{data: []byte("x")}, &mockProcessor{measureDimsW: &w, measureDimsH: &h})
+		if sum := svc.RunDimsBackfill(context.Background()); sum.Skipped != 1 || sum.Measured != 0 {
+			t.Fatalf("summary = %+v, want skipped=1 measured=0", sum)
+		}
+	})
+	t.Run("sentinel-persist-fails", func(t *testing.T) {
+		repo := &mockRepo{imagesNeedingDims: oneImageRow(), backfillErr: errors.New("db down")}
+		svc := newDimsSvc(repo, &mockStorage{data: []byte("x")}, &mockProcessor{measureDimsErr: errors.New("corrupt")})
+		if sum := svc.RunDimsBackfill(context.Background()); sum.Skipped != 1 || sum.DecodeFailed != 0 {
+			t.Fatalf("summary = %+v, want skipped=1 decodeFailed=0", sum)
+		}
+	})
+}
+
+// [0] A TRANSPORT fault mid-header must NOT be mistaken for an undecodable image: writing the
+// permanent {_decodeFailed:true} sentinel would exclude a perfectly good image from this and every
+// future sweep. It must be a skip, with nothing persisted.
+func TestRunDimsBackfill_ReadFaultMidHeader_IsSkippedNotSentinel(t *testing.T) {
+	repo := &mockRepo{imagesNeedingDims: oneImageRow()}
+	// The reader fails mid-stream; the decoder surfaces that as a plain load error.
+	storage := &mockStorage{streamBody: &faultyReadCloser{}, streamSize: 999}
+	svc := newDimsSvc(repo, storage, &mockProcessor{measureDimsErr: errors.New("vips load: streaming load")})
+
+	sum := svc.RunDimsBackfill(context.Background())
+	if sum.Skipped != 1 || sum.DecodeFailed != 0 {
+		t.Fatalf("summary = %+v, want skipped=1 decodeFailed=0 (I/O fault, not an undecodable image)", sum)
+	}
+	if repo.backfillCalls != 0 {
+		t.Fatalf("backfillCalls = %d, want 0 — a read fault must never persist the permanent sentinel", repo.backfillCalls)
+	}
+}
+
 // An empty legacy set is a clean no-op — the converged steady state, one page scan and done.
 func TestRunDimsBackfill_EmptyCorpus_NoOp(t *testing.T) {
 	repo := &mockRepo{}

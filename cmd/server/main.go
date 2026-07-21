@@ -60,14 +60,16 @@ func run() int {
 	// the pre-fix replace path. Idempotent; runs concurrently with serving.
 	go runMimeRepair(context.Background(), fileSvc, logger)
 
-	// Boot-time image-dimension backfill (spec 019/020): populate dims for legacy image rows so a
-	// libvips decode never runs on a read/PATCH/copy. Independent of serving; converges each boot.
-	go runDimsBackfill(context.Background(), fileSvc, logger)
-
 	// Periodic backup-outbox prune (008 SC-008), only when the producer is on.
 	// Cancelled on shutdown so the goroutine exits cleanly.
 	bgCtx, cancelBg := context.WithCancel(context.Background())
 	defer cancelBg()
+
+	// Boot-time image-dimension backfill (spec 019/020): populate dims for legacy image rows so a
+	// libvips decode never runs on a read/PATCH/copy. Runs under bgCtx so a shutdown stops the sweep
+	// promptly instead of scanning on through the drain; the next boot resumes where it left off.
+	go runDimsBackfill(bgCtx, fileSvc, logger)
+
 	if cfg.BackupOutbox.Enabled {
 		go runOutboxPrune(bgCtx, fileSvc, cfg.BackupOutbox.DoneRetention, logger)
 	}
