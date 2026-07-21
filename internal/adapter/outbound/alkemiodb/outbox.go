@@ -104,6 +104,11 @@ func (a *Adapter) PruneBackupOutbox(ctx context.Context, olderThan time.Time) (i
 	return a.queries.PruneBackupOutboxDone(ctx, timeToPgx(olderThan))
 }
 
+// DeletePendingByHash implements port.BackupOutboxRepo (orphan hygiene — see the query doc).
+func (a *Adapter) DeletePendingByHash(ctx context.Context, externalID string) (int64, error) {
+	return a.queries.DeleteBackupOutboxPendingByHash(ctx, externalID)
+}
+
 // notifyBackup emits NOTIFY on the backup channel after a committed enqueue. Best-effort — it
 // must NOT fail a committed write, and the durable table + the consumer's poll floor guarantee
 // progress if the notification is lost — so the error is not propagated. It IS logged at warn,

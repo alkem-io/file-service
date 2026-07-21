@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteBackupOutboxPendingByHash = `-- name: DeleteBackupOutboxPendingByHash :execrows
+DELETE FROM file_backup_outbox
+WHERE "externalID" = $1 AND status = 'pending'
+`
+
+// Orphan hygiene: when the LAST file row referencing a blob is deleted and the blob itself is
+// removed (refcount→0), any still-pending outbox row for that hash points at bytes that no
+// longer exist — the consumer's fetch could only ever 404. file-service is the one deleting the
+// blob, so it removes the dead hint too (master-of-orphans). in_progress rows are left to the
+// consumer's own 404→skip backstop; done/skipped/dead_letter are history, untouched.
+func (q *Queries) DeleteBackupOutboxPendingByHash(ctx context.Context, externalid string) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBackupOutboxPendingByHash, externalid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const enqueueBackupOutbox = `-- name: EnqueueBackupOutbox :exec
 
 INSERT INTO file_backup_outbox ("fileId", "externalID", priority, "createdBy", "createdDate", size)

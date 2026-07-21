@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 // recordingOutbox is a fake BackupOutboxRepo that records which transactional path ran and the
 // priority it was handed — enough to assert the flag/temporary-location routing (FR-001).
 type recordingOutbox struct {
-	createCalls  int
-	updateCalls  int
-	lastPriority int16
+	createCalls      int
+	updateCalls      int
+	lastPriority     int16
+	deletePendingFor []string // hashes passed to DeletePendingByHash (orphan hygiene)
 }
 
 var _ port.BackupOutboxRepo = (*recordingOutbox)(nil)
@@ -35,6 +37,43 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 
 func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (o *recordingOutbox) DeletePendingByHash(_ context.Context, externalID string) (int64, error) {
+	o.deletePendingFor = append(o.deletePendingFor, externalID)
+	return 1, nil
+}
+
+// When the last reference to a blob is deleted and the producer is ON, the pending outbox rows
+// for that hash are dropped too (orphan hygiene: the bytes are gone, a fetch could only 404).
+// With the producer OFF (Outbox nil) the cleanup is skipped entirely — no behaviour change.
+func TestCleanupOrphanedBlobDropsPendingOutboxRows(t *testing.T) {
+	outbox := &recordingOutbox{}
+	s := &FileService{
+		Storage: &mockStorage{data: []byte("x")},
+		Outbox:  outbox,
+		Logger:  nopLogger,
+	}
+	s.cleanupOrphanedBlob(context.Background(), "somehash")
+	if len(outbox.deletePendingFor) != 1 || outbox.deletePendingFor[0] != "somehash" {
+		t.Fatalf("pending outbox rows not dropped for the deleted blob: %v", outbox.deletePendingFor)
+	}
+
+	// Producer off → nil Outbox → no panic, no cleanup call.
+	sOff := &FileService{Storage: &mockStorage{data: []byte("x")}, Logger: nopLogger}
+	sOff.cleanupOrphanedBlob(context.Background(), "somehash")
+
+	// Blob delete FAILING must keep the rows: while the blob exists they are still backable.
+	failing := &recordingOutbox{}
+	sFail := &FileService{
+		Storage: &mockStorage{data: []byte("x"), deleteErr: errors.New("fs busy")},
+		Outbox:  failing,
+		Logger:  nopLogger,
+	}
+	sFail.cleanupOrphanedBlob(context.Background(), "somehash")
+	if len(failing.deletePendingFor) != 0 {
+		t.Fatal("outbox rows must be kept when the blob delete failed (blob still backable)")
+	}
 }
 
 func TestPriorityForMime(t *testing.T) {

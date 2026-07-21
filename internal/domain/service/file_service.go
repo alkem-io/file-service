@@ -407,12 +407,34 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		if delErr := s.Storage.Delete(deleted.ExternalID); delErr != nil {
-			s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", deleted.ExternalID), zap.Error(delErr))
-		}
+		s.cleanupOrphanedBlob(ctx, deleted.ExternalID)
 	}
 
 	return &deleted, nil
+}
+
+// cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), and —
+// when the backup producer is on — drops any still-pending backup-outbox rows for that hash:
+// they point at bytes that no longer exist, so the consumer's fetch could only ever 404
+// (file-service is the master of orphans; it deleted the blob, so it removes the dead hint too).
+// Both steps are best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover
+// pending row is caught by the consumer's own 404→skip backstop. The outbox cleanup runs only
+// after a successful blob delete — while the blob exists, pending rows are still backable.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) {
+	if err := s.Storage.Delete(externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
+		return
+	}
+	if s.Outbox == nil {
+		return
+	}
+	if n, err := s.Outbox.DeletePendingByHash(ctx, externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to drop pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Error(err))
+	} else if n > 0 {
+		s.Logger.Info("cleanup: dropped pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Int64("rows", n))
+	}
 }
 
 // StoreAndLink replaces file content for an existing document atomically.
@@ -516,9 +538,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			s.Logger.Warn("cleanup: failed to count references for old file",
 				zap.String("externalID", oldExternalID), zap.Error(countErr))
 		} else if count == 0 {
-			if delErr := s.Storage.Delete(oldExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete old file", zap.String("externalID", oldExternalID), zap.Error(delErr))
-			}
+			s.cleanupOrphanedBlob(ctx, oldExternalID)
 		}
 	}
 
