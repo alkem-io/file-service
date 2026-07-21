@@ -79,15 +79,17 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := h.Service.Storage.Read(doc.ExternalID)
+	rc, size, err := h.Service.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 
 	w.Header().Set("Content-Type", doc.MimeType)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	// Streamed (constant memory) — a stored key, so a malformed one is a 500 (server data), never 400.
+	streamBlob(w, h.Logger, rc, size, doc.ExternalID)
 }
 
 // GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
@@ -122,42 +124,13 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage")
 		return
 	}
-	defer func() { _ = rc.Close() }()
-
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff") // raw bytes, never a document to render
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to N×blobsize.
-	// HTTP can't retract the already-sent 200, so a mid-stream failure is handled by its SIDE,
-	// which io.Copy alone conflates — hence the read wrapper:
-	//   - BACKEND read fault (NFS EIO/ESTALE): a genuine truncation. Make it loud and
-	//     panic(http.ErrAbortHandler) so the connection aborts abnormally and no client mistakes
-	//     the short body (vs the declared Content-Length) for a clean EOF. The sole consumer (the
-	//     backup worker) also hash-verifies every byte, so it can never persist a truncated blob.
-	//   - CLIENT write failure (a routine worker cancel/timeout/disconnect): benign — the response
-	//     is moot. Don't warn (that would be alert-fatigue noise masking the real EIO signal).
-	src := &readErrCapture{r: rc}
-	written, err := io.Copy(w, src)
-	switch {
-	case err != nil && src.err != nil:
-		// BACKEND read fault (NFS EIO/ESTALE) surfaced as an error: loud + abort.
-		h.Logger.Warn("blob stream truncated by a backend read fault — aborting connection",
-			zap.String("hash", hash), zap.Error(src.err))
-		panic(http.ErrAbortHandler)
-	case err != nil:
-		// io.Copy failed on the WRITE side — the client went away. Benign; nothing to do.
-	case written < size:
-		// A short read that ended in a CLEAN io.EOF (the backing file was truncated after Stat
-		// reported size — a concurrent refcount cleanup/replace, or a store returning fewer bytes
-		// EOF-terminated rather than as an error). io.Copy reports (written<size, nil), so it slips
-		// past src.err entirely — catch it here and make it as loud as an EIO. Otherwise the client
-		// gets a short body vs the declared Content-Length with only net/http's passive
-		// connection-close as a signal, exactly the silent truncation the wrapper exists to escalate.
-		h.Logger.Warn("blob stream truncated (short read: EOF before the declared size) — aborting connection",
-			zap.String("hash", hash), zap.Int64("written", written), zap.Int64("size", size))
-		panic(http.ErrAbortHandler)
-	}
+	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to N×blobsize; streamBlob
+	// classifies a mid-stream failure (backend fault / short read → abort; client disconnect → silent).
+	streamBlob(w, h.Logger, rc, size, hash)
 }
 
 // readErrCapture records a non-EOF error from the wrapped reader so a caller can tell a source

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -69,8 +70,9 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read file from storage
-	content, err := h.Storage.Read(doc.ExternalID)
+	// Stream the file from storage (constant memory — never buffer the whole blob, so a burst of
+	// concurrent large-file reads can't drive RSS to N×blobsize).
+	rc, size, err := h.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
@@ -82,7 +84,8 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "public")
 	w.Header().Set("Expires", time.Now().Add(time.Duration(h.MaxAge)*time.Second).UTC().Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	streamBlob(w, h.Logger, rc, size, doc.ExternalID)
 }
