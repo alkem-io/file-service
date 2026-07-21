@@ -1,7 +1,9 @@
 package port_test
 
 import (
+	"errors"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
@@ -54,6 +56,16 @@ func StoragePortContractTest(t *testing.T, storage port.StoragePort) {
 		got, _ := io.ReadAll(rc)
 		if string(got) != string(content) {
 			t.Errorf("ReadStream content = %q, want %q", got, content)
+		}
+
+		// The error contract the by-hash handler's 400/404 mapping depends on:
+		// absent blob → os.ErrNotExist; malformed key → ErrInvalidKey.
+		absent := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		if _, _, err := storage.ReadStream(absent); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("ReadStream absent blob: err = %v, want os.ErrNotExist", err)
+		}
+		if _, _, err := storage.ReadStream("../etc/passwd"); !errors.Is(err, port.ErrInvalidKey) {
+			t.Errorf("ReadStream malformed key: err = %v, want ErrInvalidKey", err)
 		}
 	})
 

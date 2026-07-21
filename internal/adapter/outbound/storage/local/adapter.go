@@ -81,7 +81,7 @@ func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 	if !isValidExternalID(externalID) {
 		return nil, 0, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
 	}
-	f, err := os.Open(a.filePath(externalID)) //nolint:gosec // path = basePath + validated content id (isValidExternalID rejects traversal)
+	f, err := os.Open(a.filePath(externalID))
 	if err != nil {
 		return nil, 0, fmt.Errorf("read file %s: %w", externalID, err)
 	}
