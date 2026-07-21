@@ -2447,6 +2447,45 @@ func TestDocumentHandler_GetBlobContent_MidStreamErrorAborts(t *testing.T) {
 	t.Fatal("expected panic(http.ErrAbortHandler) on a mid-stream read failure")
 }
 
+// A truncation that ends in a CLEAN io.EOF — a short read (fewer bytes than the declared size)
+// with no error — must ALSO abort. io.Copy reports (written<size, nil) here, so it bypasses the
+// read-error wrapper entirely; the handler catches the short body against the declared
+// Content-Length. Without this the client would get a silent short 200.
+func TestDocumentHandler_GetBlobContent_ShortReadAborts(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.streamBody = io.NopCloser(bytes.NewReader([]byte("partial"))) // 7 bytes, clean EOF
+	storage.streamSize = 999                                              // declared Content-Length it falls short of
+
+	defer func() {
+		err, ok := recover().(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("a short-read/clean-EOF truncation must panic(http.ErrAbortHandler), got %v", err)
+		}
+	}()
+	_ = serveBlob(h, blobHash)
+	t.Fatal("expected panic(http.ErrAbortHandler) on a short-read truncation")
+}
+
+// The symmetric opposite of the two abort cases: a mid-stream WRITE failure (the client/worker
+// disconnected) is BENIGN and must NOT panic(http.ErrAbortHandler) — the abort+WARN is reserved
+// for a BACKEND fault. httptest.ResponseRecorder never fails writes, so this branch needs a
+// writer that does; guards against a refactor turning every routine worker cancel into an abort.
+func TestDocumentHandler_GetBlobContent_ClientDisconnectIsSilent(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.data = []byte("bytes the client will refuse mid-stream")
+
+	r := chi.NewRouter()
+	r.Get("/internal/blob/{hash}/content", h.GetBlobContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/blob/"+blobHash+"/content", nil)
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("a client write failure must be silent (no abort panic), got %v", rec)
+		}
+	}()
+	r.ServeHTTP(&failingResponseWriter{}, req)
+}
+
 // A STORED externalID that fails the storage key rules (a corrupt/mis-migrated `file` row) is a
 // SERVER data problem on the by-id read path — a logged 500, NOT a 400 that blames the client
 // (only the by-hash endpoint, where the key is the client's URL, maps ErrInvalidKey→400).

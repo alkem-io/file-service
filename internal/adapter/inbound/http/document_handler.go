@@ -138,13 +138,25 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	//   - CLIENT write failure (a routine worker cancel/timeout/disconnect): benign — the response
 	//     is moot. Don't warn (that would be alert-fatigue noise masking the real EIO signal).
 	src := &readErrCapture{r: rc}
-	if _, err := io.Copy(w, src); err != nil {
-		if src.err != nil {
-			h.Logger.Warn("blob stream truncated by a backend read fault — aborting connection",
-				zap.String("hash", hash), zap.Error(src.err))
-			panic(http.ErrAbortHandler)
-		}
-		// else: io.Copy failed on the write side — the client went away. Nothing to do.
+	written, err := io.Copy(w, src)
+	switch {
+	case err != nil && src.err != nil:
+		// BACKEND read fault (NFS EIO/ESTALE) surfaced as an error: loud + abort.
+		h.Logger.Warn("blob stream truncated by a backend read fault — aborting connection",
+			zap.String("hash", hash), zap.Error(src.err))
+		panic(http.ErrAbortHandler)
+	case err != nil:
+		// io.Copy failed on the WRITE side — the client went away. Benign; nothing to do.
+	case written < size:
+		// A short read that ended in a CLEAN io.EOF (the backing file was truncated after Stat
+		// reported size — a concurrent refcount cleanup/replace, or a store returning fewer bytes
+		// EOF-terminated rather than as an error). io.Copy reports (written<size, nil), so it slips
+		// past src.err entirely — catch it here and make it as loud as an EIO. Otherwise the client
+		// gets a short body vs the declared Content-Length with only net/http's passive
+		// connection-close as a signal, exactly the silent truncation the wrapper exists to escalate.
+		h.Logger.Warn("blob stream truncated (short read: EOF before the declared size) — aborting connection",
+			zap.String("hash", hash), zap.Int64("written", written), zap.Int64("size", size))
+		panic(http.ErrAbortHandler)
 	}
 }
 

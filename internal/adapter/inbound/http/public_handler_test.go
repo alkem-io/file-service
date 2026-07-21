@@ -149,6 +149,19 @@ func (f *failingReadCloser) Read(p []byte) (int, error) {
 }
 func (f *failingReadCloser) Close() error { return nil }
 
+// failingResponseWriter accepts headers/status but fails every body Write — the client/worker
+// hung up mid-stream. (httptest.ResponseRecorder can't model this; its Write never fails.)
+type failingResponseWriter struct{ h http.Header }
+
+func (f *failingResponseWriter) Header() http.Header {
+	if f.h == nil {
+		f.h = http.Header{}
+	}
+	return f.h
+}
+func (f *failingResponseWriter) Write([]byte) (int, error) { return 0, errors.New("client went away") }
+func (f *failingResponseWriter) WriteHeader(int)           {}
+
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	m.saved = content
 	if m.saveErr != nil {
