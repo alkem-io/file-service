@@ -54,9 +54,25 @@ func (s *FileService) RunDimsBackfill(ctx context.Context) DimsBackfillSummary {
 // backfillOneDims measures one legacy row and compare-and-sets its content_metadata. Mirrors the
 // three outcomes of the retired lazy path: measured dims, a {_decodeFailed:true} sentinel (so it is
 // never retried), or a skip (read/persist error, or the no-vips stub) that leaves the row for a
-// future boot. The compare-and-set (on externalID) protects against overwriting content that was
-// replaced between the scan and the persist.
+// future boot — a transient read/persist failure is therefore re-attempted on the NEXT boot, since
+// the row stays unpopulated and keeps matching the scan. The compare-and-set (on externalID)
+// protects against overwriting content that was replaced between the scan and the persist.
+//
+// A panic is contained PER ROW: this decodes arbitrary legacy bytes through a CGo image library, and
+// the sweep runs in a bare background goroutine — without this, one malformed blob whose decode
+// panics would take down the whole process at boot (a crash-loop on a poison row). The retired lazy
+// path was implicitly shielded by net/http's per-connection recover; the sweep must do it itself.
 func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, sum *DimsBackfillSummary) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.Logger.Error("dims-backfill: panic measuring a row; skipping it",
+				zap.String("documentID", doc.ID.String()),
+				zap.String("externalID", doc.ExternalID),
+				zap.Any("panic", rec))
+			sum.Skipped++
+		}
+	}()
+
 	rc, _, err := s.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		s.Logger.Warn("dims-backfill: storage read failed; leaving content_metadata empty",
@@ -64,9 +80,11 @@ func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, s
 		sum.Skipped++
 		return
 	}
+	// Deferred (not closed inline) so a panic inside MeasureDims can't leak the handle.
+	defer func() { _ = rc.Close() }()
+
 	// Header-only, streamed — never buffers the whole image.
 	w, h, measureErr := s.Processor.MeasureDims(rc, doc.MimeType)
-	_ = rc.Close()
 
 	switch {
 	case measureErr != nil:

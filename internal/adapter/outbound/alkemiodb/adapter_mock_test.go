@@ -414,3 +414,28 @@ func TestMock_Create_DBError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+// TestMock_ListImagesNeedingDims_PredicateGuardsSentinels: the "never re-decode a row we already
+// decided about" invariant lives ONLY in this query's WHERE clause — the domain sweep uses a mock
+// repo that bypasses it. So assert the predicate itself: image rows, content_metadata still EMPTY
+// ('{}'), keyset-paged by id. Broadening it (e.g. to rows merely missing imageWidth) would re-decode
+// every {_decodeFailed:true} sentinel on every boot — a CPU/IO storm this test exists to prevent.
+func TestMock_ListImagesNeedingDims_PredicateGuardsSentinels(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	after := uuid.New()
+
+	mock.ExpectQuery(`(?s)FROM file\s+WHERE "mimeType" LIKE 'image/%'\s+AND content_metadata = '\{\}'::jsonb\s+AND id > \$1\s+ORDER BY id\s+LIMIT \$2`).
+		WithArgs(pgtype.UUID{Bytes: after, Valid: true}, int32(500)).
+		WillReturnRows(mock.NewRows([]string{"id", "externalID", "mimeType"}))
+
+	if _, err := New(mock).ListImagesNeedingDims(context.Background(), after, 500); err != nil {
+		t.Fatalf("ListImagesNeedingDims: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}

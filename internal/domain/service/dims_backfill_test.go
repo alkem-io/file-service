@@ -74,6 +74,27 @@ func TestRunDimsBackfill_StorageReadFails_SkipsPersist(t *testing.T) {
 	}
 }
 
+// A panic while measuring one row (this decodes arbitrary legacy bytes through a CGo image library,
+// in a bare background goroutine) must be contained to that row — not take down the process at boot,
+// which would crash-loop on a poison blob. The row is counted skipped and the sweep continues.
+func TestRunDimsBackfill_PanicOnOneRow_IsContained(t *testing.T) {
+	repo := &mockRepo{imagesNeedingDims: oneImageRow()}
+	svc := newDimsSvc(repo, &mockStorage{data: []byte("poison")}, &mockProcessor{measurePanic: true})
+
+	var sum DimsBackfillSummary
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				t.Fatalf("panic escaped the sweep (would crash the process at boot): %v", rec)
+			}
+		}()
+		sum = svc.RunDimsBackfill(context.Background())
+	}()
+	if sum.Skipped != 1 || repo.backfillCalls != 0 {
+		t.Fatalf("summary=%+v backfillCalls=%d, want the poison row skipped with no persist", sum, repo.backfillCalls)
+	}
+}
+
 // An empty legacy set is a clean no-op — the converged steady state, one page scan and done.
 func TestRunDimsBackfill_EmptyCorpus_NoOp(t *testing.T) {
 	repo := &mockRepo{}
