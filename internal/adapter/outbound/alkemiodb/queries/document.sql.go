@@ -260,6 +260,51 @@ func (q *Queries) ListDocumentsByMimeTypes(ctx context.Context, dollar_1 []strin
 	return items, nil
 }
 
+const listImagesNeedingDims = `-- name: ListImagesNeedingDims :many
+SELECT id, "externalID", "mimeType"
+FROM file
+WHERE "mimeType" LIKE 'image/%'
+  AND content_metadata = '{}'::jsonb
+  AND id > $1
+ORDER BY id
+LIMIT $2
+`
+
+type ListImagesNeedingDimsParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Limit int32       `json:"limit"`
+}
+
+type ListImagesNeedingDimsRow struct {
+	ID         pgtype.UUID `json:"id"`
+	ExternalID string      `json:"externalID"`
+	MimeType   string      `json:"mimeType"`
+}
+
+// Paged scan for the boot-time image-dimension backfill sweep (spec 019/020): image rows whose
+// content_metadata is still unpopulated ('{}'). Keyset-paged by id ($1 = cursor, $2 = page size) so
+// a large first-run legacy set never loads whole. The sweep reads each blob by externalID, does a
+// header-only measure, and compare-and-sets the dims via BackfillContentMetadata.
+func (q *Queries) ListImagesNeedingDims(ctx context.Context, arg ListImagesNeedingDimsParams) ([]ListImagesNeedingDimsRow, error) {
+	rows, err := q.db.Query(ctx, listImagesNeedingDims, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListImagesNeedingDimsRow{}
+	for rows.Next() {
+		var i ListImagesNeedingDimsRow
+		if err := rows.Scan(&i.ID, &i.ExternalID, &i.MimeType); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows
 UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,

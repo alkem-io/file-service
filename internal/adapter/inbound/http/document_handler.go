@@ -653,11 +653,9 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lazy-backfill: legacy image rows have empty content_metadata; PATCH
-	// is one of the four metadata-returning endpoints that must surface
-	// dims (FR-015 / FR-018). Best-effort — never fails the PATCH.
-	updated = h.Service.BackfillIfNeeded(r.Context(), updated)
-
+	// A legacy image row may still have empty content_metadata; its dims are populated by the
+	// boot-time RunDimsBackfill sweep, not lazily here (a libvips decode has no place on a request
+	// path — spec 019/020). Until the sweep reaches that row the response simply omits dims (FR-020).
 	UpdateDocumentResponse{
 		ID:                updated.ID.String(),
 		StorageBucketID:   updated.StorageBucketID.String(),

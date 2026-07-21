@@ -275,7 +275,7 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 	}
 	if found {
 		existing.Reused = true
-		return s.backfillIfNeeded(ctx, existing), nil
+		return existing, nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
 }

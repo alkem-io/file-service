@@ -86,3 +86,16 @@ SET "mimeType"    = $2,
     version       = version + 1
 WHERE id = $1
   AND "externalID" = $4;
+
+-- name: ListImagesNeedingDims :many
+-- Paged scan for the boot-time image-dimension backfill sweep (spec 019/020): image rows whose
+-- content_metadata is still unpopulated ('{}'). Keyset-paged by id ($1 = cursor, $2 = page size) so
+-- a large first-run legacy set never loads whole. The sweep reads each blob by externalID, does a
+-- header-only measure, and compare-and-sets the dims via BackfillContentMetadata.
+SELECT id, "externalID", "mimeType"
+FROM file
+WHERE "mimeType" LIKE 'image/%'
+  AND content_metadata = '{}'::jsonb
+  AND id > $1
+ORDER BY id
+LIMIT $2;

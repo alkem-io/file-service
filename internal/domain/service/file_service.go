@@ -133,40 +133,6 @@ func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Dura
 	return n, err
 }
 
-// ServeResult contains file content and metadata for serving.
-type ServeResult struct {
-	Content  []byte
-	MimeType string
-	Document model.Document
-}
-
-// ServeFile looks up a document, checks authorization, and reads the file.
-func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actorID string) (*ServeResult, error) {
-	doc, err := s.Repo.GetByID(ctx, documentID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := s.Auth.CheckPrivilege(ctx, actorID, "read", doc.AuthorizationID.String())
-	if err != nil {
-		return nil, fmt.Errorf("authorization check: %w", err)
-	}
-	if !result.Allowed {
-		return nil, ErrForbidden
-	}
-
-	content, err := s.Storage.Read(doc.ExternalID)
-	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
-	}
-
-	return &ServeResult{
-		Content:  content,
-		MimeType: doc.MimeType,
-		Document: doc,
-	}, nil
-}
-
 // CreateDocument ingests a complete buffer through the streaming pipeline
 // (spec 020): stage → validate → publish. Kept for buffer-shaped callers;
 // the HTTP handler streams the request directly via StageUpload +
@@ -218,11 +184,9 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		return nil, err
 	}
 
-	// Lazy-backfill the source row when it's a legacy image with empty
-	// content_metadata so the copy carries dims to the destination row
-	// (FR-014, FR-018, SC-007 + SC-009).
-	s.backfillIfNeeded(ctx, &source)
-
+	// A legacy image source (or dedup destination) may have empty content_metadata; the copy simply
+	// inherits that, and the boot-time RunDimsBackfill sweep populates dims for both rows off-path
+	// (no libvips decode on a copy request — spec 019/020). Response omits dims until the sweep runs.
 	if !input.SkipDedup {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
 		if err != nil {
@@ -230,9 +194,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		}
 		if found {
 			existing.Reused = true
-			// The destination row may itself be legacy; backfill so the
-			// response carries dims for it too.
-			return s.backfillIfNeeded(ctx, existing), nil
+			return existing, nil
 		}
 	}
 
@@ -590,84 +552,4 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
-}
-
-// BackfillIfNeeded is the public entry point for handlers that read a
-// document and want lazy-backfill applied before rendering. Wraps the
-// internal helper so the PATCH handler doesn't have to duplicate the
-// decision tree. Best-effort, never returns an error (FR-020).
-func (s *FileService) BackfillIfNeeded(ctx context.Context, doc *model.Document) *model.Document {
-	return s.backfillIfNeeded(ctx, doc)
-}
-
-// backfillIfNeeded is the lazy-backfill helper for legacy image rows whose
-// content_metadata is empty. Called from the Create dedup-hit branch (and
-// from Copy + PATCH paths). Best-effort: never returns an error — backfill
-// failures don't fail the underlying request.
-//
-// Decision tree:
-//   - non-image MIME → return doc unchanged (no metadata work for non-images)
-//   - ContentMetadata.Populated=true → already decided (measured OR
-//     {_decodeFailed:true} sentinel); return unchanged so persisted decode-
-//     failure rows short-circuit instead of looping decode attempts
-//   - Storage.Read fails → log warn, return unchanged (transient retry next read)
-//   - MeasureDims returns dims → persist via BackfillContentMetadata
-//     (compare-and-set on externalID), populate doc.ImageWidth/Height; on
-//     persist error or race-lost log debug AND still populate doc so the
-//     response carries the just-measured dims (FR-020 case c)
-//   - MeasureDims returns err → persist {_decodeFailed:true} best-effort;
-//     leave doc unchanged (response omits dims, FR-019)
-//   - MeasureDims returns (nil, nil, nil) (no decoder available, !vips stub) →
-//     skip persist, leave doc unchanged so a future vips run retries
-func (s *FileService) backfillIfNeeded(ctx context.Context, doc *model.Document) *model.Document {
-	if doc == nil {
-		return doc
-	}
-	if !strings.HasPrefix(doc.MimeType, "image/") {
-		return doc
-	}
-	if doc.ContentMetadata.Populated {
-		// Either dims already measured or {_decodeFailed:true} persisted —
-		// nothing to do. Persisted sentinels short-circuit here instead of
-		// re-running the decoder on every metadata-returning request.
-		return doc
-	}
-
-	content, err := s.Storage.Read(doc.ExternalID)
-	if err != nil {
-		s.Logger.Warn("backfill: storage read failed; leaving content_metadata empty",
-			zap.String("externalID", doc.ExternalID), zap.Error(err))
-		return doc
-	}
-
-	w, h, measureErr := s.Processor.MeasureDims(content, doc.MimeType)
-	switch {
-	case measureErr != nil:
-		// Decoder ran and failed → write the {_decodeFailed: true} sentinel.
-		// Persist best-effort. Doc stays without dims; the response simply
-		// omits imageWidth/imageHeight.
-		sentinel := model.ContentMetadata{Populated: true, DecodeFailed: true}
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, sentinel); persistErr != nil {
-			s.Logger.Warn("backfill: persist of _decodeFailed sentinel failed",
-				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
-		}
-		return doc
-	case w != nil && h != nil:
-		measured := model.ContentMetadata{Populated: true, ImageWidth: w, ImageHeight: h}
-		// Always populate the doc with the just-computed dims, even if
-		// persistence fails or the compare-and-set lost a race (FR-020
-		// case c). The dims are accurate for the bytes the request decoded.
-		doc.ImageWidth = w
-		doc.ImageHeight = h
-		doc.ContentMetadata = measured
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, measured); persistErr != nil {
-			s.Logger.Warn("backfill: persist of measured dims failed; response still carries dims",
-				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
-		}
-		return doc
-	default:
-		// (nil, nil, nil) — no decoder available (no-vips stub). Skip persist
-		// so a future vips run retries. Doc stays without dims.
-		return doc
-	}
 }

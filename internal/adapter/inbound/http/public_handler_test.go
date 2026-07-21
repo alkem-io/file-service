@@ -232,6 +232,10 @@ func TestPublicHandler_Authorized(t *testing.T) {
 	if rr.Body.String() != "file-content" {
 		t.Errorf("body = %q, want %q", rr.Body.String(), "file-content")
 	}
+	// The streamed serve path must declare the size explicitly ("file-content" = 12 bytes).
+	if cl := rr.Header().Get("Content-Length"); cl != "12" {
+		t.Errorf("Content-Length = %q, want 12", cl)
+	}
 }
 
 func TestPublicHandler_Unauthorized(t *testing.T) {
@@ -337,6 +341,9 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 }
 
 func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockDocRepo) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
 	return nil, nil
 }
 func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {

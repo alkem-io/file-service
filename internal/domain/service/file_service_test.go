@@ -47,6 +47,8 @@ type mockRepo struct {
 	suspects           []model.Document
 	listErr            error
 	lastListMimeTypes  []string
+	imagesNeedingDims  []model.Document // ListImagesNeedingDims yields this once (cursor==Nil), then empty
+	listImagesErr      error
 	relabeled          map[uuid.UUID]string
 	relabelExternalIDs map[uuid.UUID]string
 	updateMimeErr      error
@@ -112,6 +114,16 @@ func (m *mockRepo) ListByMimeTypes(_ context.Context, mimeTypes []string) ([]mod
 	m.lastListMimeTypes = mimeTypes
 	return m.suspects, m.listErr
 }
+
+func (m *mockRepo) ListImagesNeedingDims(_ context.Context, after uuid.UUID, _ int32) ([]model.Document, error) {
+	if m.listImagesErr != nil {
+		return nil, m.listImagesErr
+	}
+	if after == uuid.Nil {
+		return m.imagesNeedingDims, nil // first page
+	}
+	return nil, nil // subsequent pages empty → paging terminates
+}
 func (m *mockRepo) UpdateMimeType(_ context.Context, id uuid.UUID, expectedExternalID, mimeType string) (bool, error) {
 	if m.updateMimeErr != nil {
 		return false, m.updateMimeErr
@@ -128,15 +140,6 @@ func (m *mockRepo) UpdateMimeType(_ context.Context, id uuid.UUID, expectedExter
 	}
 	m.relabeled[id] = mimeType
 	return true, nil
-}
-
-type mockAuth struct {
-	allowed bool
-	err     error
-}
-
-func (m *mockAuth) CheckPrivilege(_ context.Context, _, _, _ string) (model.AuthResult, error) {
-	return model.AuthResult{Allowed: m.allowed, Reason: "test"}, m.err
 }
 
 type mockStorage struct {
@@ -233,40 +236,11 @@ func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 		Measured:    true,
 	}, nil
 }
-func (m *mockProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+func (m *mockProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
 	return m.measureDimsW, m.measureDimsH, m.measureDimsErr
 }
 
 // --- Tests ---
-
-func TestServeFile_Allowed(t *testing.T) {
-	svc := &FileService{Logger: nopLogger,
-		Repo:    &mockRepo{doc: model.Document{ExternalID: "abc", MimeType: "text/plain", AuthorizationID: uuid.New()}},
-		Auth:    &mockAuth{allowed: true},
-		Storage: &mockStorage{data: []byte("content")},
-	}
-
-	result, err := svc.ServeFile(context.Background(), uuid.New(), "actor-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(result.Content) != "content" {
-		t.Errorf("content = %q, want %q", result.Content, "content")
-	}
-}
-
-func TestServeFile_Denied(t *testing.T) {
-	svc := &FileService{Logger: nopLogger,
-		Repo:    &mockRepo{doc: model.Document{AuthorizationID: uuid.New()}},
-		Auth:    &mockAuth{allowed: false},
-		Storage: &mockStorage{},
-	}
-
-	_, err := svc.ServeFile(context.Background(), uuid.New(), "actor-1")
-	if !errors.Is(err, ErrForbidden) {
-		t.Errorf("expected ErrForbidden, got %v", err)
-	}
-}
 
 func TestCreateDocument_Happy(t *testing.T) {
 	svc := &FileService{Logger: nopLogger,
@@ -574,6 +548,9 @@ func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 }
 func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return m.find()
+}
+func (m *mockRepoRace) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	return nil, nil
 }
 func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
@@ -915,6 +892,9 @@ func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 func (m *copyRaceRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
 }
+func (m *copyRaceRepo) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	return nil, nil
+}
 func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
 }
@@ -1061,43 +1041,6 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
 	if err == nil {
 		t.Fatal("expected error")
-	}
-}
-
-func TestServeFile_AuthError(t *testing.T) {
-	svc := &FileService{Logger: nopLogger,
-		Repo:    &mockRepo{doc: model.Document{AuthorizationID: uuid.New()}},
-		Auth:    &mockAuth{err: errors.New("nats timeout")},
-		Storage: &mockStorage{},
-	}
-
-	_, err := svc.ServeFile(context.Background(), uuid.New(), "actor-1")
-	if err == nil {
-		t.Fatal("expected error for auth failure")
-	}
-}
-
-func TestServeFile_DocNotFound(t *testing.T) {
-	svc := &FileService{Logger: nopLogger,
-		Repo: &mockRepo{getErr: errors.New("not found")},
-	}
-
-	_, err := svc.ServeFile(context.Background(), uuid.New(), "actor-1")
-	if err == nil {
-		t.Fatal("expected error for missing doc")
-	}
-}
-
-func TestServeFile_StorageReadFails(t *testing.T) {
-	svc := &FileService{Logger: nopLogger,
-		Repo:    &mockRepo{doc: model.Document{ExternalID: "abc", AuthorizationID: uuid.New()}},
-		Auth:    &mockAuth{allowed: true},
-		Storage: &mockStorage{readErr: errors.New("disk error")},
-	}
-
-	_, err := svc.ServeFile(context.Background(), uuid.New(), "actor-1")
-	if err == nil {
-		t.Fatal("expected error for storage read failure")
 	}
 }
 
@@ -1332,63 +1275,6 @@ func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 
 // --- US1: lazy-backfill on Create dedup hit (legacy image rows) ---
 
-// TestCreateDocument_DedupHitOnLegacyImageRow_TriggersBackfill verifies the
-// SC-009 partial path: when Create finds an existing image row whose
-// content_metadata is empty, the service calls MeasureDims, persists the
-// dims via BackfillContentMetadata, and surfaces them on the returned doc.
-func TestCreateDocument_DedupHitOnLegacyImageRow_TriggersBackfill(t *testing.T) {
-	existingID := uuid.New()
-	bucket := uuid.New()
-	// Legacy row: image MIME, content_metadata empty (ImageWidth/Height nil).
-	legacyDoc := model.Document{
-		ID:              existingID,
-		ExternalID:      "sha3-of-content",
-		MimeType:        "image/jpeg",
-		Size:            42,
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-
-	repo := &mockRepo{findDoc: &legacyDoc}
-	storage := &mockStorage{data: []byte("fake-jpeg-bytes")}
-	processor := &mockProcessor{
-		measureDimsW: intpService(800),
-		measureDimsH: intpService(600),
-	}
-	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
-
-	input := model.CreateDocumentInput{
-		DisplayName:     "img.jpg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !doc.Reused {
-		t.Error("expected Reused=true on dedup hit")
-	}
-	if repo.backfillCalls != 1 {
-		t.Errorf("BackfillContentMetadata calls = %d, want 1", repo.backfillCalls)
-	}
-	if doc.ImageWidth == nil || *doc.ImageWidth != 800 {
-		t.Errorf("ImageWidth = %v, want 800", doc.ImageWidth)
-	}
-	if doc.ImageHeight == nil || *doc.ImageHeight != 600 {
-		t.Errorf("ImageHeight = %v, want 600", doc.ImageHeight)
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || *got.ImageWidth != 800 || got.ImageHeight == nil || *got.ImageHeight != 600 {
-		t.Errorf("backfill payload = %+v, want Populated=true with dims 800x600", got)
-	}
-	if repo.lastBackfillExternalID != legacyDoc.ExternalID {
-		t.Errorf("backfill expectedExternalID = %q, want %q", repo.lastBackfillExternalID, legacyDoc.ExternalID)
-	}
-}
-
-// Sanity: dedup hit on a non-image row never triggers backfill.
 func TestCreateDocument_DedupHitOnNonImage_NoBackfill(t *testing.T) {
 	existingID := uuid.New()
 	bucket := uuid.New()
@@ -1417,50 +1303,6 @@ func TestCreateDocument_DedupHitOnNonImage_NoBackfill(t *testing.T) {
 	}
 }
 
-// MeasureDims-failure path: decoder ran and failed → persists _decodeFailed
-// sentinel, response omits dims.
-func TestCreateDocument_DedupHit_MeasureDimsFails_PersistsSentinel(t *testing.T) {
-	existingID := uuid.New()
-	bucket := uuid.New()
-	legacyDoc := model.Document{
-		ID:              existingID,
-		ExternalID:      "sha3-of-content",
-		MimeType:        "image/jpeg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-
-	repo := &mockRepo{findDoc: &legacyDoc}
-	storage := &mockStorage{data: []byte("corrupt-image-bytes")}
-	processor := &mockProcessor{measureDimsErr: errors.New("vips load failed")}
-	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
-
-	input := model.CreateDocumentInput{
-		DisplayName:     "img.jpg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if doc.ImageWidth != nil || doc.ImageHeight != nil {
-		t.Errorf("dims = (%v, %v), want both nil after decode failure", doc.ImageWidth, doc.ImageHeight)
-	}
-	if repo.backfillCalls != 1 {
-		t.Errorf("BackfillContentMetadata calls = %d, want 1 (sentinel persist)", repo.backfillCalls)
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || !got.DecodeFailed {
-		t.Errorf("backfill payload = %+v, want Populated=true with DecodeFailed=true", got)
-	}
-	if repo.lastBackfillExternalID != legacyDoc.ExternalID {
-		t.Errorf("backfill expectedExternalID = %q, want %q", repo.lastBackfillExternalID, legacyDoc.ExternalID)
-	}
-}
-
-// (nil, nil, nil) from MeasureDims = no decoder available (no-vips stub):
-// service skips persist, response omits dims.
 func TestCreateDocument_DedupHit_NoDecoderAvailable_SkipsPersist(t *testing.T) {
 	existingID := uuid.New()
 	bucket := uuid.New()
@@ -1529,45 +1371,6 @@ func TestCreateDocument_DedupHit_StorageReadFails_GracefulDegrade(t *testing.T) 
 	}
 }
 
-// BackfillContentMetadata persist failure: response STILL carries the
-// just-computed dims (FR-020 case c).
-func TestCreateDocument_DedupHit_PersistFails_ResponseStillCarriesDims(t *testing.T) {
-	existingID := uuid.New()
-	bucket := uuid.New()
-	legacyDoc := model.Document{
-		ID:              existingID,
-		ExternalID:      "sha3-of-content",
-		MimeType:        "image/jpeg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-
-	repo := &mockRepo{findDoc: &legacyDoc, backfillErr: errors.New("db connection lost")}
-	storage := &mockStorage{data: []byte("jpeg-bytes")}
-	processor := &mockProcessor{measureDimsW: intpService(800), measureDimsH: intpService(600)}
-	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
-
-	input := model.CreateDocumentInput{
-		DisplayName:     "img.jpg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if doc.ImageWidth == nil || *doc.ImageWidth != 800 {
-		t.Errorf("ImageWidth = %v, want 800 (response carries dims even on persist failure)", doc.ImageWidth)
-	}
-	if doc.ImageHeight == nil || *doc.ImageHeight != 600 {
-		t.Errorf("ImageHeight = %v, want 600", doc.ImageHeight)
-	}
-	if repo.backfillCalls != 1 {
-		t.Errorf("BackfillContentMetadata calls = %d, want 1 (attempted)", repo.backfillCalls)
-	}
-}
-
-// Already-measured dedup hit: skip backfill, dims propagate from the row.
 func TestCreateDocument_DedupHit_AlreadyMeasured_SkipsBackfill(t *testing.T) {
 	existingID := uuid.New()
 	bucket := uuid.New()
@@ -1601,44 +1404,6 @@ func TestCreateDocument_DedupHit_AlreadyMeasured_SkipsBackfill(t *testing.T) {
 	}
 	if repo.backfillCalls != 0 {
 		t.Errorf("BackfillContentMetadata calls = %d, want 0 (already measured)", repo.backfillCalls)
-	}
-}
-
-// CR-4 regression: a row with the persisted _decodeFailed sentinel must
-// short-circuit the lazy-backfill on subsequent metadata-returning reads,
-// instead of looping decode attempts on every request.
-func TestCreateDocument_DedupHit_DecodeFailedSentinel_SkipsBackfill(t *testing.T) {
-	existingID := uuid.New()
-	bucket := uuid.New()
-	legacyDoc := model.Document{
-		ID:              existingID,
-		ExternalID:      "sha3-of-content",
-		MimeType:        "image/jpeg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-		// Populated=true with DecodeFailed=true → permanent sentinel.
-		ContentMetadata: model.ContentMetadata{Populated: true, DecodeFailed: true},
-	}
-
-	repo := &mockRepo{findDoc: &legacyDoc}
-	storage := &mockStorage{data: []byte("anything")}
-	processor := &mockProcessor{measureDimsW: intpService(800), measureDimsH: intpService(600)}
-	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: processor}
-
-	input := model.CreateDocumentInput{
-		DisplayName:     "img.jpg",
-		StorageBucketID: bucket,
-		AuthorizationID: uuid.New(),
-	}
-	doc, err := svc.CreateDocument(context.Background(), input, []byte("content"), "", nil, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if repo.backfillCalls != 0 {
-		t.Errorf("BackfillContentMetadata calls = %d, want 0 (sentinel must short-circuit)", repo.backfillCalls)
-	}
-	if doc.ImageWidth != nil || doc.ImageHeight != nil {
-		t.Errorf("dims = (%v, %v), want both nil for sentinel row", doc.ImageWidth, doc.ImageHeight)
 	}
 }
 

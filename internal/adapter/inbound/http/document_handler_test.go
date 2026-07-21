@@ -91,7 +91,7 @@ func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 		Measured:    measured,
 	}, nil
 }
-func (p *stubProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+func (p *stubProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
 	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
@@ -186,6 +186,11 @@ func TestDocumentHandler_GetContent_Found(t *testing.T) {
 	}
 	if rr.Body.String() != "file content" {
 		t.Errorf("body = %q", rr.Body.String())
+	}
+	// The streamed path must declare the size explicitly (a dropped/wrong Content-Length on this
+	// most-used read endpoint would ship uncaught otherwise).
+	if cl := rr.Header().Get("Content-Length"); cl != "12" {
+		t.Errorf("Content-Length = %q, want 12", cl)
 	}
 }
 
@@ -1964,203 +1969,6 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 
 // --- Phase 7: lazy-backfill on Copy and PATCH for legacy image rows ---
 
-// copyLegacyImageRow shared helper: prepares a handler with a legacy
-// image source row (no dims) and a storage reading PNG-ish bytes whose
-// MeasureDims returns the supplied (w, h, err). Returns the recorder and
-// captured repo so callers can assert.
-func runCopyLegacyImage(
-	t *testing.T,
-	measureW *int, measureH *int, measureErr error,
-	storageData []byte, storageErr error,
-	backfillErr error,
-) (*httptest.ResponseRecorder, *mockDocRepo) {
-	t.Helper()
-	h, repo, storage, processor := newDocHandlerWithProcessor()
-	sourceID := uuid.New()
-	repo.doc = model.Document{
-		ID:              sourceID,
-		ExternalID:      "sha3-of-png",
-		MimeType:        "image/png",
-		Size:            42,
-		DisplayName:     "legacy.png",
-		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
-		// dims nil → legacy
-	}
-	storage.data = storageData
-	storage.err = storageErr
-	processor.measureDimsW = measureW
-	processor.measureDimsH = measureH
-	processor.measureDimsErr = measureErr
-	repo.backfillErr = backfillErr
-
-	body, _ := json.Marshal(CopyDocumentRequest{
-		SourceID:            sourceID.String(),
-		DestinationBucketID: uuid.New().String(),
-		AuthorizationID:     uuid.New().String(),
-	})
-
-	r := chi.NewRouter()
-	r.Post("/internal/file/copy", h.Copy)
-	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	return rr, repo
-}
-
-// runPatchLegacyImage mirrors runCopyLegacyImage for the PATCH path.
-func runPatchLegacyImage(
-	t *testing.T,
-	measureW *int, measureH *int, measureErr error,
-	storageData []byte, storageErr error,
-	backfillErr error,
-) (*httptest.ResponseRecorder, *mockDocRepo) {
-	t.Helper()
-	h, repo, storage, processor := newDocHandlerWithProcessor()
-	docID := uuid.New()
-	repo.doc = model.Document{
-		ID:              docID,
-		ExternalID:      "sha3-of-png",
-		MimeType:        "image/png",
-		Size:            42,
-		DisplayName:     "legacy.png",
-		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
-	}
-	storage.data = storageData
-	storage.err = storageErr
-	processor.measureDimsW = measureW
-	processor.measureDimsH = measureH
-	processor.measureDimsErr = measureErr
-	repo.backfillErr = backfillErr
-
-	r := chi.NewRouter()
-	r.Patch("/internal/file/{id}", h.Update)
-	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.png"}`))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	return rr, repo
-}
-
-func TestDocumentHandler_Copy_LegacyImageRow_LazyBackfillsBoth(t *testing.T) {
-	rr, repo := runCopyLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, nil)
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp CreateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
-		t.Errorf("imageWidth = %v, want 800", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
-		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill calls = %d, want >= 1 (source row)", repo.backfillCalls)
-	}
-	// Persisted payload should be the dims, not the sentinel.
-	got := repo.lastBackfillPayload
-	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
-		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
-	}
-}
-
-func TestDocumentHandler_Patch_LegacyImageRow_LazyBackfills(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(640), intp(480), nil, []byte("png-bytes"), nil, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 640 {
-		t.Errorf("imageWidth = %v, want 640", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 480 {
-		t.Errorf("imageHeight = %v, want 480", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill calls = %d, want >= 1", repo.backfillCalls)
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
-		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
-	}
-}
-
-// SC-010: MeasureDims returns an error → response 200, dims absent,
-// content_metadata persisted as the {_decodeFailed: true} sentinel.
-func TestDocumentHandler_Patch_DecodeFailure_PersistsSentinel(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, nil, nil, errors.New("vips load: corrupt header"), []byte("corrupt-bytes"), nil, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth != nil || resp.ImageHeight != nil {
-		t.Errorf("expected nil dims on decode failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill not called; sentinel must be persisted")
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || !got.DecodeFailed {
-		t.Errorf("backfill payload = %+v, expected Populated=true with DecodeFailed=true", got)
-	}
-}
-
-// SC-012 / FR-020 case b: Storage.Read fails → 200, no dims, no persist.
-func TestDocumentHandler_Patch_StorageReadFails_GracefulDegrade(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, nil, errors.New("transient I/O"), nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth != nil || resp.ImageHeight != nil {
-		t.Errorf("expected nil dims after Storage.Read failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
-	}
-	if repo.backfillCalls != 0 {
-		t.Errorf("backfill calls = %d, want 0 (no sentinel on transient failures, FR-020 b)", repo.backfillCalls)
-	}
-}
-
-// SC-013 / FR-020 case c: BackfillContentMetadata persist fails →
-// response still carries the just-computed dims; row stays empty so the
-// next read retries.
-func TestDocumentHandler_Patch_BackfillPersistFails_ResponseStillCarriesDims(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, errors.New("DB transient"))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
-		t.Errorf("imageWidth = %v, want 800 (response carries dims even though persist failed)", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
-		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill must still be attempted before failing")
-	}
-}
-
-// TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims defends FR-004
-// for the Replace endpoint. PUT new image bytes; response carries the
-// post-rotation dims sourced from StoredFile.ImageWidth/Height (which the
-// service plumbs from ProcessResult inside StoreAndLink).
 func TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims(t *testing.T) {
 	h, repo, _, processor := newDocHandlerWithProcessor()
 	docID := uuid.New()

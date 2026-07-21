@@ -82,5 +82,5 @@ type ImageProcessor interface {
 	//   - (nil, nil, nil)    → only emitted by the no-vips stub; signals
 	//                          "no decoder available." Caller skips persist
 	//                          so a future vips run can retry.
-	MeasureDims(content []byte, mimeType string) (*int, *int, error)
+	MeasureDims(r io.Reader, mimeType string) (*int, *int, error)
 }

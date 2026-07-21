@@ -307,6 +307,27 @@ func (a *Adapter) ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]mo
 	return docs, nil
 }
 
+// ListImagesNeedingDims implements port.DocumentRepo — a keyset-paged scan of image rows with
+// unpopulated content_metadata, feeding the boot-time dims backfill sweep.
+func (a *Adapter) ListImagesNeedingDims(ctx context.Context, afterID uuid.UUID, limit int32) ([]model.Document, error) {
+	rows, err := a.queries.ListImagesNeedingDims(ctx, queries.ListImagesNeedingDimsParams{
+		ID:    uuidToPgx(afterID),
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]model.Document, 0, len(rows))
+	for _, r := range rows {
+		docs = append(docs, model.Document{
+			ID:         pgxToUUID(r.ID),
+			ExternalID: r.ExternalID,
+			MimeType:   r.MimeType,
+		})
+	}
+	return docs, nil
+}
+
 // UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
 // relabel). Compare-and-set on externalID: 0 rows affected means the row's
 // content changed concurrently (or the row is gone) — reported as

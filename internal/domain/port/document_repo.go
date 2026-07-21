@@ -54,6 +54,12 @@ type DocumentRepo interface {
 	// given values (spec 019 repair-job scan). Only ID, ExternalID, MimeType,
 	// Size and DisplayName are populated.
 	ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error)
+	// ListImagesNeedingDims returns one keyset-paged page of image rows whose content_metadata is
+	// still unpopulated ('{}') — the input to the boot-time dims backfill sweep (spec 019/020).
+	// afterID is the exclusive cursor (uuid.Nil for the first page); rows are ordered by id, so the
+	// last returned doc's ID is the next cursor. Only ID/ExternalID/MimeType are populated (all the
+	// sweep needs). An empty page means the sweep has drained the legacy set.
+	ListImagesNeedingDims(ctx context.Context, afterID uuid.UUID, limit int32) ([]model.Document, error)
 	// UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
 	// relabel). Content fields change exclusively via UpdateFile.
 	// Compare-and-set: the relabel applies only while the row's externalID

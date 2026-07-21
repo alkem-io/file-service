@@ -176,6 +176,22 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 		zap.Int("errors", sum.Errors))
 }
 
+// runDimsBackfill executes the boot-time image-dimension backfill (spec 019/020) and feeds the
+// summary into the dims_backfill_total metric. Like the MIME repair it is independent of request
+// serving, logged-never-fatal, and reruns each boot — converging to a near-empty scan once the
+// legacy set is drained.
+func runDimsBackfill(ctx context.Context, fileSvc *service.FileService, logger *zap.Logger) {
+	httpAdapter.InitMetrics()
+	sum := fileSvc.RunDimsBackfill(ctx)
+	httpAdapter.DimsBackfillOps.Add("measured", int64(sum.Measured))
+	httpAdapter.DimsBackfillOps.Add("decode_failed", int64(sum.DecodeFailed))
+	httpAdapter.DimsBackfillOps.Add("skipped", int64(sum.Skipped))
+	logger.Info("dims-backfill metrics recorded",
+		zap.Int("measured", sum.Measured),
+		zap.Int("decode_failed", sum.DecodeFailed),
+		zap.Int("skipped", sum.Skipped))
+}
+
 // runOutboxPrune periodically drops consumer-finished backup-outbox rows older than the
 // retention window (008-continuous-file-backup SC-008), until ctx is cancelled. Best-effort —
 // a prune failure is logged, never fatal. Only launched when the producer is enabled.
