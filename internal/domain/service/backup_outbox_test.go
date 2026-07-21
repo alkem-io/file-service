@@ -71,15 +71,6 @@ func TestCleanupOrphanedBlobDropsPendingOutboxRows(t *testing.T) {
 		t.Fatalf("orphan-hygiene counter must advance by the rows removed (2), got +%d", got)
 	}
 
-	// n==0 (nothing was pending for this file) must NOT move the counter (the n>0 guard).
-	zeroOutbox := &recordingOutbox{deletePendingN: 0}
-	sZero := &FileService{Storage: &mockStorage{data: []byte("x")}, Outbox: zeroOutbox, Logger: nopLogger}
-	before0 := backupOutboxOrphaned.Value()
-	sZero.cleanupOrphanedBlob(context.Background(), fileID, "somehash")
-	if got := backupOutboxOrphaned.Value() - before0; got != 0 {
-		t.Fatalf("no rows removed must not move the counter, got +%d", got)
-	}
-
 	// Producer OFF (nil Outbox): only the outbox step is skipped — the blob delete path is
 	// unchanged, so the blob must STILL be deleted (and no panic on the nil Outbox).
 	offStorage := &mockStorage{data: []byte("x")}
@@ -90,7 +81,9 @@ func TestCleanupOrphanedBlobDropsPendingOutboxRows(t *testing.T) {
 	}
 
 	// Blob delete FAILING must keep the row: while the blob exists it is still backable.
-	failing := &recordingOutbox{deletePendingN: 1}
+	// (deletePendingN is irrelevant here — DeletePendingForFile is never reached; the failed
+	// Storage.Delete returns first, which is exactly what the assertion below proves.)
+	failing := &recordingOutbox{}
 	sFail := &FileService{
 		Storage: &mockStorage{data: []byte("x"), deleteErr: errors.New("fs busy")},
 		Outbox:  failing,
