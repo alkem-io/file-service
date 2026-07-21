@@ -421,14 +421,16 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // when the backup producer is on — drops fileID's own still-pending backup-outbox hint for that
 // hash: it points at bytes that no longer exist, so the consumer's fetch could only ever 404
 // (file-service is the master of orphans; it deleted the blob, so it removes the dead hint too).
-// The outbox delete is scoped to (fileID, externalID), NOT the hash alone: under content
-// addressing a concurrent re-upload of the same content enqueues a pending row with the same
-// externalID but a different fileID, and deleting by hash would silently wipe that live
-// document's backup hint — an unrecoverable DR gap. The benign corollary: if two documents in
-// different buckets shared a hash and are deleted at different times, the earlier one's pending
-// row is left behind when the blob finally goes (count→0) — the consumer's 404→skip backstop
-// retires it. That one wasted fetch is the deliberate trade for never touching a live row.
-// Both steps are best-effort warn-only
+// The outbox delete is scoped to (fileID, externalID) AND guarded by a NOT EXISTS check (see the
+// query) so it can only ever remove a genuinely-dead hint: (a) the hash scope alone is unsafe —
+// a concurrent re-upload of the same content by ANOTHER document shares the externalID, so a
+// by-hash delete would wipe that live document's hint; (b) the NOT EXISTS closes the same-document
+// race — if a concurrent replace put THIS document's content back to this hash (A→B→A) and
+// re-enqueued it, the file row again ties fileID→externalID, so its live hint is spared. Two
+// residuals remain, both benign: a sibling document that shared the hash and was deleted earlier
+// leaves a stale pending row until the consumer's 404→skip backstop retires it; and the
+// pre-existing count→Storage.Delete blob-GC race (a concurrent create re-referencing the blob) is
+// unchanged by this PR — its proper fix is atomic GC. Both steps are best-effort warn-only
 // cleanup: a leftover blob is GC-able, and a leftover pending row is caught by the consumer's
 // own 404→skip backstop. The outbox cleanup runs only after a successful blob delete — while the
 // blob exists, pending rows are still backable.

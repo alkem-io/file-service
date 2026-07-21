@@ -209,3 +209,28 @@ func TestMock_PruneBackupOutbox(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestMock_DeletePendingForFile_ScopedAndGuarded: the orphan-hygiene delete is scoped to
+// (fileId, externalID) AND carries the NOT EXISTS guard (a live file row still tying them spares
+// the hint — the same-doc A→B→A replace-back race). Asserts the scope args and that the guard is
+// present; dropping "AND NOT EXISTS" would reopen the race and fail this test.
+func TestMock_DeletePendingForFile_ScopedAndGuarded(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	fileID := uuid.New()
+
+	mock.ExpectExec("AND NOT EXISTS").
+		WithArgs(pgtype.UUID{Bytes: fileID, Valid: true}, "somehash").
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	n, err := New(mock).DeletePendingForFile(context.Background(), fileID, "somehash")
+	if err != nil || n != 1 {
+		t.Fatalf("DeletePendingForFile = %d, %v (want 1, nil)", n, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
