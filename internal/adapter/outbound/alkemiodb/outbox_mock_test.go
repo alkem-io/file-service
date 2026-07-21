@@ -210,10 +210,12 @@ func TestMock_PruneBackupOutbox(t *testing.T) {
 	}
 }
 
-// TestMock_DeletePendingForFile_ScopedAndGuarded: the orphan-hygiene delete is scoped to
-// (fileId, externalID) AND carries the NOT EXISTS guard (a live file row still tying them spares
-// the hint — the same-doc A→B→A replace-back race). Asserts the scope args and that the guard is
-// present; dropping "AND NOT EXISTS" would reopen the race and fail this test.
+// TestMock_DeletePendingForFile_ScopedAndGuarded: the orphan-hygiene delete must carry BOTH the
+// outer scope (fileId + externalID + status='pending') AND the NOT EXISTS guard — either half
+// dropped is a real regression (drop the scope → a whole-table mass over-delete; drop the guard →
+// reopen the same-doc A→B→A live-hint deletion). pgxmock does unanchored substring matching, so
+// the regex asserts the FULL statement structure (both halves) — a subtly-wrong query fails, not
+// only a total removal of the clause.
 func TestMock_DeletePendingForFile_ScopedAndGuarded(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
@@ -222,10 +224,7 @@ func TestMock_DeletePendingForFile_ScopedAndGuarded(t *testing.T) {
 	defer mock.Close()
 	fileID := uuid.New()
 
-	// Match the FULL guard predicate, not just the "AND NOT EXISTS" marker, so a subtly-wrong
-	// guard (dropped externalID predicate, or wrong subquery table) also fails — not only a total
-	// removal of the clause.
-	mock.ExpectExec(`NOT EXISTS \(SELECT 1 FROM file f WHERE f\.id = \$1 AND f\."externalID" = \$2\)`).
+	mock.ExpectExec(`(?s)DELETE FROM file_backup_outbox o\s+WHERE o\."fileId" = \$1 AND o\."externalID" = \$2 AND o\.status = 'pending'\s+AND NOT EXISTS \(SELECT 1 FROM file f WHERE f\.id = \$1 AND f\."externalID" = \$2\)`).
 		WithArgs(pgtype.UUID{Bytes: fileID, Valid: true}, "somehash").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 

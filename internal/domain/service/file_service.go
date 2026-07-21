@@ -428,10 +428,9 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // shared the hash and was deleted earlier leaves a stale pending row until the consumer's 404→skip
 // backstop retires it; and the pre-existing count→Storage.Delete blob-GC race (a concurrent create
 // re-referencing the blob) is unchanged by this PR — its proper fix is atomic GC. Both steps are
-// best-effort warn-only
-// cleanup: a leftover blob is GC-able, and a leftover pending row is caught by the consumer's
-// own 404→skip backstop. The outbox cleanup runs only after a successful blob delete — while the
-// blob exists, pending rows are still backable.
+// best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending row is caught
+// by the consumer's own 404→skip backstop. The outbox cleanup runs only after a successful blob
+// delete — while the blob exists, pending rows are still backable.
 func (s *FileService) cleanupOrphanedBlob(ctx context.Context, fileID uuid.UUID, externalID string) {
 	if err := s.Storage.Delete(externalID); err != nil {
 		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
