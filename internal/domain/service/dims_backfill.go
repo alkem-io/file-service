@@ -11,8 +11,8 @@ import (
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
-// DimsBackfillSummary reports what the boot-time image-dimension backfill sweep did. The caller
-// (cmd/server) feeds these counts into the dims_backfill_total metric.
+// DimsBackfillSummary reports what one image-dimension backfill pass did. The `sweep-dims`
+// subcommand logs these counts and maps them to the Job exit code (dimsJobExitCode).
 type DimsBackfillSummary struct {
 	Measured     int  // dims computed and persisted
 	DecodeFailed int  // decoder ran and failed → {_decodeFailed:true} sentinel persisted
@@ -43,7 +43,8 @@ func (c *readFaultCapture) Read(p []byte) (int, error) {
 // heals the finite pre-existing set the same way RunMimeRepair heals legacy MIME labels — off any
 // request path, so a libvips decode NEVER runs on a read / PATCH / copy. It converges: each pass
 // stamps every row it visits (dims, or a decode-failed sentinel), so later passes scan a near-empty
-// tail. Best-effort: never returns an error — a failed pass just leaves rows for the next boot.
+// tail. Best-effort: never returns an error — a failed pass leaves its rows for the next run of
+// the sweep-dims job (they stay unpopulated and keep matching the scan).
 func (s *FileService) RunDimsBackfill(ctx context.Context) DimsBackfillSummary {
 	var sum DimsBackfillSummary
 	var cursor uuid.UUID // uuid.Nil → first page
@@ -71,7 +72,7 @@ func (s *FileService) RunDimsBackfill(ctx context.Context) DimsBackfillSummary {
 	// or an operator reads a partial sweep as a drained legacy set.
 	msg := "dims-backfill: completed"
 	if sum.Aborted {
-		msg = "dims-backfill: ENDED EARLY (corpus not fully swept; the next boot resumes)"
+		msg = "dims-backfill: ENDED EARLY (corpus not fully swept — rerun the sweep-dims job to finish)"
 	}
 	s.Logger.Info(msg,
 		zap.Bool("aborted", sum.Aborted),
@@ -103,8 +104,9 @@ func (s *FileService) healKnownDims(ctx context.Context, doc *model.Document, me
 // backfillOneDims measures one legacy row and compare-and-sets its content_metadata. Mirrors the
 // three outcomes of the retired lazy path: measured dims, a {_decodeFailed:true} sentinel (so it is
 // never retried), or a skip (read/persist error, or the no-vips stub) that leaves the row for a
-// future boot — a transient read/persist failure is therefore re-attempted on the NEXT boot, since
-// the row stays unpopulated and keeps matching the scan. The compare-and-set (on externalID)
+// future run — a transient read/persist failure is therefore re-attempted the NEXT time the
+// sweep-dims job runs, since the row stays unpopulated and keeps matching the scan. The
+// compare-and-set (on externalID)
 // protects against overwriting content that was replaced between the scan and the persist.
 //
 // A GO-level panic is contained PER ROW: the sweep runs in a bare background goroutine, so without
@@ -139,7 +141,7 @@ func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, s
 	// treating a transient read fault as "undecodable" would persist the PERMANENT
 	// {_decodeFailed:true} sentinel — excluding a perfectly good image from this and every future
 	// sweep, with nothing that would ever retry it. Only a real decode failure earns the sentinel;
-	// an I/O fault is a skip, retried on the next boot.
+	// an I/O fault is a skip, retried on the next sweep-dims run.
 	src := &readFaultCapture{r: rc}
 	w, h, measureErr := s.Processor.MeasureDims(src, doc.MimeType)
 

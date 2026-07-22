@@ -216,11 +216,12 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 
 // runSweepDims runs the image-dimension backfill ONCE and exits — the one-shot `sweep-dims`
 // subcommand, invoked as a k8s Job after a deploy to drain the finite legacy set (spec 019/020).
-// It reuses the same wiring as serve but needs neither auth nor NATS (the sweep never authorizes,
-// it only reads storage + writes content_metadata), so it builds the service with a nil auth port.
-// SIGINT/SIGTERM cancels the sweep promptly for a clean Job termination. Exit code: 0 when the pass
-// COMPLETED (skips / decode-failures are expected and self-heal on the next run); 1 when it ENDED
-// EARLY (a page-scan error or a shutdown signal) so the Job is marked failed and re-run.
+// At RUNTIME the sweep never authorizes (it only reads storage + writes content_metadata), so it
+// builds the service with a nil auth port and no NATS. It does, however, load the SAME config as
+// serve (one binary, one config surface), so config.Load still requires AUTH_SERVICE_URL or NATS_URL
+// to be set — the Job manifest reuses serve's env, where they already are. Do NOT author the Job to
+// omit them expecting "no auth"; the value is simply unused. SIGINT/SIGTERM cancels the sweep for a
+// clean Job termination; exit code is dimsJobExitCode.
 func runSweepDims() int {
 	base, cleanup, code := setupBase()
 	if base == nil {
@@ -251,14 +252,23 @@ func runSweepDims() int {
 }
 
 // dimsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the Job's retry policy
-// is unit-testable (mirrors file-backup-service's backfillVerdict). A pass that COMPLETED is exit 0
-// even with skips or decode-failures: those are expected and self-heal on the next run (a skipped
-// row stays unpopulated and is retried; a decode-failed row is terminally, correctly sentinel'd). A
-// pass that ENDED EARLY (page-scan error or shutdown signal) is exit 1, so the Job is marked failed
-// and re-run to finish the corpus.
+// is unit-testable (mirrors file-backup-service's backfillVerdict). Exit 1 (Job failed → k8s
+// retries) when either:
+//   - the pass ENDED EARLY (Aborted: a page-scan error or a shutdown signal), or
+//   - the pass made ZERO forward progress on a NON-EMPTY set — every matched row was skipped
+//     (Measured==0 && DecodeFailed==0 && Skipped>0). That only happens when storage or the DB is
+//     down for the whole run; exiting 0 there would falsely mark the Job Succeeded and, with no
+//     boot re-run and the metric gone, leave the outage invisible.
+//
+// Otherwise exit 0: a drained corpus (all counts zero) is a clean no-op, and a pass that measured
+// at least some rows is progress — its skips/decode-failures self-heal on the next run (a skipped
+// row stays unpopulated and is retried; a decode-failed row is terminally, correctly sentinel'd).
 func dimsJobExitCode(sum service.DimsBackfillSummary) int {
 	if sum.Aborted {
 		return 1
+	}
+	if sum.Measured == 0 && sum.DecodeFailed == 0 && sum.Skipped > 0 {
+		return 1 // touched rows but made no progress → a total outage, not a drained corpus
 	}
 	return 0
 }

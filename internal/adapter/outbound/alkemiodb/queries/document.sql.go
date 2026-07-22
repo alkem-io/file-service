@@ -281,7 +281,7 @@ type ListImagesNeedingDimsRow struct {
 	MimeType   string      `json:"mimeType"`
 }
 
-// Paged scan for the boot-time image-dimension backfill sweep (spec 019/020): image rows whose
+// Paged scan for the image-dimension backfill sweep (the sweep-dims job, spec 019/020): image rows whose
 // content_metadata is still unpopulated ('{}'). Keyset-paged by id ($1 = cursor, $2 = page size) so
 // a large first-run legacy set never loads whole. The sweep reads each blob by externalID, does a
 // header-only measure, and compare-and-sets the dims via BackfillContentMetadata.

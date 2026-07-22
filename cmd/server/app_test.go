@@ -192,9 +192,11 @@ func TestDimsJobExitCode(t *testing.T) {
 		sum  service.DimsBackfillSummary
 		want int
 	}{
-		{"empty", service.DimsBackfillSummary{}, 0},
-		{"measured-and-skipped", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
+		{"empty-drained-corpus", service.DimsBackfillSummary{}, 0},
+		{"progress-with-some-skips", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
+		{"progress-via-sentinels-only", service.DimsBackfillSummary{DecodeFailed: 4, Skipped: 2}, 0},
 		{"aborted", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
+		{"zero-progress-all-skipped-outage", service.DimsBackfillSummary{Skipped: 100}, 1},
 	}
 	for _, c := range cases {
 		if got := dimsJobExitCode(c.sum); got != c.want {

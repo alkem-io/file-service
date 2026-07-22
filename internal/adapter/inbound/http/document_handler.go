@@ -654,7 +654,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A legacy image row may still have empty content_metadata; its dims are populated by the
-	// boot-time RunDimsBackfill sweep, not lazily here (a libvips decode has no place on a request
+	// sweep-dims job (RunDimsBackfill), not lazily here (a libvips decode has no place on a request
 	// path — spec 019/020). Until the sweep reaches that row the response simply omits dims (FR-020).
 	UpdateDocumentResponse{
 		ID:                updated.ID.String(),

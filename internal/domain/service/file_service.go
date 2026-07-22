@@ -185,7 +185,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	}
 
 	// A legacy image source (or dedup destination) may have empty content_metadata; the copy simply
-	// inherits that, and the boot-time RunDimsBackfill sweep populates dims for both rows off-path
+	// inherits that, and the sweep-dims job (RunDimsBackfill) populates dims for both rows off-path
 	// (no libvips decode on a copy request — spec 019/020). Response omits dims until the sweep runs.
 	if !input.SkipDedup {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
@@ -219,7 +219,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// re-run Process, so dims, the {_decodeFailed:true} sentinel, and any
 	// forward-fit per-content-type fields must ride along from the source
 	// row. A legacy source with empty content_metadata copies that emptiness
-	// verbatim; the boot sweep populates both rows off the request path.
+	// verbatim; the sweep-dims job populates both rows off the request path.
 	contentMetadata := source.ContentMetadata
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }
