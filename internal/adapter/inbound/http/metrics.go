@@ -32,10 +32,6 @@ var (
 	// relabeled | unrecoverable | skipped_not_office | errors.
 	MimeRepairOps = expvar.NewMap("mime_repair_total")
 
-	// DimsBackfillOps counts startup image-dimension-backfill actions (spec 019/020):
-	// measured | decode_failed | skipped.
-	DimsBackfillOps = expvar.NewMap("dims_backfill_total")
-
 	// IngestOutcomes counts streaming-upload results by outcome (spec 020
 	// FR-008): accepted | rejected_over_limit | rejected_pixel_budget |
 	// rejected_bucket_policy | stalled | client_abort | failed_mid_stream.
@@ -52,7 +48,6 @@ func InitMetrics() {
 		DocumentOps.Init()
 		ReplaceOutcomes.Init()
 		MimeRepairOps.Init()
-		DimsBackfillOps.Init()
 		IngestOutcomes.Init()
 	})
 }

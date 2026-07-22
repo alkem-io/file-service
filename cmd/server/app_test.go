@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/config"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 func TestConnectDatabase_Success(t *testing.T) {
@@ -173,4 +174,31 @@ func startTestNATSServer(t *testing.T) *natsserver.Server {
 		t.Fatal("NATS not ready")
 	}
 	return srv
+}
+
+// TestRun_UnknownCommand: a typo'd subcommand must fail loudly (exit 2), never fall through to
+// serve or silently succeed.
+func TestRun_UnknownCommand(t *testing.T) {
+	if code := run([]string{"bogus-cmd"}); code != 2 {
+		t.Fatalf("run(unknown) = %d, want 2", code)
+	}
+}
+
+// TestDimsJobExitCode: the k8s Job retry contract — a completed pass is exit 0 even with skips /
+// decode-failures (they self-heal on the next run); only an ENDED-EARLY pass is exit 1 (retry).
+func TestDimsJobExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		sum  service.DimsBackfillSummary
+		want int
+	}{
+		{"empty", service.DimsBackfillSummary{}, 0},
+		{"measured-and-skipped", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
+		{"aborted", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
+	}
+	for _, c := range cases {
+		if got := dimsJobExitCode(c.sum); got != c.want {
+			t.Errorf("%s: exit = %d, want %d", c.name, got, c.want)
+		}
+	}
 }

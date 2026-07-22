@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +26,41 @@ import (
 	"github.com/alkem-io/file-service/internal/imaging"
 	"github.com/alkem-io/file-service/internal/resilience"
 )
+
+// appBase is the wiring every subcommand needs: a logger, the loaded config, and a DB pool.
+type appBase struct {
+	logger *zap.Logger
+	cfg    *config.Config
+	pool   *pgxpool.Pool
+}
+
+// setupBase builds the shared bootstrap (logger → config → DB pool) and returns it with a cleanup
+// func to defer. On any failure it reports and returns (nil, nil, nonzero-code); callers return
+// that code. Shared by `serve` and every sweep subcommand so they can't drift on bootstrap.
+func setupBase() (*appBase, func(), int) {
+	logger, err := config.NewLogger()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
+		return nil, nil, 1
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("failed to load config", zap.Error(err))
+		_ = logger.Sync()
+		return nil, nil, 1
+	}
+	pool, err := connectDatabase(context.Background(), cfg.AlkemioDB)
+	if err != nil {
+		logger.Error("failed to connect to database", zap.Error(err))
+		_ = logger.Sync()
+		return nil, nil, 1
+	}
+	cleanup := func() {
+		pool.Close()
+		_ = logger.Sync()
+	}
+	return &appBase{logger: logger, cfg: cfg, pool: pool}, cleanup, 0
+}
 
 func connectDatabase(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, cfg.ConnString())
@@ -176,26 +214,53 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 		zap.Int("errors", sum.Errors))
 }
 
-// runDimsBackfill executes the boot-time image-dimension backfill (spec 019/020) and feeds the
-// summary into the dims_backfill_total metric. Like the MIME repair it is independent of request
-// serving, logged-never-fatal, and reruns each boot — converging to a near-empty scan once the
-// legacy set is drained.
-func runDimsBackfill(ctx context.Context, fileSvc *service.FileService, logger *zap.Logger) {
-	httpAdapter.InitMetrics()
-	sum := fileSvc.RunDimsBackfill(ctx)
-	httpAdapter.DimsBackfillOps.Add("measured", int64(sum.Measured))
-	httpAdapter.DimsBackfillOps.Add("decode_failed", int64(sum.DecodeFailed))
-	httpAdapter.DimsBackfillOps.Add("skipped", int64(sum.Skipped))
-	if sum.Aborted {
-		// Surfaced as a counter so an operator can see the sweep gave up (partial pass) rather than
-		// inferring convergence from a "completed" line.
-		httpAdapter.DimsBackfillOps.Add("aborted", 1)
+// runSweepDims runs the image-dimension backfill ONCE and exits — the one-shot `sweep-dims`
+// subcommand, invoked as a k8s Job after a deploy to drain the finite legacy set (spec 019/020).
+// It reuses the same wiring as serve but needs neither auth nor NATS (the sweep never authorizes,
+// it only reads storage + writes content_metadata), so it builds the service with a nil auth port.
+// SIGINT/SIGTERM cancels the sweep promptly for a clean Job termination. Exit code: 0 when the pass
+// COMPLETED (skips / decode-failures are expected and self-heal on the next run); 1 when it ENDED
+// EARLY (a page-scan error or a shutdown signal) so the Job is marked failed and re-run.
+func runSweepDims() int {
+	base, cleanup, code := setupBase()
+	if base == nil {
+		return code
 	}
-	logger.Info("dims-backfill metrics recorded",
-		zap.Bool("aborted", sum.Aborted),
-		zap.Int("measured", sum.Measured),
-		zap.Int("decode_failed", sum.DecodeFailed),
-		zap.Int("skipped", sum.Skipped))
+	defer cleanup()
+	logger := base.logger
+
+	fileSvc := buildFileService(base.pool, nil, base.cfg, logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("dims-backfill job starting")
+	sum := fileSvc.RunDimsBackfill(ctx)
+	if sum.Aborted {
+		logger.Warn("dims-backfill job ENDED EARLY — rerun to finish",
+			zap.Int("measured", sum.Measured),
+			zap.Int("decode_failed", sum.DecodeFailed),
+			zap.Int("skipped", sum.Skipped))
+	} else {
+		logger.Info("dims-backfill job complete",
+			zap.Int("measured", sum.Measured),
+			zap.Int("decode_failed", sum.DecodeFailed),
+			zap.Int("skipped", sum.Skipped))
+	}
+	return dimsJobExitCode(sum)
+}
+
+// dimsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the Job's retry policy
+// is unit-testable (mirrors file-backup-service's backfillVerdict). A pass that COMPLETED is exit 0
+// even with skips or decode-failures: those are expected and self-heal on the next run (a skipped
+// row stays unpopulated and is retried; a decode-failed row is terminally, correctly sentinel'd). A
+// pass that ENDED EARLY (page-scan error or shutdown signal) is exit 1, so the Job is marked failed
+// and re-run to finish the corpus.
+func dimsJobExitCode(sum service.DimsBackfillSummary) int {
+	if sum.Aborted {
+		return 1
+	}
+	return 0
 }
 
 // runOutboxPrune periodically drops consumer-finished backup-outbox rows older than the
