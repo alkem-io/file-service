@@ -198,7 +198,11 @@ func TestDimsJobExitCode(t *testing.T) {
 		{"progress-with-some-skips", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
 		{"all-skipped-ambiguous-not-a-failure", service.DimsBackfillSummary{Skipped: 100}, 0},
 		{"convergent-orphan-tail", service.DimsBackfillSummary{Skipped: 5}, 0},
-		{"aborted-page-scan-or-signal", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
+		{"aborted-after-progress", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
+		// The load-bearing case: a total outage that fails the FIRST page scan yields Aborted with
+		// zero of everything — Aborted alone (NOT coupled with progress) must gate exit 1, or a
+		// mid/total outage on page one would silently exit 0.
+		{"aborted-total-first-page-outage", service.DimsBackfillSummary{Aborted: true}, 1},
 	}
 	for _, c := range cases {
 		if got := dimsJobExitCode(c.sum); got != c.want {
