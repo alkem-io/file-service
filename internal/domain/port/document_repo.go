@@ -55,7 +55,7 @@ type DocumentRepo interface {
 	// Size and DisplayName are populated.
 	ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error)
 	// ListImagesNeedingDims returns one keyset-paged page of image rows whose content_metadata is
-	// still unpopulated ('{}') — the input to the boot-time dims backfill sweep (spec 019/020).
+	// still unpopulated ('{}') — the input to the dims backfill sweep (the sweep-dims job, spec 019/020).
 	// afterID is the exclusive cursor (uuid.Nil for the first page); rows are ordered by id, so the
 	// last returned doc's ID is the next cursor. Only ID/ExternalID/MimeType are populated (all the
 	// sweep needs). An empty page means the sweep has drained the legacy set.

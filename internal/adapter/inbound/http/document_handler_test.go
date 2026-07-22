@@ -1968,7 +1968,7 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 }
 
 // The PATCH response must surface the row's stored dims. Since dims now come from content_metadata
-// (populated at write time or by the boot sweep — never a decode on this path), this guards the
+// (populated at write time or by the sweep-dims job — never a decode on this path), this guards the
 // handler's field mapping, which the deleted lazy-backfill tests were the only thing exercising.
 func TestDocumentHandler_Patch_ResponseCarriesStoredDims(t *testing.T) {
 	docID := uuid.New()

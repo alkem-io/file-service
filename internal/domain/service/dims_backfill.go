@@ -109,11 +109,12 @@ func (s *FileService) healKnownDims(ctx context.Context, doc *model.Document, me
 // compare-and-set (on externalID)
 // protects against overwriting content that was replaced between the scan and the persist.
 //
-// A GO-level panic is contained PER ROW: the sweep runs in a bare background goroutine, so without
-// this one malformed blob would take down the whole process at boot (a crash-loop on a poison row);
-// the retired lazy path was implicitly shielded by net/http's per-connection recover. NOTE the limit:
-// recover() catches Go panics only — a fault inside the C image library (SIGSEGV/abort) kills the
-// process regardless, and no Go-side guard can change that.
+// A GO-level panic is contained PER ROW: the sweep decodes arbitrary legacy bytes through a CGo
+// image library, so without this one malformed blob would take down the whole sweep process (the
+// one-shot sweep-dims job) and the pass would make no progress until an operator noticed. Contained,
+// it is logged, counted skipped, and the sweep moves on. NOTE the limit: recover() catches Go panics
+// only — a fault inside the C image library (SIGSEGV/abort) kills the process regardless, and no
+// Go-side guard can change that.
 func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, sum *DimsBackfillSummary) {
 	defer func() {
 		if rec := recover(); rec != nil {

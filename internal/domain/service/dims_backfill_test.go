@@ -74,9 +74,9 @@ func TestRunDimsBackfill_StorageReadFails_SkipsPersist(t *testing.T) {
 	}
 }
 
-// A panic while measuring one row (this decodes arbitrary legacy bytes through a CGo image library,
-// in a bare background goroutine) must be contained to that row — not take down the process at boot,
-// which would crash-loop on a poison blob. The row is counted skipped and the sweep continues.
+// A panic while measuring one row (this decodes arbitrary legacy bytes through a CGo image library)
+// must be contained to that row — not take down the whole sweep process on a poison blob. The row is
+// counted skipped and the sweep continues.
 func TestRunDimsBackfill_PanicOnOneRow_IsContained(t *testing.T) {
 	repo := &mockRepo{imagesNeedingDims: oneImageRow()}
 	svc := newDimsSvc(repo, &mockStorage{data: []byte("poison")}, &mockProcessor{measurePanic: true})
@@ -85,7 +85,7 @@ func TestRunDimsBackfill_PanicOnOneRow_IsContained(t *testing.T) {
 	func() {
 		defer func() {
 			if rec := recover(); rec != nil {
-				t.Fatalf("panic escaped the sweep (would crash the process at boot): %v", rec)
+				t.Fatalf("panic escaped the sweep (would crash the sweep process): %v", rec)
 			}
 		}()
 		sum = svc.RunDimsBackfill(context.Background())

@@ -251,24 +251,22 @@ func runSweepDims() int {
 	return dimsJobExitCode(sum)
 }
 
-// dimsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the Job's retry policy
-// is unit-testable (mirrors file-backup-service's backfillVerdict). Exit 1 (Job failed → k8s
-// retries) when either:
-//   - the pass ENDED EARLY (Aborted: a page-scan error or a shutdown signal), or
-//   - the pass made ZERO forward progress on a NON-EMPTY set — every matched row was skipped
-//     (Measured==0 && DecodeFailed==0 && Skipped>0). That only happens when storage or the DB is
-//     down for the whole run; exiting 0 there would falsely mark the Job Succeeded and, with no
-//     boot re-run and the metric gone, leave the outage invisible.
+// dimsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is
+// unit-testable (mirrors file-backup-service's backfillVerdict, and the same reasoning). Exit 1 ONLY
+// when the pass ENDED EARLY (Aborted: a page-scan error or a shutdown signal) — the one hard failure
+// where the scan itself broke, so a rerun is warranted. Everything else is exit 0.
 //
-// Otherwise exit 0: a drained corpus (all counts zero) is a clean no-op, and a pass that measured
-// at least some rows is progress — its skips/decode-failures self-heal on the next run (a skipped
-// row stays unpopulated and is retried; a decode-failed row is terminally, correctly sentinel'd).
+// Skips do NOT gate the exit code, because an all-skipped pass is genuinely AMBIGUOUS and the exit
+// code cannot tell the two cases apart: it can be the sweep's convergent tail (a handful of rows
+// whose blobs are permanently gone / reliably panic libvips — they will skip on EVERY future run,
+// so failing on them means the Job can never reach a clean exit 0 and an operator's rerun loop never
+// terminates), OR a transient storage/DB outage (skips everything, but self-heals next run). The
+// operator running the Job reads the logged measured/decode_failed/skipped summary to tell them
+// apart — a heuristic exit code would be wrong in one direction or the other. (This is exactly the
+// all-skipped ruling from file-backup-service's backfillVerdict.)
 func dimsJobExitCode(sum service.DimsBackfillSummary) int {
 	if sum.Aborted {
 		return 1
-	}
-	if sum.Measured == 0 && sum.DecodeFailed == 0 && sum.Skipped > 0 {
-		return 1 // touched rows but made no progress → a total outage, not a drained corpus
 	}
 	return 0
 }

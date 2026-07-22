@@ -308,7 +308,7 @@ func (a *Adapter) ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]mo
 }
 
 // ListImagesNeedingDims implements port.DocumentRepo — a keyset-paged scan of image rows with
-// unpopulated content_metadata, feeding the boot-time dims backfill sweep.
+// unpopulated content_metadata, feeding the dims backfill sweep (the sweep-dims job).
 func (a *Adapter) ListImagesNeedingDims(ctx context.Context, afterID uuid.UUID, limit int32) ([]model.Document, error) {
 	rows, err := a.queries.ListImagesNeedingDims(ctx, queries.ListImagesNeedingDimsParams{
 		ID:    uuidToPgx(afterID),

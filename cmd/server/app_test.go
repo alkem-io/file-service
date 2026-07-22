@@ -184,8 +184,10 @@ func TestRun_UnknownCommand(t *testing.T) {
 	}
 }
 
-// TestDimsJobExitCode: the k8s Job retry contract — a completed pass is exit 0 even with skips /
-// decode-failures (they self-heal on the next run); only an ENDED-EARLY pass is exit 1 (retry).
+// TestDimsJobExitCode: the k8s Job retry contract — exit 1 ONLY on an ENDED-EARLY (Aborted) pass.
+// Skips never gate the exit code (an all-skipped pass is ambiguous — a permanent orphan tail vs a
+// transient outage — and a heuristic would either loop forever on the tail or miss a mid-run outage;
+// the operator reads the logged counts). Matches file-backup-service's backfillVerdict all-skipped ruling.
 func TestDimsJobExitCode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -194,9 +196,9 @@ func TestDimsJobExitCode(t *testing.T) {
 	}{
 		{"empty-drained-corpus", service.DimsBackfillSummary{}, 0},
 		{"progress-with-some-skips", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
-		{"progress-via-sentinels-only", service.DimsBackfillSummary{DecodeFailed: 4, Skipped: 2}, 0},
-		{"aborted", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
-		{"zero-progress-all-skipped-outage", service.DimsBackfillSummary{Skipped: 100}, 1},
+		{"all-skipped-ambiguous-not-a-failure", service.DimsBackfillSummary{Skipped: 100}, 0},
+		{"convergent-orphan-tail", service.DimsBackfillSummary{Skipped: 5}, 0},
+		{"aborted-page-scan-or-signal", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
 	}
 	for _, c := range cases {
 		if got := dimsJobExitCode(c.sum); got != c.want {
