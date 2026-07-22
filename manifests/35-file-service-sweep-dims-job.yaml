@@ -6,27 +6,26 @@
 #   kubectl -n <ns> apply -f 35-file-service-sweep-dims-job.yaml
 #   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-dims   # read measured/decode_failed/skipped
 #
-# BEFORE APPLYING, set the two env-specific values to match the TARGET namespace's file-service
-# deployment (there is no `kubectl set image` / overlay automation for a hand-applied Job):
-#   - image:      the SAME SHA-tag the running deployment uses (do NOT leave :latest — with no
-#                 set-image step it would pull a floating, unpinned build).
-#   - claimName:  the file-service PVC of that env — dev: file-storage-pvc2, test: file-storage-pvc
-#                 (25- vs 26- deployment). A wrong/absent PVC leaves the pod Pending forever.
+# TWO placeholders are FAIL-CLOSED — the pod will not start / not schedule until you set them, so a
+# verbatim apply can never run the wrong build or the wrong volume (this Job has no `kubectl set
+# image` / overlay automation, and the backfill is IRREVERSIBLE — a decode failure persists a
+# permanent {_decodeFailed:true} sentinel no later run retries):
+#   - image:      pin to the SAME SHA-tag the TARGET namespace's file-service deployment runs. Do NOT
+#                 use :latest — with no set-image step it would run a floating, possibly-unshipped
+#                 build whose decode verdicts would be baked into the DB permanently.
+#   - claimName:  the file-service PVC of that env — dev: file-storage-pvc2, test/prod: file-storage-pvc
+#                 (25- vs 26- deployment; confirm against the running deployment).
 #
-# CO-LOCATION: the sweep reads blobs directly from the local-storage PVC (file-storage-pvc2), which
-# is ReadWriteOnce — it can only be mounted on the node that already has it (the serving file-service
-# pod). The REQUIRED podAffinity below forces this Job onto that same node; without it the pod stays
-# Pending (multi-attach) — the same single-node constraint the file-service deployment lives under.
+# Storage is an NFS ReadWriteMany PVC, so the sweep mounts it on ANY node alongside the serving pod
+# (no co-location needed, no multi-attach constraint) — the sweep reads blobs directly from it.
 kind: Job
 apiVersion: batch/v1
 metadata:
   name: alkemio-file-service-sweep-dims
   # DISTINCT app label — deliberately NOT `alkemio-file-service`, so this non-serving pod is never
   # picked up by the file-service Service selector (30-...-service.yaml selects app:
-  # alkemio-file-service). A sweep pod enrolled as a Service endpoint would refuse the ~half of
-  # in-cluster file-service traffic routed to it (it has no HTTP listener). Co-location with the
-  # serving pods is done by podAffinity below (which selects app: alkemio-file-service), not by
-  # sharing the label.
+  # alkemio-file-service). A sweep pod enrolled as a Service endpoint would refuse the in-cluster
+  # file-service traffic routed to it (it has no HTTP listener).
   labels:
     app: alkemio-file-service-sweep-dims
     component: sweep-dims
@@ -53,8 +52,10 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: alkemio-file-service-sweep-dims
-          # SET PER ENV — pin to the deployment's SHA-tagged image (see header). NOT :latest.
-          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:latest
+          # FAIL-CLOSED PLACEHOLDER — replace with the deployment's SHA-tagged image before applying
+          # (see header). Left as-is, the pull fails loudly (ImagePullBackOff) rather than silently
+          # running :latest.
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:SET-ME-TO-DEPLOYMENT-SHA
           imagePullPolicy: Always
           args: ["sweep-dims"]
           env:
@@ -110,13 +111,7 @@ spec:
       volumes:
         - name: file-storage
           persistentVolumeClaim:
-            # SET PER ENV — dev: file-storage-pvc2, test: file-storage-pvc (see header).
-            claimName: file-storage-pvc2
-      affinity:
-        podAffinity:
-          # REQUIRED (not preferred): the RWO PVC can only mount on the serving pod's node.
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: alkemio-file-service
-              topologyKey: kubernetes.io/hostname
+            # FAIL-CLOSED PLACEHOLDER — set to the TARGET env's file-service PVC before applying
+            # (dev: file-storage-pvc2, test/prod: file-storage-pvc; see header). Left as-is the pod
+            # stays Pending on an unbound claim rather than mounting the wrong env's volume.
+            claimName: set-me-to-env-file-storage-pvc
