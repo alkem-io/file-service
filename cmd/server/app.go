@@ -189,7 +189,8 @@ func newHTTPServer(port int, handler http.Handler) *http.Server {
 		// every read (progressReader). WriteTimeout must be zero because it is
 		// an absolute deadline starting after request headers, so it would
 		// kill healthy long uploads/downloads based on duration alone. Blob
-		// responses enforce their own rolling write-idle deadline.
+		// and ordinary responses use a lazy rolling write-idle deadline in
+		// the HTTP router instead.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0,

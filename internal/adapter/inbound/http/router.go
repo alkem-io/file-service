@@ -43,6 +43,7 @@ func NewRouter(deps Deps) *chi.Mux {
 	r.Use(chimw.Recoverer)
 	r.Use(RequestID)
 	r.Use(RequestLogger(deps.Logger))
+	r.Use(responseWriteDeadline)
 
 	// Liveness (K8s livenessProbe): process-alive check only, no dependencies.
 	// Kept separate from /health so liveness failures don't restart pods when

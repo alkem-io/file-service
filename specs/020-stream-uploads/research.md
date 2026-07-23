@@ -126,8 +126,10 @@ deadline control is exactly what `ResponseController` exists for (Go ≥1.20),
 no middleware framework needed. The server keeps a 30 s `ReadTimeout` for
 ordinary request bodies; upload reads continually extend it. Global
 `WriteTimeout` is disabled because it is absolute from request headers and
-would kill a healthy transfer based on total duration; streamed blob responses
-instead extend a 30 s write-idle deadline on every write.
+would kill a healthy transfer based on total duration. The HTTP router instead
+arms a 30 s write-idle deadline lazily when a response begins and extends it on
+every write, bounding ordinary JSON responses without penalizing long uploads;
+streamed blob responses additionally refresh it immediately before each chunk.
 
 **Alternatives**: raising the global ReadTimeout — rejected in
 clarification (slowloris exposure scales with the cap).

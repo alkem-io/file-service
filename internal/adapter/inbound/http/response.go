@@ -11,6 +11,66 @@ import (
 	"go.uber.org/zap"
 )
 
+const responseWriteIdleTimeout = 30 * time.Second
+
+// responseWriteDeadline applies a rolling write-idle deadline to every response. It arms lazily on
+// the first WriteHeader/Write, so a long upload is never constrained while its request body is
+// still being read. Small JSON responses get a bounded write path, while streamed blobs refresh
+// the same idle window on every chunk instead of inheriting an absolute request-duration limit.
+func responseWriteDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dw := &deadlineWriter{
+			ResponseWriter: w,
+			controller:     http.NewResponseController(w),
+			idle:           responseWriteIdleTimeout,
+		}
+		defer dw.close()
+		next.ServeHTTP(dw, r)
+	})
+}
+
+type deadlineWriter struct {
+	http.ResponseWriter
+	controller  *http.ResponseController
+	idle        time.Duration
+	armed       bool
+	unsupported bool
+}
+
+// WriteHeader refreshes the idle deadline before sending response headers.
+func (w *deadlineWriter) WriteHeader(code int) {
+	w.refresh()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write refreshes the idle deadline before sending response body bytes.
+func (w *deadlineWriter) Write(p []byte) (int, error) {
+	w.refresh()
+	return w.ResponseWriter.Write(p)
+}
+
+// Unwrap lets nested ResponseControllers (notably streamBlob's explicit guard) reach the transport.
+func (w *deadlineWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *deadlineWriter) refresh() {
+	if w.unsupported {
+		return
+	}
+	if err := w.controller.SetWriteDeadline(time.Now().Add(w.idle)); err != nil {
+		w.unsupported = true
+		return
+	}
+	w.armed = true
+}
+
+func (w *deadlineWriter) close() {
+	if w.armed {
+		_ = w.controller.SetWriteDeadline(time.Time{})
+	}
+}
+
 // streamBlob copies a storage blob to w in CONSTANT MEMORY (never buffering the whole object into
 // a []byte), AFTER the caller has written the status line + Content-Length. It takes ownership of
 // rc and closes it. HTTP cannot retract the already-sent 200, so a mid-stream failure is
@@ -26,7 +86,7 @@ import (
 func streamBlob(w http.ResponseWriter, logger *zap.Logger, rc io.ReadCloser, size int64, key string) {
 	defer func() { _ = rc.Close() }()
 	src := &readErrCapture{r: rc}
-	guard := newWriteIdleGuard(w, 30*time.Second)
+	guard := newWriteIdleGuard(w, responseWriteIdleTimeout)
 	defer guard.close()
 	// Never write beyond the Content-Length captured from the opened handle.
 	// A corrupted/mutated backing file that grows after Stat therefore cannot

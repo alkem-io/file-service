@@ -59,6 +59,43 @@ func TestWriteIdleGuard_RollsDeadlineAndClearsIt(t *testing.T) {
 	}
 }
 
+func TestResponseWriteDeadline_ArmsLazilyRollsAndClears(t *testing.T) {
+	w := &deadlineResponseWriter{}
+	handler := responseWriteDeadline(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if len(w.deadlines) != 0 {
+			t.Fatalf("deadline armed while reading request body: %v", w.deadlines)
+		}
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("body"))
+	}))
+
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("request body")))
+
+	if len(w.deadlines) != 3 {
+		t.Fatalf("deadline calls = %d, want header + body + clear", len(w.deadlines))
+	}
+	if w.deadlines[0].IsZero() || w.deadlines[1].IsZero() {
+		t.Fatalf("response deadlines were not armed: %v", w.deadlines)
+	}
+	if !w.deadlines[2].IsZero() {
+		t.Fatalf("final deadline = %v, want zero-time clear", w.deadlines[2])
+	}
+}
+
+func TestWriteIdleGuard_ReachesTransportThroughStatusWriter(t *testing.T) {
+	transport := &deadlineResponseWriter{}
+	w := &statusWriter{ResponseWriter: transport}
+	g := newWriteIdleGuard(w, time.Second)
+	g.close()
+
+	if len(transport.deadlines) != 2 || transport.deadlines[0].IsZero() || !transport.deadlines[1].IsZero() {
+		t.Fatalf("deadlines through statusWriter = %v, want arm then clear", transport.deadlines)
+	}
+}
+
 func TestStreamBlob_NeverWritesPastDeclaredSize(t *testing.T) {
 	w := httptest.NewRecorder()
 	streamBlob(w, zap.NewNop(), io.NopCloser(strings.NewReader("abcdef")), 3, "hash")

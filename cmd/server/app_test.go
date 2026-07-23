@@ -138,7 +138,7 @@ func TestNewHTTPServer(t *testing.T) {
 		t.Errorf("ReadHeaderTimeout = %v, want 10s", srv.ReadHeaderTimeout)
 	}
 	// A global WriteTimeout is absolute from request headers and would
-	// kill healthy long transfers. Streaming responses carry a rolling idle cap.
+	// kill healthy long transfers. The router applies a lazy rolling idle cap.
 	if srv.WriteTimeout != 0 {
 		t.Errorf("WriteTimeout = %v, want 0", srv.WriteTimeout)
 	}
