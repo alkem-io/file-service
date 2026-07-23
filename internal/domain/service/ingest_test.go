@@ -157,6 +157,20 @@ func TestStageUpload_TranscodeStageWriteFailureIsInfrastructureFailure(t *testin
 	assertSingleAbortedStage(t, storage)
 }
 
+func TestStageUpload_PassThroughMeasurementPanicAborts(t *testing.T) {
+	storage := &mockStorage{}
+	svc := newIngestService(storage, &mockRepo{})
+	svc.Processor = &mockProcessor{detectMIME: "image/gif", measurePanic: true}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected simulated MeasureDims panic")
+		}
+		assertSingleAbortedStage(t, storage)
+	}()
+	_, _ = svc.StageUpload(context.Background(), bytes.NewReader([]byte("gifish")), "")
+}
+
 // (d) Trailing bucket-policy violation (fields after the file part,
 // research R4): rejection + abort, no publish.
 func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {

@@ -144,6 +144,14 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 		return nil, fmt.Errorf("open storage stage: %w", err)
 	}
 	su := &StagedUpload{stage: stage, MimeType: mimeType, DetectedMIME: mimeType}
+	// StageUpload's caller cannot clean up until this function returns the handle. Keep ownership
+	// here until then so every unwind path — including a processor panic — aborts the staging file.
+	returned := false
+	defer func() {
+		if !returned {
+			su.Discard()
+		}
+	}()
 	cw := &countingWriter{w: stage}
 
 	if hasContent && transcodableMIME(mimeType) {
@@ -191,6 +199,7 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	if hasContent && strings.HasPrefix(mimeType, "image/") && !transcodableMIME(mimeType) {
 		s.measureStagedImageDims(su)
 	}
+	returned = true
 	return su, nil
 }
 

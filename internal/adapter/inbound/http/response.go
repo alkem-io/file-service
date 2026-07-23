@@ -24,7 +24,7 @@ func responseWriteDeadline(next http.Handler) http.Handler {
 			controller:     http.NewResponseController(w),
 			idle:           responseWriteIdleTimeout,
 		}
-		defer dw.close()
+		defer dw.finish()
 		next.ServeHTTP(dw, r)
 	})
 }
@@ -65,7 +65,13 @@ func (w *deadlineWriter) refresh() {
 	w.armed = true
 }
 
-func (w *deadlineWriter) close() {
+// finish gives net/http's buffered response a bounded transport flush before clearing the
+// connection deadline. ServeHTTP returning is not itself the final write: net/http normally flushes
+// its response buffer afterwards, so clearing first would leave that write unbounded. Refreshing
+// here also covers handlers that return without explicitly calling WriteHeader or Write.
+func (w *deadlineWriter) finish() {
+	w.refresh()
+	_ = w.controller.Flush()
 	if w.armed {
 		_ = w.controller.SetWriteDeadline(time.Time{})
 	}

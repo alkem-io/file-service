@@ -12,9 +12,11 @@ import (
 )
 
 type deadlineResponseWriter struct {
-	header        http.Header
-	deadlines     []time.Time
-	readDeadlines []time.Time
+	header               http.Header
+	deadlines            []time.Time
+	readDeadlines        []time.Time
+	flushes              int
+	deadlineCallsAtFlush int
 }
 
 func (w *deadlineResponseWriter) Header() http.Header {
@@ -34,6 +36,12 @@ func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
 
 func (w *deadlineResponseWriter) SetReadDeadline(deadline time.Time) error {
 	w.readDeadlines = append(w.readDeadlines, deadline)
+	return nil
+}
+
+func (w *deadlineResponseWriter) FlushError() error {
+	w.flushes++
+	w.deadlineCallsAtFlush = len(w.deadlines)
 	return nil
 }
 
@@ -59,7 +67,7 @@ func TestWriteIdleGuard_RollsDeadlineAndClearsIt(t *testing.T) {
 	}
 }
 
-func TestResponseWriteDeadline_ArmsLazilyRollsAndClears(t *testing.T) {
+func TestResponseWriteDeadline_ArmsLazilyRollsFlushesAndClears(t *testing.T) {
 	w := &deadlineResponseWriter{}
 	handler := responseWriteDeadline(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if _, err := io.ReadAll(r.Body); err != nil {
@@ -74,14 +82,31 @@ func TestResponseWriteDeadline_ArmsLazilyRollsAndClears(t *testing.T) {
 
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("request body")))
 
-	if len(w.deadlines) != 3 {
-		t.Fatalf("deadline calls = %d, want header + body + clear", len(w.deadlines))
+	if len(w.deadlines) != 4 {
+		t.Fatalf("deadline calls = %d, want header + body + final-flush refresh + clear", len(w.deadlines))
 	}
-	if w.deadlines[0].IsZero() || w.deadlines[1].IsZero() {
+	if w.deadlines[0].IsZero() || w.deadlines[1].IsZero() || w.deadlines[2].IsZero() {
 		t.Fatalf("response deadlines were not armed: %v", w.deadlines)
 	}
-	if !w.deadlines[2].IsZero() {
-		t.Fatalf("final deadline = %v, want zero-time clear", w.deadlines[2])
+	if w.flushes != 1 || w.deadlineCallsAtFlush != 3 {
+		t.Fatalf("flushes=%d deadlineCallsAtFlush=%d, want one flush after final refresh", w.flushes, w.deadlineCallsAtFlush)
+	}
+	if !w.deadlines[3].IsZero() {
+		t.Fatalf("final deadline = %v, want zero-time clear", w.deadlines[3])
+	}
+}
+
+func TestResponseWriteDeadline_BoundsImplicitFinalResponse(t *testing.T) {
+	w := &deadlineResponseWriter{}
+	handler := responseWriteDeadline(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if len(w.deadlines) != 2 || w.deadlines[0].IsZero() || !w.deadlines[1].IsZero() {
+		t.Fatalf("deadlines = %v, want final-flush arm then clear", w.deadlines)
+	}
+	if w.flushes != 1 || w.deadlineCallsAtFlush != 1 {
+		t.Fatalf("flushes=%d deadlineCallsAtFlush=%d, want bounded implicit flush", w.flushes, w.deadlineCallsAtFlush)
 	}
 }
 
