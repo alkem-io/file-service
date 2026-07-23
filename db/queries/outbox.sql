@@ -13,3 +13,17 @@ VALUES ($1, $2, $3, $4, $5, $6);
 -- record. Only 'done' is pruned — pending/in_progress/dead_letter/skipped are retained.
 DELETE FROM file_backup_outbox
 WHERE status = 'done' AND "createdDate" < $1;
+
+-- name: DeleteBackupOutboxPendingByHash :execrows
+-- Orphan hygiene: after file-service removes an unreferenced blob, ALL still-pending hints for
+-- that hash point at bytes that no longer exist. Delete the whole orphan set, including hints for
+-- sibling documents that shared the blob and were deleted earlier. The hash-wide delete is guarded
+-- by the owner's live `file` table: if any document currently references the hash, no hint is
+-- touched. This preserves a concurrent re-upload safely under PostgreSQL statement snapshots:
+-- a re-upload committed before this statement is visible to NOT EXISTS and blocks the delete; one
+-- committed after the snapshot has an outbox row invisible to this DELETE and therefore untouched.
+-- in_progress rows are left to the consumer's own 404→skip backstop; done/skipped/dead_letter
+-- are history, untouched.
+DELETE FROM file_backup_outbox o
+WHERE o."externalID" = $1 AND o.status = 'pending'
+  AND NOT EXISTS (SELECT 1 FROM file f WHERE f."externalID" = $1);

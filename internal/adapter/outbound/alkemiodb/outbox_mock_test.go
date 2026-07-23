@@ -130,7 +130,10 @@ func TestMock_UpdateFileWithOutbox_Commits(t *testing.T) {
 	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashNew", "image/jpeg", int32(20),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "hashOld", int32(1)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashNew", int16(0),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(20)).
@@ -138,7 +141,7 @@ func TestMock_UpdateFileWithOutbox_Commits(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
 
-	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "hashNew", "image/jpeg", 20, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "hashOld", 1, "hashNew", "image/jpeg", 20, model.ContentMetadata{}, 0)
 	if err != nil {
 		t.Fatalf("UpdateFileWithOutbox: %v", err)
 	}
@@ -155,12 +158,16 @@ func TestMock_UpdateFileWithOutbox_NotFoundRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mock.Close()
+	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "h", "text/plain", int32(1),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "old", int32(1)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectRollback()
 
-	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "text/plain", 1, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "old", 1, "h", "text/plain", 1, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("want ErrDocumentNotFound, got %v", err)
 	}
@@ -177,15 +184,101 @@ func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mock.Close()
+	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "h", "image/jpeg", int32(5),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "old", int32(1)).
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
-	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "old", 1, "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestMock_PromoteWithOutbox_CommitsMetadataAndHintAtomically(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	createdBy := uuid.New()
+	doc := sampleDoc(uuid.New())
+	doc.TemporaryLocation = true
+	doc.Version = 4
+	doc.CreatedBy = &createdBy
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, pgxmock.AnyArg(), false,
+			"final.yjs", pgxmock.AnyArg(), int32(4)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").
+		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, "hashX", int16(1),
+			pgtype.UUID{Bytes: createdBy, Valid: true}, pgxmock.AnyArg(), int64(10)).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
+
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	if err != nil {
+		t.Fatalf("PromoteWithOutbox: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestMock_PromoteWithOutbox_StaleVersionRollsBackWithoutHint(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	doc := sampleDoc(uuid.New())
+	doc.TemporaryLocation = true
+	doc.Version = 4
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("PromoteWithOutbox = %v, want ErrDocumentNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestMock_PromoteWithOutbox_EnqueueFailureRollsBackPromotion(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	doc := sampleDoc(uuid.New())
+	doc.TemporaryLocation = true
+	doc.Version = 4
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
+		WillReturnError(errors.New("outbox unavailable"))
+	mock.ExpectRollback()
+
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	if err == nil {
+		t.Fatal("PromoteWithOutbox must fail when its atomic enqueue fails")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
@@ -204,6 +297,27 @@ func TestMock_PruneBackupOutbox(t *testing.T) {
 	n, err := New(mock).PruneBackupOutbox(context.Background(), time.Now())
 	if err != nil || n != 3 {
 		t.Fatalf("PruneBackupOutbox = %d, %v (want 3, nil)", n, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// The hash scope clears sibling orphan hints; the live-file absence guard protects every
+// concurrent re-upload. Assert the full statement because pgxmock matching is unanchored.
+func TestMock_DeletePendingByHash_ScopedAndGuarded(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	mock.ExpectExec(`(?s)DELETE FROM file_backup_outbox o\s+WHERE o\."externalID" = \$1 AND o\.status = 'pending'\s+AND NOT EXISTS \(SELECT 1 FROM file f WHERE f\."externalID" = \$1\)`).
+		WithArgs("somehash").
+		WillReturnResult(pgxmock.NewResult("DELETE", 2))
+
+	n, err := New(mock).DeletePendingByHash(context.Background(), "somehash")
+	if err != nil || n != 2 {
+		t.Fatalf("DeletePendingByHash = %d, %v (want 2, nil)", n, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)

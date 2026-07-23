@@ -148,14 +148,15 @@ func TestMock_UpdateFile_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
-	// Param order: id, externalID, mimeType, size, updatedDate, content_metadata.
+	// Param order: id, new externalID, MIME, size, updatedDate, metadata,
+	// expected old externalID, expected version.
 	// Content metadata is the empty-Populated case → marshals to "{}".
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
+		WithArgs(pgxmock.AnyArg(), "newhash", "image/jpeg", pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`), "oldhash", int32(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "newhash", "image/jpeg", 999, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), uuid.New(), "oldhash", 1, "newhash", "image/jpeg", 999, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
@@ -172,11 +173,11 @@ func TestMock_UpdateFile_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
+		WithArgs(pgxmock.AnyArg(), "hash", "text/plain", pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`), "oldhash", int32(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), uuid.New(), "oldhash", 1, "hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -319,11 +320,11 @@ func TestMock_UpdateFile_DBError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`)).
+		WithArgs(pgxmock.AnyArg(), "h", "t", pgxmock.AnyArg(), pgxmock.AnyArg(), []byte(`{}`), "old", int32(1)).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateFile(context.Background(), uuid.New(), "h", "t", 1, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), uuid.New(), "old", 1, "h", "t", 1, model.ContentMetadata{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -412,5 +413,30 @@ func TestMock_Create_DBError(t *testing.T) {
 	}, model.ContentMetadata{})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+// TestMock_ListImagesNeedingDims_PredicateGuardsSentinels: the "never re-decode a row we already
+// decided about" invariant lives ONLY in this query's WHERE clause — the domain sweep uses a mock
+// repo that bypasses it. So assert the predicate itself: image rows, content_metadata still EMPTY
+// ('{}'), keyset-paged by id. Broadening it (e.g. to rows merely missing imageWidth) would re-decode
+// every {_decodeFailed:true} sentinel on every boot — a CPU/IO storm this test exists to prevent.
+func TestMock_ListImagesNeedingDims_PredicateGuardsSentinels(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	after := uuid.New()
+
+	mock.ExpectQuery(`(?s)FROM file\s+WHERE "mimeType" LIKE 'image/%'\s+AND content_metadata = '\{\}'::jsonb\s+AND id > \$1\s+ORDER BY id\s+LIMIT \$2`).
+		WithArgs(pgtype.UUID{Bytes: after, Valid: true}, int32(500)).
+		WillReturnRows(mock.NewRows([]string{"id", "externalID", "mimeType"}))
+
+	if _, err := New(mock).ListImagesNeedingDims(context.Background(), after, 500); err != nil {
+		t.Fatalf("ListImagesNeedingDims: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

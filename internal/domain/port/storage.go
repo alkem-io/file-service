@@ -2,10 +2,16 @@ package port
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
+
+// ErrInvalidKey is returned when an externalID fails the storage key rules
+// (path-traversal guard / length bound). Distinct from a genuinely absent blob,
+// so a handler can answer 400 rather than 404/500.
+var ErrInvalidKey = errors.New("invalid storage key")
 
 // StoragePort abstracts the file storage backend (local filesystem, S3, etc.).
 // Storage is content-addressed: externalID is the hash of the blob's bytes.
@@ -14,9 +20,17 @@ type StoragePort interface {
 	// identity. Saving bytes that already exist is not an error: the
 	// existing blob is reused and StoredFile.Created reports false.
 	Save(content []byte) (model.StoredFile, error)
-	// Read returns the whole blob. Wraps the backend's not-found error
-	// (os.ErrNotExist for the local adapter) when no blob has this id.
+	// Read returns the whole blob. Error contract: ErrInvalidKey (malformed id),
+	// os.ErrNotExist (blob absent). A non-ENOENT backend failure is returned as-is
+	// (the handler answers 500). Read does NOT distinguish an absent blob from a
+	// store-wide outage — an empty store root is ambiguous; the caller that knows
+	// what should exist makes that call (the backup worker cross-checks the corpus).
 	Read(externalID string) ([]byte, error)
+	// ReadStream opens the blob for streaming (constant memory — the caller does
+	// not hold the whole blob resident), returning the content, its size, and a
+	// closer the caller MUST close. Same error contract as Read. Prefer this for
+	// bulk/high-concurrency readers so N concurrent fetches don't cost N×blobsize.
+	ReadStream(externalID string) (io.ReadCloser, int64, error)
 	// Delete removes the blob. Idempotent: deleting an id that does not
 	// exist returns nil, so refcount-driven cleanup can race harmlessly.
 	Delete(externalID string) error
@@ -31,9 +45,9 @@ type StoragePort interface {
 
 // StageWriter is a per-upload staging artifact. It hashes internally while
 // bytes are written; Commit finalizes the content identity and performs the
-// backend-specific publish (FS: dedup-stat + rename; an object store would
-// complete a multipart upload and copy to the content-addressed key — the
-// contract deliberately assumes no atomic rename primitive).
+// backend-specific publish (FS: no-overwrite hard link, with O_EXCL-copy
+// fallback; an object store would complete a multipart upload and copy to
+// the content-addressed key — the contract assumes no rename primitive).
 type StageWriter interface {
 	io.Writer
 	// Commit publishes the staged content under its content hash and

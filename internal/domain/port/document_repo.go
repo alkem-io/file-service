@@ -23,8 +23,11 @@ type DocumentRepo interface {
 	// serialization to bytes.
 	Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error)
 	// UpdateFile mutates content fields plus content_metadata in one
-	// statement (Replace flow). The new metadata replaces any prior value.
-	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
+	// statement (Replace flow). expectedExternalID and expectedVersion are
+	// the row identity read before streaming; a mismatch applies zero rows
+	// so content replacement is serialized with concurrent replacements and
+	// metadata changes. A successful replace increments version.
+	UpdateFile(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
 	// UpdateMetadata mutates the non-content fields (bucket, temporary
 	// location, display name) under optimistic locking: the write applies
 	// only while the row's version still equals the given version, and bumps
@@ -36,10 +39,9 @@ type DocumentRepo interface {
 	// compare-and-set: only succeeds if the row currently has empty
 	// content_metadata AND its externalID matches expectedExternalID. This
 	// protects against a race where Replace ran on the same row between the
-	// lazy-backfill's storage read and its persist. A 0-rows-affected outcome
-	// signals "lost the race" — the helper returns nil (treats as success;
-	// the winner already wrote fresh metadata).
-	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error
+	// sweep's storage read and its persist. The bool reports whether the write
+	// applied; false with no error means the compare-and-set lost its race.
+	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) (bool, error)
 	// Delete removes the row and returns the identifiers the caller needs
 	// for cleanup: the content hash (to decide whether the blob is now
 	// orphaned) and the authorization/tagset ids (owned by alkemio-server,
@@ -54,6 +56,12 @@ type DocumentRepo interface {
 	// given values (spec 019 repair-job scan). Only ID, ExternalID, MimeType,
 	// Size and DisplayName are populated.
 	ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]model.Document, error)
+	// ListImagesNeedingDims returns one keyset-paged page of image rows whose content_metadata is
+	// still unpopulated ('{}') — the input to the dims backfill sweep (the sweep-dims job, spec 019/020).
+	// afterID is the exclusive cursor (uuid.Nil for the first page); rows are ordered by id, so the
+	// last returned doc's ID is the next cursor. Only ID/ExternalID/MimeType are populated (all the
+	// sweep needs). An empty page means the sweep has drained the legacy set.
+	ListImagesNeedingDims(ctx context.Context, afterID uuid.UUID, limit int32) ([]model.Document, error)
 	// UpdateMimeType corrects only the stored MIME type (spec 019 repair-job
 	// relabel). Content fields change exclusively via UpdateFile.
 	// Compare-and-set: the relabel applies only while the row's externalID

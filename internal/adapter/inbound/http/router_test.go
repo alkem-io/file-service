@@ -235,3 +235,26 @@ func TestRouter_InternalNoAuth(t *testing.T) {
 		t.Error("internal route should not require auth")
 	}
 }
+
+// TestRouter_BlobContentEndpoint guards that GET /internal/blob/{hash}/content is actually
+// wired in NewRouter (not just reachable via a hand-rolled test router). testRouter's
+// mockStorage serves its content for any key, so a registered route returns 200; if the
+// route line is dropped in a rebase or {hash} is renamed, chi returns 404 and this fails —
+// the same registration guard the other internal routes have.
+func TestRouter_BlobContentEndpoint(t *testing.T) {
+	r := testRouter()
+	const hash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	req := httptest.NewRequest(http.MethodGet, "/internal/blob/"+hash+"/content", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatal("GET /internal/blob/{hash}/content is not registered in NewRouter (404)")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if got := rr.Body.String(); got != "content" {
+		t.Fatalf("body = %q, want %q", got, "content")
+	}
+}

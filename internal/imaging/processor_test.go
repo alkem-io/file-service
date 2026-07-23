@@ -815,7 +815,7 @@ func TestProcessor_JPEG_NoOrientationTag_TreatsAsOrient1_Passthrough(t *testing.
 	}
 }
 
-// MeasureDims is the header-only port method used by lazy-backfill (T021
+// MeasureDims is the header-only port method used by the dimension sweep (T021
 // contract). On a successful load, it returns post-rotation dims; on a
 // vips-load failure it returns (nil, nil, err) — never (nil, nil, nil)
 // from the vips path.
@@ -824,7 +824,7 @@ func TestProcessor_MeasureDims_JPEG_Orient6(t *testing.T) {
 	const rawW, rawH = 1024, 512
 	content := makeJPEGWithOrientation(t, rawW, rawH, 6)
 
-	w, h, err := p.MeasureDims(content, "image/jpeg")
+	w, h, err := p.MeasureDims(bytes.NewReader(content), "image/jpeg")
 	if err != nil {
 		t.Fatalf("MeasureDims: %v", err)
 	}
@@ -838,7 +838,7 @@ func TestProcessor_MeasureDims_JPEG_Orient6(t *testing.T) {
 
 func TestProcessor_MeasureDims_CorruptInput_ReturnsError(t *testing.T) {
 	p := &Processor{}
-	_, _, err := p.MeasureDims([]byte("not an image"), "image/jpeg")
+	_, _, err := p.MeasureDims(bytes.NewReader([]byte("not an image")), "image/jpeg")
 	if err == nil {
 		t.Fatal("expected error for unparseable bytes")
 	}

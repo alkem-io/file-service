@@ -53,12 +53,17 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 	return stored, nil
 }
 
-// Read returns the whole blob. The wrapped error matches os.ErrNotExist via
-// errors.Is when the blob is missing; an invalid externalID is rejected
-// before touching the filesystem.
+// Read returns the whole blob. A missing blob wraps os.ErrNotExist (errors.Is);
+// an invalid externalID returns port.ErrInvalidKey before touching the filesystem.
+// It does NOT try to tell a genuinely-absent blob from a store-wide outage — an
+// empty basePath is inherently ambiguous (unmounted vs never-written), so that
+// judgement belongs to the caller that knows what SHOULD exist (the backup worker
+// cross-checks the alkemio `file` corpus on a 404); file-service stays a dumb blob
+// server. A non-ENOENT backend failure (e.g. an NFS EIO/ESTALE outage) is returned
+// as-is → the handler answers 500 (retryable), never a false 404.
 func (a *Adapter) Read(externalID string) ([]byte, error) {
 	if !isValidExternalID(externalID) {
-		return nil, fmt.Errorf("invalid external ID: %s", externalID)
+		return nil, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
 	}
 	data, err := os.ReadFile(a.filePath(externalID))
 	if err != nil {
@@ -67,11 +72,39 @@ func (a *Adapter) Read(externalID string) ([]byte, error) {
 	return data, nil
 }
 
+// ReadStream opens the blob for streaming so the caller never holds the whole
+// blob in memory. The returned *os.File is the io.ReadCloser; size comes from
+// the same open handle's Stat (no TOCTOU against a concurrent replace, which
+// publishes a NEW hash under a NEW name — this name is immutable once written).
+// Same error contract as Read.
+func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
+	if !isValidExternalID(externalID) {
+		return nil, 0, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
+	}
+	f, err := os.Open(a.filePath(externalID))
+	if err != nil {
+		return nil, 0, fmt.Errorf("read file %s: %w", externalID, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("stat blob %s: %w", externalID, err)
+	}
+	if fi.IsDir() {
+		// os.Open + Stat both succeed on a directory (unlike Read's os.ReadFile, which
+		// EISDIRs). Guard it here so a directory at a blob path fails BEFORE the handler
+		// commits a 200 + Content-Length and only io.Copy discovers EISDIR mid-stream.
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("read %q: blob path is a directory, not a file", externalID)
+	}
+	return f, fi.Size(), nil
+}
+
 // Delete removes the blob. Idempotent: a missing file is success, so
 // concurrent refcount-driven cleanups cannot fail each other.
 func (a *Adapter) Delete(externalID string) error {
 	if !isValidExternalID(externalID) {
-		return fmt.Errorf("invalid external ID: %s", externalID)
+		return fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)
 	}
 	err := os.Remove(a.filePath(externalID))
 	if err != nil && !os.IsNotExist(err) {
@@ -84,7 +117,7 @@ func (a *Adapter) Delete(externalID string) error {
 // definitive "not there"; any other stat failure is returned as an error.
 func (a *Adapter) Exists(externalID string) (bool, error) {
 	if !isValidExternalID(externalID) {
-		return false, fmt.Errorf("invalid external ID: %s", externalID)
+		return false, fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)
 	}
 	_, err := os.Stat(a.filePath(externalID))
 	if err == nil {

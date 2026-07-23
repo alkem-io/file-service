@@ -137,13 +137,15 @@ func isUniqueViolation(err error) bool {
 // UpdateFile rewrites the content fields (externalID, mimeType, size) plus
 // content_metadata in one statement — the Replace flow. Returns
 // model.ErrDuplicateKey when the new content hash collides with another row
-// in the same bucket, and model.ErrDocumentNotFound when the row is gone.
-func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
+// in the same bucket, and model.ErrDocumentNotFound when the row is gone or
+// expectedExternalID/version no longer match (a concurrent content or metadata
+// mutation won).
+func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
 		return err
 	}
-	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
@@ -158,7 +160,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 
 // updateFileParams maps the Replace content fields to the sqlc update params — the ONE owner,
 // shared by UpdateFile and the transactional UpdateFileWithOutbox.
-func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw []byte) queries.UpdateDocumentFileParams {
+func updateFileParams(id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, raw []byte) queries.UpdateDocumentFileParams {
 	return queries.UpdateDocumentFileParams{
 		ID:              uuidToPgx(id),
 		ExternalID:      externalID,
@@ -166,6 +168,8 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 		Size:            safeInt32(size),
 		UpdatedDate:     timeToPgxNow(),
 		ContentMetadata: raw,
+		ExternalID_2:    expectedExternalID,
+		Version:         safeInt32(expectedVersion),
 	}
 }
 
@@ -204,29 +208,30 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 // bumping version. Compare-and-set: only writes when content_metadata is still
 // empty AND the row's externalID matches expectedExternalID. A 0-rows-affected
 // outcome means another writer (Replace, or another backfill) won the race; we
-// treat that as a non-error since the winner already wrote fresh metadata.
+// report that separately from a database error so sweep accounting stays honest.
 // FR-018.
-func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error {
+func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) (bool, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Defensive: writing "{}" would leave the row matching the lazy-backfill
+	// Defensive: writing "{}" would leave the row matching the sweep
 	// predicate (content_metadata = '{}'::jsonb), re-arming the helper to
-	// retry on every subsequent metadata read. Service layer never reaches
+	// retry on every subsequent sweep. Service layer never reaches
 	// here with an empty-equivalent value, but skip explicitly to keep the
 	// backfill loop closed even if a future caller misuses this method.
 	if string(raw) == `{}` {
-		return nil
+		return false, nil
 	}
-	_, err = a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
+	rowsAffected, err := a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
 		ID:              uuidToPgx(id),
 		ContentMetadata: raw,
 		ExternalID:      expectedExternalID,
 	})
-	// rowsAffected==0 → race lost (treated as success); any DB error
-	// surfaces normally.
-	return err
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected > 0, nil
 }
 
 // marshalContentMetadata serializes the typed value to the JSONB shape stored
@@ -236,7 +241,7 @@ func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, exp
 //
 // Rejects half-populated dims (exactly one of ImageWidth / ImageHeight set):
 // silently serializing those as "{}" would round-trip the row as
-// "unmeasured" and trigger lazy-backfill on every read — masking what is
+// "unmeasured" and trigger every later sweep — masking what is
 // almost certainly a caller bug.
 func marshalContentMetadata(meta model.ContentMetadata) ([]byte, error) {
 	if !meta.Populated {
@@ -302,6 +307,27 @@ func (a *Adapter) ListByMimeTypes(ctx context.Context, mimeTypes []string) ([]mo
 			MimeType:    r.MimeType,
 			Size:        int(r.Size),
 			DisplayName: r.DisplayName,
+		})
+	}
+	return docs, nil
+}
+
+// ListImagesNeedingDims implements port.DocumentRepo — a keyset-paged scan of image rows with
+// unpopulated content_metadata, feeding the dims backfill sweep (the sweep-dims job).
+func (a *Adapter) ListImagesNeedingDims(ctx context.Context, afterID uuid.UUID, limit int32) ([]model.Document, error) {
+	rows, err := a.queries.ListImagesNeedingDims(ctx, queries.ListImagesNeedingDimsParams{
+		ID:    uuidToPgx(afterID),
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]model.Document, 0, len(rows))
+	for _, r := range rows {
+		docs = append(docs, model.Document{
+			ID:         pgxToUUID(r.ID),
+			ExternalID: r.ExternalID,
+			MimeType:   r.MimeType,
 		})
 	}
 	return docs, nil

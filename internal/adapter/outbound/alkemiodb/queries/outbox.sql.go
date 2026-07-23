@@ -11,6 +11,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteBackupOutboxPendingByHash = `-- name: DeleteBackupOutboxPendingByHash :execrows
+DELETE FROM file_backup_outbox o
+WHERE o."externalID" = $1 AND o.status = 'pending'
+  AND NOT EXISTS (SELECT 1 FROM file f WHERE f."externalID" = $1)
+`
+
+// Orphan hygiene: after file-service removes an unreferenced blob, ALL still-pending hints for
+// that hash point at bytes that no longer exist. Delete the whole orphan set, including hints for
+// sibling documents that shared the blob and were deleted earlier. The hash-wide delete is guarded
+// by the owner's live `file` table: if any document currently references the hash, no hint is
+// touched. This preserves a concurrent re-upload safely under PostgreSQL statement snapshots:
+// a re-upload committed before this statement is visible to NOT EXISTS and blocks the delete; one
+// committed after the snapshot has an outbox row invisible to this DELETE and therefore untouched.
+// in_progress rows are left to the consumer's own 404→skip backstop; done/skipped/dead_letter
+// are history, untouched.
+func (q *Queries) DeleteBackupOutboxPendingByHash(ctx context.Context, externalid string) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBackupOutboxPendingByHash, externalid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const enqueueBackupOutbox = `-- name: EnqueueBackupOutbox :exec
 
 INSERT INTO file_backup_outbox ("fileId", "externalID", priority, "createdBy", "createdDate", size)

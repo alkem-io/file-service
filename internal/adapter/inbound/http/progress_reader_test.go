@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,6 +162,25 @@ func TestProgressReader_OverLimit(t *testing.T) {
 	}
 }
 
+func TestProgressReader_ExactLimitIsAccepted(t *testing.T) {
+	const capBytes = 1024
+	pr := newProgressReader(
+		httptest.NewRecorder(),
+		io.NopCloser(io.LimitReader(neverEnding('x'), capBytes)),
+		capBytes,
+		time.Second,
+	)
+	defer func() { _ = pr.Close() }()
+
+	got, err := io.ReadAll(pr)
+	if err != nil {
+		t.Fatalf("exact-limit read returned %v, want nil", err)
+	}
+	if len(got) != capBytes {
+		t.Fatalf("exact-limit read consumed %d bytes, want %d", len(got), capBytes)
+	}
+}
+
 func TestProgressReader_HappyPathEOFAndDeadlineCleared(t *testing.T) {
 	res := &stallResult{}
 	srv := httptest.NewServer(drainHandler(1<<20, 300*time.Millisecond, res))
@@ -177,6 +197,38 @@ func TestProgressReader_HappyPathEOFAndDeadlineCleared(t *testing.T) {
 		if n, rerr := res.get(); rerr != nil || n != 32<<10 {
 			t.Fatalf("request %d: n=%d err=%v", i, n, rerr)
 		}
+	}
+}
+
+type closeTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestProgressReader_EOFDisarmsGuardBeforeHandlerReturns(t *testing.T) {
+	w := &deadlineResponseWriter{}
+	body := &closeTrackingBody{Reader: strings.NewReader("complete")}
+	pr := newProgressReader(w, body, 1024, time.Second)
+
+	if _, err := io.ReadAll(pr); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(w.readDeadlines) < 2 || !w.readDeadlines[len(w.readDeadlines)-1].IsZero() {
+		t.Fatalf("EOF must clear the read deadline immediately, got %v", w.readDeadlines)
+	}
+	if body.closed {
+		t.Fatal("EOF should disarm the guard without prematurely closing the body")
+	}
+	if err := pr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !body.closed {
+		t.Fatal("Close must close the wrapped request body")
 	}
 }
 

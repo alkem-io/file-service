@@ -3,6 +3,7 @@ package local
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -103,9 +104,10 @@ func TestRead_InvalidExternalID(t *testing.T) {
 	dir := t.TempDir()
 	a := New(dir)
 
-	_, err := a.Read("../etc/passwd")
-	if err == nil {
-		t.Fatal("expected error for invalid external ID")
+	traversal := strings.Repeat("../", 20) + "etc/passwd"
+	_, err := a.Read(traversal)
+	if !errors.Is(err, port.ErrInvalidKey) {
+		t.Fatalf("err = %v, want ErrInvalidKey", err)
 	}
 }
 
@@ -505,4 +507,61 @@ func globNames(t *testing.T, dir string, keep func(string) bool) []string {
 		}
 	}
 	return out
+}
+
+// ReadStream returns the blob bytes + size and rejects a traversal key with ErrInvalidKey.
+func TestReadStream(t *testing.T) {
+	a := New(t.TempDir())
+	stored, err := a.Save([]byte("stream me"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, size, err := a.ReadStream(stored.ExternalID)
+	if err != nil {
+		t.Fatalf("ReadStream: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	if size != int64(len("stream me")) {
+		t.Errorf("size = %d, want %d", size, len("stream me"))
+	}
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadStream body: %v", err)
+	}
+	if string(b) != "stream me" {
+		t.Errorf("body = %q", b)
+	}
+
+	traversal := strings.Repeat("../", 20) + "etc/passwd"
+	if _, _, err := a.ReadStream(traversal); !errors.Is(err, port.ErrInvalidKey) {
+		t.Errorf("traversal key: err = %v, want ErrInvalidKey", err)
+	}
+}
+
+// A genuinely absent blob is os.ErrNotExist, for both Read and ReadStream. file-service does
+// not try to distinguish absence from a store outage (an empty root is ambiguous); that call
+// is the worker's, via the corpus cross-check.
+func TestReadAbsentBlobIsNotExist(t *testing.T) {
+	valid := "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	a := New(t.TempDir())
+	if _, err := a.Read(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Read absent blob: err = %v, want os.ErrNotExist", err)
+	}
+	if _, _, err := a.ReadStream(valid); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ReadStream absent blob: err = %v, want os.ErrNotExist", err)
+	}
+}
+
+// ReadStream must reject a directory at a blob path (os.Open+Stat both succeed on a dir, unlike
+// Read's os.ReadFile) BEFORE the handler commits a 200 + Content-Length.
+func TestReadStreamRejectsDirectory(t *testing.T) {
+	base := t.TempDir()
+	name := "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+	if err := os.Mkdir(filepath.Join(base, name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	a := New(base)
+	if _, _, err := a.ReadStream(name); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadStream on a directory must return a non-nil, non-NotExist error, got %v", err)
+	}
 }

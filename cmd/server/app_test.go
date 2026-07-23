@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/config"
+	"github.com/alkem-io/file-service/internal/domain/service"
 )
 
 func TestConnectDatabase_Success(t *testing.T) {
@@ -128,16 +129,18 @@ func TestNewHTTPServer(t *testing.T) {
 	if srv == nil {
 		t.Fatal("nil server")
 	}
-	// Spec 020 FR-009: no global ReadTimeout — uploads use progress-based
-	// read deadlines (progressReader); only the header read has a fixed cap.
-	if srv.ReadTimeout != 0 {
-		t.Errorf("ReadTimeout = %v, want 0 (replaced by per-request deadlines)", srv.ReadTimeout)
+	// Ordinary bodies keep the fixed cap; upload handlers replace it with
+	// a rolling per-read deadline.
+	if srv.ReadTimeout != 30*time.Second {
+		t.Errorf("ReadTimeout = %v, want 30s", srv.ReadTimeout)
 	}
 	if srv.ReadHeaderTimeout != 10*time.Second {
 		t.Errorf("ReadHeaderTimeout = %v, want 10s", srv.ReadHeaderTimeout)
 	}
-	if srv.WriteTimeout != 60*time.Second {
-		t.Errorf("WriteTimeout = %v", srv.WriteTimeout)
+	// A global WriteTimeout is absolute from request headers and would
+	// kill healthy long transfers. The router applies a lazy rolling idle cap.
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0", srv.WriteTimeout)
 	}
 	if srv.IdleTimeout != 120*time.Second {
 		t.Errorf("IdleTimeout = %v", srv.IdleTimeout)
@@ -173,4 +176,39 @@ func startTestNATSServer(t *testing.T) *natsserver.Server {
 		t.Fatal("NATS not ready")
 	}
 	return srv
+}
+
+// TestRun_UnknownCommand: a typo'd subcommand must fail loudly (exit 2), never fall through to
+// serve or silently succeed.
+func TestRun_UnknownCommand(t *testing.T) {
+	if code := run([]string{"bogus-cmd"}); code != 2 {
+		t.Fatalf("run(unknown) = %d, want 2", code)
+	}
+}
+
+// TestDimsJobExitCode: the k8s Job retry contract — exit 1 ONLY on an ENDED-EARLY (Aborted) pass.
+// Skips never gate the exit code (an all-skipped pass is ambiguous — a permanent orphan tail vs a
+// transient outage — and a heuristic would either loop forever on the tail or miss a mid-run outage;
+// the operator reads the logged counts). Matches file-backup-service's backfillVerdict all-skipped ruling.
+func TestDimsJobExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		sum  service.DimsBackfillSummary
+		want int
+	}{
+		{"empty-drained-corpus", service.DimsBackfillSummary{}, 0},
+		{"progress-with-some-skips", service.DimsBackfillSummary{Measured: 5, Skipped: 3, DecodeFailed: 1}, 0},
+		{"all-skipped-ambiguous-not-a-failure", service.DimsBackfillSummary{Skipped: 100}, 0},
+		{"convergent-orphan-tail", service.DimsBackfillSummary{Skipped: 5}, 0},
+		{"aborted-after-progress", service.DimsBackfillSummary{Measured: 2, Aborted: true}, 1},
+		// The load-bearing case: a total outage that fails the FIRST page scan yields Aborted with
+		// zero of everything — Aborted alone (NOT coupled with progress) must gate exit 1, or a
+		// mid/total outage on page one would silently exit 0.
+		{"aborted-total-first-page-outage", service.DimsBackfillSummary{Aborted: true}, 1},
+	}
+	for _, c := range cases {
+		if got := dimsJobExitCode(c.sum); got != c.want {
+			t.Errorf("%s: exit = %d, want %d", c.name, got, c.want)
+		}
+	}
 }

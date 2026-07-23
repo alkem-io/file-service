@@ -59,7 +59,7 @@ type stubProcessor struct {
 	processDimsH    *int
 	processMeasured bool // when true, forces Measured=true regardless of dims
 
-	// MeasureDims override (lazy-backfill tests).
+	// MeasureDims override (dimension-sweep tests).
 	measureDimsW   *int
 	measureDimsH   *int
 	measureDimsErr error
@@ -91,7 +91,7 @@ func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 		Measured:    measured,
 	}, nil
 }
-func (p *stubProcessor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+func (p *stubProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
 	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
@@ -186,6 +186,11 @@ func TestDocumentHandler_GetContent_Found(t *testing.T) {
 	}
 	if rr.Body.String() != "file content" {
 		t.Errorf("body = %q", rr.Body.String())
+	}
+	// The streamed path must declare the size explicitly (a dropped/wrong Content-Length on this
+	// most-used read endpoint would ship uncaught otherwise).
+	if cl := rr.Header().Get("Content-Length"); cl != "12" {
+		t.Errorf("Content-Length = %q, want 12", cl)
 	}
 }
 
@@ -1206,6 +1211,24 @@ func TestDocumentHandler_ReplaceContent_ContentCollision_Returns409(t *testing.T
 	}
 }
 
+func TestDocumentHandler_ReplaceContent_ConcurrentChangeReturns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old-hash", MimeType: "application/pdf"}
+	repo.updateErr = model.ErrDocumentNotFound // expected-old-hash CAS applied zero rows
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("new content"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 when another replace wins; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestDocumentHandler_ReplaceContent_InternalError(t *testing.T) {
 	h, repo, storage := newDocHandler()
 	repo.doc = model.Document{ID: uuid.New(), ExternalID: "old"}
@@ -1220,6 +1243,37 @@ func TestDocumentHandler_ReplaceContent_InternalError(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+}
+
+type abortedRequestBody struct {
+	sent bool
+}
+
+func (b *abortedRequestBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b.sent = true
+	return copy(p, "partial replacement"), nil
+}
+
+func (b *abortedRequestBody) Close() error { return nil }
+
+func TestDocumentHandler_ReplaceContent_ClientAbortReturns400(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: "application/pdf"}
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", &abortedRequestBody{})
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an aborted request stream; body: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -1926,7 +1980,7 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 
 	// Wire up the dedup hit for the second request: mockRepo.findDoc
 	// returning a row with the same externalID + bucket. ContentMetadata
-	// Populated=true so the lazy-backfill skips it (already measured).
+	// Populated=true marks it already measured.
 	repo.findDoc = &model.Document{
 		ID:              uuid.MustParse(resp1.ID),
 		ExternalID:      resp1.ExternalID,
@@ -1962,205 +2016,31 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 	}
 }
 
-// --- Phase 7: lazy-backfill on Copy and PATCH for legacy image rows ---
-
-// copyLegacyImageRow shared helper: prepares a handler with a legacy
-// image source row (no dims) and a storage reading PNG-ish bytes whose
-// MeasureDims returns the supplied (w, h, err). Returns the recorder and
-// captured repo so callers can assert.
-func runCopyLegacyImage(
-	t *testing.T,
-	measureW *int, measureH *int, measureErr error,
-	storageData []byte, storageErr error,
-	backfillErr error,
-) (*httptest.ResponseRecorder, *mockDocRepo) {
-	t.Helper()
-	h, repo, storage, processor := newDocHandlerWithProcessor()
-	sourceID := uuid.New()
-	repo.doc = model.Document{
-		ID:              sourceID,
-		ExternalID:      "sha3-of-png",
-		MimeType:        "image/png",
-		Size:            42,
-		DisplayName:     "legacy.png",
-		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
-		// dims nil → legacy
-	}
-	storage.data = storageData
-	storage.err = storageErr
-	processor.measureDimsW = measureW
-	processor.measureDimsH = measureH
-	processor.measureDimsErr = measureErr
-	repo.backfillErr = backfillErr
-
-	body, _ := json.Marshal(CopyDocumentRequest{
-		SourceID:            sourceID.String(),
-		DestinationBucketID: uuid.New().String(),
-		AuthorizationID:     uuid.New().String(),
-	})
-
-	r := chi.NewRouter()
-	r.Post("/internal/file/copy", h.Copy)
-	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	return rr, repo
-}
-
-// runPatchLegacyImage mirrors runCopyLegacyImage for the PATCH path.
-func runPatchLegacyImage(
-	t *testing.T,
-	measureW *int, measureH *int, measureErr error,
-	storageData []byte, storageErr error,
-	backfillErr error,
-) (*httptest.ResponseRecorder, *mockDocRepo) {
-	t.Helper()
-	h, repo, storage, processor := newDocHandlerWithProcessor()
+// The PATCH response must surface the row's stored dims. Since dims now come from content_metadata
+// (populated at write time or by the sweep-dims job — never a decode on this path), this guards the
+// handler's field mapping, which the retired read-path backfill tests were the only thing exercising.
+func TestDocumentHandler_Patch_ResponseCarriesStoredDims(t *testing.T) {
 	docID := uuid.New()
-	repo.doc = model.Document{
-		ID:              docID,
-		ExternalID:      "sha3-of-png",
-		MimeType:        "image/png",
-		Size:            42,
-		DisplayName:     "legacy.png",
-		StorageBucketID: uuid.New(),
-		AuthorizationID: uuid.New(),
-	}
-	storage.data = storageData
-	storage.err = storageErr
-	processor.measureDimsW = measureW
-	processor.measureDimsH = measureH
-	processor.measureDimsErr = measureErr
-	repo.backfillErr = backfillErr
-
-	r := chi.NewRouter()
-	r.Patch("/internal/file/{id}", h.Update)
-	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+docID.String(), strings.NewReader(`{"displayName":"renamed.png"}`))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	return rr, repo
-}
-
-func TestDocumentHandler_Copy_LegacyImageRow_LazyBackfillsBoth(t *testing.T) {
-	rr, repo := runCopyLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, nil)
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp CreateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
-		t.Errorf("imageWidth = %v, want 800", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
-		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill calls = %d, want >= 1 (source row)", repo.backfillCalls)
-	}
-	// Persisted payload should be the dims, not the sentinel.
-	got := repo.lastBackfillPayload
-	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
-		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
-	}
-}
-
-func TestDocumentHandler_Patch_LegacyImageRow_LazyBackfills(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(640), intp(480), nil, []byte("png-bytes"), nil, nil)
+	w, h := 800, 600
+	rr, _ := runPatch(t, docID, `{"displayName":"renamed"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{
+			ID: docID, ExternalID: "abc", MimeType: "image/jpeg",
+			ImageWidth: &w, ImageHeight: &h,
+			ContentMetadata: model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
+		}
+	})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 	var resp UpdateDocumentResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 640 {
-		t.Errorf("imageWidth = %v, want 640", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 480 {
-		t.Errorf("imageHeight = %v, want 480", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill calls = %d, want >= 1", repo.backfillCalls)
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || got.DecodeFailed || got.ImageWidth == nil || got.ImageHeight == nil {
-		t.Errorf("backfill payload = %+v, expected Populated=true with dims", got)
+	if resp.ImageWidth == nil || *resp.ImageWidth != 800 || resp.ImageHeight == nil || *resp.ImageHeight != 600 {
+		t.Fatalf("dims = (%v, %v), want 800x600 from the stored row", resp.ImageWidth, resp.ImageHeight)
 	}
 }
 
-// SC-010: MeasureDims returns an error → response 200, dims absent,
-// content_metadata persisted as the {_decodeFailed: true} sentinel.
-func TestDocumentHandler_Patch_DecodeFailure_PersistsSentinel(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, nil, nil, errors.New("vips load: corrupt header"), []byte("corrupt-bytes"), nil, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth != nil || resp.ImageHeight != nil {
-		t.Errorf("expected nil dims on decode failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill not called; sentinel must be persisted")
-	}
-	got := repo.lastBackfillPayload
-	if !got.Populated || !got.DecodeFailed {
-		t.Errorf("backfill payload = %+v, expected Populated=true with DecodeFailed=true", got)
-	}
-}
-
-// SC-012 / FR-020 case b: Storage.Read fails → 200, no dims, no persist.
-func TestDocumentHandler_Patch_StorageReadFails_GracefulDegrade(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, nil, errors.New("transient I/O"), nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth != nil || resp.ImageHeight != nil {
-		t.Errorf("expected nil dims after Storage.Read failure, got (%v, %v)", resp.ImageWidth, resp.ImageHeight)
-	}
-	if repo.backfillCalls != 0 {
-		t.Errorf("backfill calls = %d, want 0 (no sentinel on transient failures, FR-020 b)", repo.backfillCalls)
-	}
-}
-
-// SC-013 / FR-020 case c: BackfillContentMetadata persist fails →
-// response still carries the just-computed dims; row stays empty so the
-// next read retries.
-func TestDocumentHandler_Patch_BackfillPersistFails_ResponseStillCarriesDims(t *testing.T) {
-	rr, repo := runPatchLegacyImage(t, intp(800), intp(600), nil, []byte("png-bytes"), nil, errors.New("DB transient"))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
-	}
-	var resp UpdateDocumentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.ImageWidth == nil || *resp.ImageWidth != 800 {
-		t.Errorf("imageWidth = %v, want 800 (response carries dims even though persist failed)", resp.ImageWidth)
-	}
-	if resp.ImageHeight == nil || *resp.ImageHeight != 600 {
-		t.Errorf("imageHeight = %v, want 600", resp.ImageHeight)
-	}
-	if repo.backfillCalls < 1 {
-		t.Errorf("backfill must still be attempted before failing")
-	}
-}
-
-// TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims defends FR-004
-// for the Replace endpoint. PUT new image bytes; response carries the
-// post-rotation dims sourced from StoredFile.ImageWidth/Height (which the
-// service plumbs from ProcessResult inside StoreAndLink).
 func TestDocumentHandler_ReplaceContent_RotatedImage_ReturnsDims(t *testing.T) {
 	h, repo, _, processor := newDocHandlerWithProcessor()
 	docID := uuid.New()
@@ -2349,5 +2229,158 @@ func TestDocumentHandler_Create_OversizedFieldRejected(t *testing.T) {
 		if !st.aborted {
 			t.Error("stage not aborted after oversized-field rejection")
 		}
+	}
+}
+
+// serveBlob wires just the by-hash route and runs one GET /internal/blob/{hash}/content.
+func serveBlob(h *DocumentHandler, hash string) *httptest.ResponseRecorder {
+	r := chi.NewRouter()
+	r.Get("/internal/blob/{hash}/content", h.GetBlobContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/blob/"+hash+"/content", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr
+}
+
+const blobHash = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+
+// A content-addressed read returns the blob bytes for a valid hash, served nosniff with an
+// accurate Content-Length — and with NO document lookup: the endpoint's whole reason to exist
+// is a version-exact, DB-independent read keyed by the immutable content hash.
+func TestDocumentHandler_GetBlobContent_Found(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	storage.data = []byte("blob-bytes")
+
+	rr := serveBlob(h, blobHash)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if got := rr.Body.String(); got != "blob-bytes" {
+		t.Fatalf("body = %q, want %q", got, "blob-bytes")
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	// Raw stored bytes are served nosniff so a browser can't be tricked into rendering them
+	// as HTML; assert it so a regression that drops the header fails loudly, not green.
+	if ns := rr.Header().Get("X-Content-Type-Options"); ns != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", ns)
+	}
+	if cl := rr.Header().Get("Content-Length"); cl != "10" {
+		t.Errorf("Content-Length = %q, want 10", cl)
+	}
+	// The "no document lookup" invariant, defended by assertion, not just a comment.
+	if repo.getByIDCalls != 0 {
+		t.Errorf("blob read did a document lookup (GetByID called %d×); it must be DB-independent", repo.getByIDCalls)
+	}
+}
+
+// A hash with no blob (e.g. a version superseded and refcount-deleted) is a clean 404,
+// so the worker can map it to source-gone rather than a false integrity failure.
+func TestDocumentHandler_GetBlobContent_NotFound(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = os.ErrNotExist
+
+	if rr := serveBlob(h, blobHash); rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
+// A malformed key (rejected by the storage layer as ErrInvalidKey) maps to 400.
+// The actual key-validation rules (traversal/char-class) are owned and tested at the
+// storage layer (adapter_test.go isValidExternalID); the handler only maps the sentinel.
+func TestDocumentHandler_GetBlobContent_InvalidKey(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = port.ErrInvalidKey
+
+	if rr := serveBlob(h, "not-a-hash"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// An unexpected backend error is a 500 (the branch none of the mapped sentinels cover).
+func TestDocumentHandler_GetBlobContent_InternalError(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.err = errors.New("disk on fire")
+
+	if rr := serveBlob(h, blobHash); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+}
+
+// A backend read that fails MID-STREAM (after 200 + Content-Length are committed) must abort the
+// connection via panic(http.ErrAbortHandler) — so a truncated body can't be mistaken for a clean
+// success — rather than silently returning a short 200.
+func TestDocumentHandler_GetBlobContent_MidStreamErrorAborts(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.streamBody = &failingReadCloser{head: []byte("partial")}
+	storage.streamSize = 999 // declared Content-Length the body will fall short of
+
+	defer func() {
+		err, ok := recover().(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("mid-stream read failure must panic(http.ErrAbortHandler), got %v", err)
+		}
+	}()
+	_ = serveBlob(h, blobHash)
+	t.Fatal("expected panic(http.ErrAbortHandler) on a mid-stream read failure")
+}
+
+// A truncation that ends in a CLEAN io.EOF — a short read (fewer bytes than the declared size)
+// with no error — must ALSO abort. io.Copy reports (written<size, nil) here, so it bypasses the
+// read-error wrapper entirely; the handler catches the short body against the declared
+// Content-Length. Without this the client would get a silent short 200.
+func TestDocumentHandler_GetBlobContent_ShortReadAborts(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.streamBody = io.NopCloser(bytes.NewReader([]byte("partial"))) // 7 bytes, clean EOF
+	storage.streamSize = 999                                              // declared Content-Length it falls short of
+
+	defer func() {
+		err, ok := recover().(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("a short-read/clean-EOF truncation must panic(http.ErrAbortHandler), got %v", err)
+		}
+	}()
+	_ = serveBlob(h, blobHash)
+	t.Fatal("expected panic(http.ErrAbortHandler) on a short-read truncation")
+}
+
+// The symmetric opposite of the two abort cases: a mid-stream WRITE failure (the client/worker
+// disconnected) is BENIGN and must NOT panic(http.ErrAbortHandler) — the abort+WARN is reserved
+// for a BACKEND fault. httptest.ResponseRecorder never fails writes, so this branch needs a
+// writer that does; guards against a refactor turning every routine worker cancel into an abort.
+func TestDocumentHandler_GetBlobContent_ClientDisconnectIsSilent(t *testing.T) {
+	h, _, storage := newDocHandler()
+	storage.data = []byte("bytes the client will refuse mid-stream")
+
+	r := chi.NewRouter()
+	r.Get("/internal/blob/{hash}/content", h.GetBlobContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/blob/"+blobHash+"/content", nil)
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("a client write failure must be silent (no abort panic), got %v", rec)
+		}
+	}()
+	r.ServeHTTP(&failingResponseWriter{}, req)
+}
+
+// A STORED externalID that fails the storage key rules (a corrupt/mis-migrated `file` row) is a
+// SERVER data problem on the by-id read path — a logged 500, NOT a 400 that blames the client
+// (only the by-hash endpoint, where the key is the client's URL, maps ErrInvalidKey→400).
+func TestDocumentHandler_GetContent_InvalidStoredKeyIs500(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	repo.doc = model.Document{ID: uuid.New(), ExternalID: "not-a-valid-key", MimeType: "text/plain"}
+	storage.err = port.ErrInvalidKey
+
+	r := chi.NewRouter()
+	r.Get("/internal/file/{id}/content", h.GetContent)
+	req := httptest.NewRequest(http.MethodGet, "/internal/file/"+repo.doc.ID.String()+"/content", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("a malformed STORED key must be a 500 (server data problem), got %d", rr.Code)
 	}
 }

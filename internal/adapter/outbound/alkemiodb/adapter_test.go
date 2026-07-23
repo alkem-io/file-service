@@ -159,32 +159,47 @@ func TestUpdateFile(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	// Get a real document to update
-	var id [16]byte
-	var origExtID, origMime string
-	var origSize int32
-	err := pool.QueryRow(context.Background(),
-		`SELECT id, "externalID", "mimeType", size FROM file LIMIT 1`,
-	).Scan(&id, &origExtID, &origMime, &origSize)
+	// Use a test-owned row: mutating an arbitrary shared fixture would risk
+	// erasing its content_metadata while exercising the content-update CAS.
+	docID, _, cleanup := createTestRow(t, pool, []byte(`{}`))
+	defer cleanup()
+	original, err := a.GetByID(context.Background(), docID)
 	if err != nil {
-		t.Skip("no documents")
+		t.Fatalf("GetByID test row: %v", err)
 	}
-	docID := uuid.UUID(id)
 
 	newExtID := "updated-" + uuid.New().String()[:8]
-	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), docID, original.ExternalID, original.Version, newExtID, "text/plain", 99, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
-	// Restore original values
-	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize), model.ContentMetadata{})
-	}()
-
-	doc, _ := a.GetByID(context.Background(), docID)
+	doc, err := a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID after UpdateFile: %v", err)
+	}
 	if doc.ExternalID != newExtID {
 		t.Errorf("externalID = %q, want %q", doc.ExternalID, newExtID)
+	}
+
+	// Prove each CAS predicate independently: a stale version loses even with the current hash.
+	err = a.UpdateFile(context.Background(), docID, newExtID, original.Version, "loser-version", "text/plain", 1, model.ContentMetadata{})
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("stale-version UpdateFile = %v, want ErrDocumentNotFound", err)
+	}
+
+	// A stale hash also loses even with the current version.
+	err = a.UpdateFile(context.Background(), docID, original.ExternalID, doc.Version, "loser-hash", "text/plain", 1, model.ContentMetadata{})
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("stale-hash UpdateFile = %v, want ErrDocumentNotFound", err)
+	}
+
+	doc, err = a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID after stale updates: %v", err)
+	}
+	if doc.ExternalID != newExtID {
+		t.Fatalf("stale updates overwrote winner: externalID = %q, want %q", doc.ExternalID, newExtID)
 	}
 }
 
@@ -193,7 +208,7 @@ func TestUpdateFile_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
+	err := a.UpdateFile(context.Background(), uuid.New(), "oldhash", 1, "hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -373,11 +388,15 @@ func TestAdapter_BackfillContentMetadata_DoesNotBumpVersion(t *testing.T) {
 	}
 
 	w, h := 100, 50
-	if err := a.BackfillContentMetadata(
+	applied, err := a.BackfillContentMetadata(
 		context.Background(), docID, externalID,
 		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("BackfillContentMetadata: %v", err)
+	}
+	if !applied {
+		t.Fatal("BackfillContentMetadata did not apply")
 	}
 
 	// Verify content_metadata changed AND version did not bump.
@@ -409,12 +428,20 @@ func TestAdapter_BackfillContentMetadata_IsIdempotent(t *testing.T) {
 	payload := model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h}
 	// First call wins the compare-and-set; second is a 0-rows-affected no-op
 	// (content_metadata is no longer empty), which the adapter treats as
-	// success — i.e. the helper is safe to call repeatedly.
-	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
+	// a non-error with applied=false — i.e. the helper is safe to call repeatedly.
+	applied, err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload)
+	if err != nil {
 		t.Fatalf("first BackfillContentMetadata: %v", err)
 	}
-	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
+	if !applied {
+		t.Fatal("first BackfillContentMetadata did not apply")
+	}
+	applied, err = a.BackfillContentMetadata(context.Background(), docID, externalID, payload)
+	if err != nil {
 		t.Fatalf("second BackfillContentMetadata: %v", err)
+	}
+	if applied {
+		t.Fatal("second BackfillContentMetadata unexpectedly applied")
 	}
 
 	var meta []byte
@@ -441,7 +468,7 @@ func TestAdapter_BackfillContentMetadata_RaceLost_DoesNotOverwrite(t *testing.T)
 	defer cleanup()
 
 	// Simulate "Replace ran" by changing the row's externalID after the
-	// lazy-backfill measured against the original.
+	// dimension sweep measured against the original.
 	if _, err := pool.Exec(context.Background(),
 		`UPDATE file SET "externalID" = $1 WHERE id = $2`,
 		externalID+"-replaced", docID,
@@ -450,11 +477,15 @@ func TestAdapter_BackfillContentMetadata_RaceLost_DoesNotOverwrite(t *testing.T)
 	}
 
 	w, h := 100, 50
-	if err := a.BackfillContentMetadata(
+	applied, err := a.BackfillContentMetadata(
 		context.Background(), docID, externalID, // expectedExternalID = pre-replace
 		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("BackfillContentMetadata returned err on race-lost (should be nil): %v", err)
+	}
+	if applied {
+		t.Fatal("BackfillContentMetadata reported applied after externalID changed")
 	}
 
 	var meta []byte

@@ -14,32 +14,39 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
-
-	"github.com/alkem-io/file-service/internal/config"
 )
 
-func run() int {
-	logger, err := config.NewLogger()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
-		return 1
+// run dispatches the subcommand. The default (no args) is `serve` — the long-running HTTP server.
+// Maintenance sweeps run as one-shot subcommands (invoked as k8s Jobs), sharing the same image and
+// wiring but NOT the serving lifecycle — so a finite, converging one-off migration can't become a
+// per-boot full-table scan on every serving pod.
+func run(args []string) int {
+	cmd := "serve"
+	if len(args) > 0 {
+		cmd = args[0]
 	}
-	defer func() { _ = logger.Sync() }()
+	switch cmd {
+	case "serve":
+		return runServe()
+	case "sweep-dims":
+		return runSweepDims()
+	default:
+		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims)\n", cmd)
+		return 2
+	}
+}
 
-	cfg, err := config.Load()
-	if err != nil {
-		logger.Error("failed to load config", zap.Error(err))
-		return 1
+// runServe boots the long-running HTTP server and blocks until SIGINT/SIGTERM.
+func runServe() int {
+	base, cleanup, code := setupBase()
+	if base == nil {
+		return code
 	}
-
-	pool, err := connectDatabase(context.Background(), cfg.AlkemioDB)
-	if err != nil {
-		logger.Error("failed to connect to database", zap.Error(err))
-		return 1
-	}
-	defer pool.Close()
+	defer cleanup()
+	logger, cfg, pool := base.logger, base.cfg, base.pool
 	logger.Info("database connected", zap.String("host", cfg.AlkemioDB.Host))
 
+	var err error
 	// NATS is optional — only connect if transport is "nats"
 	var nc *nats.Conn
 	if cfg.AuthTransport == "nats" {
@@ -59,6 +66,11 @@ func run() int {
 	// Boot-time MIME repair (spec 019 FR-006): heal documents corrupted by
 	// the pre-fix replace path. Idempotent; runs concurrently with serving.
 	go runMimeRepair(context.Background(), fileSvc, logger)
+
+	// The image-dimension backfill (spec 019/020) is NOT run here — it is a one-shot `sweep-dims`
+	// subcommand (a k8s Job), so a converging legacy migration isn't a per-boot full-table scan on
+	// every serving pod. New writes measure dims in the write pipeline; a dedup re-upload heals its
+	// row on the spot.
 
 	// Periodic backup-outbox prune (008 SC-008), only when the producer is on.
 	// Cancelled on shutdown so the goroutine exits cleanly.
@@ -97,5 +109,5 @@ func run() int {
 }
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:]))
 }

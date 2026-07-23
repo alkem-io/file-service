@@ -13,7 +13,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -80,20 +79,74 @@ func (h *DocumentHandler) GetContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := h.Service.Storage.Read(doc.ExternalID)
+	rc, size, err := h.Service.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeJSONError(w, http.StatusNotFound, "file not found on storage")
-		} else {
-			h.Logger.Error("failed to read file from storage", zap.Error(err))
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-		}
+		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
 		return
 	}
 
 	w.Header().Set("Content-Type", doc.MimeType)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	// Streamed (constant memory) — a stored key, so a malformed one is a 500 (server data), never 400.
+	streamBlob(w, h.Logger, rc, size, doc.ExternalID)
+}
+
+// GetBlobContent handles GET /internal/blob/{hash}/content — a content-addressed
+// read. It returns the immutable blob stored under a SHA3-256 content hash,
+// independent of any document row. The store is already content-addressed
+// (Storage.Read keys on the hash); this exposes that read over the API.
+//
+// This is the read path the backup/replication worker uses (workspace#008,
+// FR-008): the outbox records an object's content hash, and the blob under a
+// hash never changes, so a fetch-by-hash is version-exact — it returns the
+// EXACT bytes that were enqueued, never whichever version the (mutable)
+// document currently points at, which is what GET /file/{id}/content returns.
+// A hash with no blob (e.g. a version superseded and refcount-deleted) is a
+// clean 404, distinguishable by the caller from a transport failure.
+func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+
+	// Storage owns key validation (one definition — the deliberately legacy-CID-permissive
+	// isValidExternalID), so the handler never drifts from what the store serves; the shared
+	// writeStorageReadError maps the failure. file-service does NOT try to tell an absent blob
+	// from a store outage (storage can't, so it doesn't claim to) — a non-ENOENT backend error
+	// is a retryable 500; a 404 is just "no such blob" and the worker decides what that means.
+	rc, size, err := h.Service.Storage.ReadStream(hash)
+	if err != nil {
+		// The key here is the client's URL {hash}, so a malformed one is a 400 (client error).
+		// This is the ONLY read path where that's true — GetContent/ServeDocument read a stored
+		// key — so the 400 lives here, not in the shared helper (keeps it off their API contract).
+		if errors.Is(err, port.ErrInvalidKey) {
+			writeJSONError(w, http.StatusBadRequest, "invalid content hash")
+			return
+		}
+		writeStorageReadError(w, h.Logger, err, "blob not found", "failed to read blob from storage")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff") // raw bytes, never a document to render
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
+	// Streamed (constant memory) so a bulk parallel reader can't drive RSS to N×blobsize; streamBlob
+	// classifies a mid-stream failure (backend fault / short read → abort; client disconnect → silent).
+	streamBlob(w, h.Logger, rc, size, hash)
+}
+
+// readErrCapture records a non-EOF error from the wrapped reader so a caller can tell a source
+// (backend) read failure from a destination (client) write failure after io.Copy returns — which
+// io.Copy itself does not distinguish.
+type readErrCapture struct {
+	r   io.Reader
+	err error
+}
+
+func (c *readErrCapture) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		c.err = err
+	}
+	return n, err
 }
 
 // createFields collects the multipart metadata fields by name (spec 020:
@@ -585,7 +638,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), doc, bucketID, tempLoc, displayName)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
@@ -600,11 +653,9 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lazy-backfill: legacy image rows have empty content_metadata; PATCH
-	// is one of the four metadata-returning endpoints that must surface
-	// dims (FR-015 / FR-018). Best-effort — never fails the PATCH.
-	updated = h.Service.BackfillIfNeeded(r.Context(), updated)
-
+	// A legacy image row may still have empty content_metadata; its dims are populated by the
+	// sweep-dims job (RunDimsBackfill), not lazily here (a libvips decode has no place on a request
+	// path — spec 019/020). Until the sweep reaches that row the response simply omits dims (FR-020).
 	UpdateDocumentResponse{
 		ID:                updated.ID.String(),
 		StorageBucketID:   updated.StorageBucketID.String(),
@@ -690,7 +741,10 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, service.ErrConflict):
-			writeJSONError(w, http.StatusConflict, "new content conflicts with another document in this bucket")
+			writeJSONError(w, http.StatusConflict, "document content changed concurrently or conflicts with another document in this bucket")
+		case isClientStreamError(err):
+			IngestOutcomes.Add("client_abort", 1)
+			writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
 		default:
 			h.Logger.Error("failed to replace content", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")

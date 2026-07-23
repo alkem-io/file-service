@@ -43,6 +43,7 @@ func NewRouter(deps Deps) *chi.Mux {
 	r.Use(chimw.Recoverer)
 	r.Use(RequestID)
 	r.Use(RequestLogger(deps.Logger))
+	r.Use(responseWriteDeadline)
 
 	// Liveness (K8s livenessProbe): process-alive check only, no dependencies.
 	// Kept separate from /health so liveness failures don't restart pods when
@@ -68,6 +69,8 @@ func NewRouter(deps Deps) *chi.Mux {
 		r.Post("/file/copy", deps.DocumentHandler.Copy)
 		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
 		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
+		// Content-addressed read by SHA3-256 hash (workspace#008); rationale on GetBlobContent.
+		r.Get("/blob/{hash}/content", deps.DocumentHandler.GetBlobContent)
 		r.Put("/file/{id}/content", deps.DocumentHandler.ReplaceContent)
 		r.Delete("/file/{id}", deps.DocumentHandler.Delete)
 		r.Patch("/file/{id}", deps.DocumentHandler.Update)
