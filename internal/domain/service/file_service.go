@@ -114,13 +114,13 @@ func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta 
 // else the original Repo.UpdateFile. Same error semantics either way.
 func (s *FileService) writeReplace(ctx context.Context, doc model.Document, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
-		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, doc.ExternalID, doc.Version, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
 		return err
 	}
-	return s.Repo.UpdateFile(ctx, documentID, externalID, mimeType, size, meta)
+	return s.Repo.UpdateFile(ctx, documentID, doc.ExternalID, doc.Version, externalID, mimeType, size, meta)
 }
 
 // PruneBackupOutbox drops consumer-finished outbox rows older than `retention`, keeping the
@@ -372,27 +372,23 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		s.cleanupOrphanedBlob(ctx, documentID, deleted.ExternalID)
+		s.cleanupOrphanedBlob(ctx, deleted.ExternalID)
 	}
 
 	return &deleted, nil
 }
 
-// cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), and —
-// when the backup producer is on — drops fileID's own still-pending backup-outbox hint for that
-// hash: it points at bytes that no longer exist, so the consumer's fetch could only ever 404
-// (file-service is the master of orphans; it deleted the blob, so it removes the dead hint too).
-// The outbox delete is scoped and guarded so it can only ever remove a genuinely-dead hint —
-// never another document's, nor a live re-enqueued one from a same-document A→B→A replace (the
-// exact (fileID, externalID) + NOT EXISTS predicate and its reasoning live in the query,
-// DeleteBackupOutboxPendingForFile). Two residuals remain, both benign: a sibling document that
-// shared the hash and was deleted earlier leaves a stale pending row until the consumer's 404→skip
-// backstop retires it; and the pre-existing count→Storage.Delete blob-GC race (a concurrent create
-// re-referencing the blob) is unchanged by this PR — its proper fix is atomic GC. Both steps are
-// best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending row is caught
-// by the consumer's own 404→skip backstop. The outbox cleanup runs only after a successful blob
-// delete — while the blob exists, pending rows are still backable.
-func (s *FileService) cleanupOrphanedBlob(ctx context.Context, fileID uuid.UUID, externalID string) {
+// cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), then
+// drops every pending backup hint for that hash: after the bytes are gone, all of those hints could
+// only 404. DeletePendingByHash guards the hash-wide deletion against the live file table, so a
+// concurrent re-upload committed before the statement blocks cleanup, while one committed after
+// its snapshot is invisible to (and untouched by) the DELETE. The pre-existing
+// count→Storage.Delete blob-GC race itself is unchanged; its proper fix is atomic GC.
+//
+// Both steps are best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending
+// row is caught by the consumer's 404→skip backstop. Outbox cleanup runs only after a successful
+// blob delete — while the blob exists, pending rows are still backable.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) {
 	if err := s.Storage.Delete(externalID); err != nil {
 		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
 		return
@@ -400,13 +396,13 @@ func (s *FileService) cleanupOrphanedBlob(ctx context.Context, fileID uuid.UUID,
 	if s.Outbox == nil {
 		return
 	}
-	if n, err := s.Outbox.DeletePendingForFile(ctx, fileID, externalID); err != nil {
-		s.Logger.Warn("cleanup: failed to drop pending outbox row for deleted blob",
-			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Error(err))
+	if n, err := s.Outbox.DeletePendingByHash(ctx, externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to drop pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Error(err))
 	} else if n > 0 {
 		backupOutboxOrphaned.Add(n)
-		s.Logger.Info("cleanup: dropped pending outbox row for deleted blob",
-			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Int64("rows", n))
+		s.Logger.Info("cleanup: dropped pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Int64("rows", n))
 	}
 }
 
@@ -439,7 +435,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 	br := bufio.NewReaderSize(r, sniffPrefixSize)
 	prefix, perr := br.Peek(sniffPrefixSize)
 	if perr != nil && !errors.Is(perr, io.EOF) && !errors.Is(perr, bufio.ErrBufferFull) {
-		s.logIngest("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
+		s.logIngestTransport("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
 		return nil, fmt.Errorf("read replacement prefix: %w", perr)
 	}
 
@@ -501,6 +497,12 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 		if errors.Is(err, model.ErrDuplicateKey) {
 			return nil, ErrConflict
 		}
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			// The row existed before streaming. A zero-row compare-and-set
+			// therefore means it was deleted or its content changed while the
+			// request was in flight; neither permits a stale overwrite.
+			return nil, ErrConflict
+		}
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
 
@@ -511,7 +513,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			s.Logger.Warn("cleanup: failed to count references for old file",
 				zap.String("externalID", oldExternalID), zap.Error(countErr))
 		} else if count == 0 {
-			s.cleanupOrphanedBlob(ctx, documentID, oldExternalID)
+			s.cleanupOrphanedBlob(ctx, oldExternalID)
 		}
 	}
 
@@ -536,8 +538,16 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 // document are responsible for keeping displayName's extension consistent
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) (*model.Document, error) {
-	err := s.Repo.UpdateMetadata(ctx, documentID, storageBucketID, temporaryLocation, displayName, version)
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, storageBucketID uuid.UUID, temporaryLocation bool, displayName string) (*model.Document, error) {
+	var err error
+	if s.Outbox != nil && current.TemporaryLocation && !temporaryLocation {
+		err = s.Outbox.PromoteWithOutbox(ctx, current, storageBucketID, displayName, s.priorityForMime(current.MimeType))
+		if err == nil {
+			backupOutboxEnqueued.Add(1)
+		}
+	} else {
+		err = s.Repo.UpdateMetadata(ctx, current.ID, storageBucketID, temporaryLocation, displayName, current.Version)
+	}
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -545,7 +555,7 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 		}
 		return nil, err
 	}
-	doc, err := s.Repo.GetByID(ctx, documentID)
+	doc, err := s.Repo.GetByID(ctx, current.ID)
 	if err != nil {
 		return nil, err
 	}

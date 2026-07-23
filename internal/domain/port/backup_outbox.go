@@ -21,19 +21,19 @@ type BackupOutboxRepo interface {
 	// DocumentRepo.Create does, so the service's dedup path is unchanged.
 	CreateWithOutbox(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata, priority int16) (uuid.UUID, error)
 	// UpdateFileWithOutbox replaces a document's content and enqueues a backup hint for the new
-	// content hash atomically. Same error semantics as DocumentRepo.UpdateFile.
-	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error
+	// content hash atomically, compare-and-set against expectedExternalID and expectedVersion. Same
+	// error semantics as DocumentRepo.UpdateFile.
+	UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error
+	// PromoteWithOutbox atomically applies a temporary→permanent metadata update and enqueues the
+	// already-stored content. Without this path, the normal two-phase upload flow would exclude the
+	// temporary create and then make the object permanent without ever producing a backup hint.
+	PromoteWithOutbox(ctx context.Context, current model.Document, storageBucketID uuid.UUID, displayName string, priority int16) error
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)
-	// DeletePendingForFile drops THIS file's still-pending outbox row(s) for a content hash
-	// whose blob file-service has just deleted (refcount→0) — orphan hygiene at the owner: the
-	// row points at bytes that no longer exist, so the consumer's fetch could only 404. The delete
-	// MUST NOT remove a live hint: it is scoped to (fileID, externalID) — never the hash alone, or
-	// a concurrent re-upload by ANOTHER document (same externalID, different fileID) would be wiped
-	// — AND guarded so it fires only when this document no longer references this content, sparing
-	// a same-document A→B→A replace that re-enqueued the same hash. Both are load-bearing: an
-	// implementation that drops either scope silently reintroduces a live-hint deletion (a DR gap).
-	// Returns the number removed.
-	DeletePendingForFile(ctx context.Context, fileID uuid.UUID, externalID string) (int64, error)
+	// DeletePendingByHash drops every still-pending hint for a blob file-service has deleted.
+	// The implementation must guard the hash-wide delete with an atomic absence check against the
+	// live file table, so a concurrent re-upload never loses its newly-enqueued hint. Returns the
+	// number removed.
+	DeletePendingByHash(ctx context.Context, externalID string) (int64, error)
 }

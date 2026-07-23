@@ -45,9 +45,9 @@ type StoragePort interface {
 
 // StageWriter is a per-upload staging artifact. It hashes internally while
 // bytes are written; Commit finalizes the content identity and performs the
-// backend-specific publish (FS: dedup-stat + rename; an object store would
-// complete a multipart upload and copy to the content-addressed key — the
-// contract deliberately assumes no atomic rename primitive).
+// backend-specific publish (FS: no-overwrite hard link, with O_EXCL-copy
+// fallback; an object store would complete a multipart upload and copy to
+// the content-addressed key — the contract assumes no rename primitive).
 type StageWriter interface {
 	io.Writer
 	// Commit publishes the staged content under its content hash and

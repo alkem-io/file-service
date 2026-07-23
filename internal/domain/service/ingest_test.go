@@ -126,6 +126,21 @@ func TestStageUpload_ClientAbortAborts(t *testing.T) {
 	assertSingleAbortedStage(t, storage)
 }
 
+func TestStageUpload_TranscodeClientAbortIsTransportFailure(t *testing.T) {
+	storage := &mockStorage{}
+	svc := newIngestService(storage, &mockRepo{})
+	svc.Processor = &mockProcessor{detectMIME: "image/jpeg"}
+
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want source io.ErrUnexpectedEOF (not image-processing failure)", err)
+	}
+	if errors.Is(err, ErrImageProcessing) {
+		t.Fatalf("client abort was misclassified as ErrImageProcessing: %v", err)
+	}
+	assertSingleAbortedStage(t, storage)
+}
+
 // (d) Trailing bucket-policy violation (fields after the file part,
 // research R4): rejection + abort, no publish.
 func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
@@ -272,7 +287,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
 			},
 			wantMsg:       "ingest: stream copy failed",
-			wantTransport: boolp(false),
+			wantTransport: boolp(true),
 		},
 		{
 			name: "stage write failure is service-side",

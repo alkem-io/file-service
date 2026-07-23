@@ -19,11 +19,10 @@ import (
 // progress; total duration implicitly bounded by cap ÷ minimum rate).
 //
 // Primary mechanism: extend the connection read deadline via
-// http.ResponseController before every read. Fallback (h2c transports
-// where SetReadDeadline returns ErrNotSupported — analyze finding I1): a
-// watchdog timer re-armed on every successful read that closes the request
-// body on expiry, which unblocks the pending Read; the outcome surfaces as
-// service.ErrStalled either way.
+// http.ResponseController before every read. Fallback (a transport where
+// SetReadDeadline fails): a watchdog timer re-armed on every successful read
+// closes the request body on expiry, which unblocks the pending Read; the
+// outcome surfaces as service.ErrStalled either way.
 type progressReader struct {
 	r         io.ReadCloser
 	rc        *http.ResponseController
@@ -31,10 +30,14 @@ type progressReader struct {
 	remaining int64
 	deadline  bool // SetReadDeadline supported on this transport
 
-	mu       sync.Mutex
-	watchdog *time.Timer
-	stalled  bool
-	closed   bool
+	mu        sync.Mutex
+	watchdog  *time.Timer
+	watchGen  uint64
+	stalled   bool
+	guardDone bool
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newProgressReader(w http.ResponseWriter, body io.ReadCloser, capBytes int64, idle time.Duration) *progressReader {
@@ -44,10 +47,12 @@ func newProgressReader(w http.ResponseWriter, body io.ReadCloser, capBytes int64
 		idle:      idle,
 		remaining: capBytes,
 	}
-	// Probe deadline support once. ErrNotSupported → watchdog fallback.
+	// Probe deadline support once. Any failure falls back to the body-closing
+	// watchdog; an unexpected transport/controller error must not silently
+	// disable the upload's idle guard.
 	if err := pr.rc.SetReadDeadline(time.Now().Add(idle)); err == nil {
 		pr.deadline = true
-	} else if errors.Is(err, http.ErrNotSupported) {
+	} else {
 		pr.armWatchdog()
 	}
 	return pr
@@ -56,27 +61,35 @@ func newProgressReader(w http.ResponseWriter, body io.ReadCloser, capBytes int64
 func (pr *progressReader) armWatchdog() {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
-	if pr.closed {
+	if pr.guardDone {
 		return
 	}
+	pr.watchGen++
+	gen := pr.watchGen
 	if pr.watchdog != nil {
 		pr.watchdog.Stop()
 	}
 	pr.watchdog = time.AfterFunc(pr.idle, func() {
 		pr.mu.Lock()
+		if pr.guardDone || gen != pr.watchGen {
+			pr.mu.Unlock()
+			return
+		}
 		pr.stalled = true
 		pr.mu.Unlock()
-		_ = pr.r.Close() // unblocks the pending Read on h2c
+		_ = pr.closeBody() // unblocks the pending Read on h2c
 	})
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
-	if pr.remaining <= 0 {
+	if pr.remaining < 0 {
 		return 0, service.ErrOverLimit
 	}
 	if int64(len(p)) > pr.remaining+1 {
 		// Allow exactly one byte over the cap through the limiter so the
-		// over-limit condition is detectable (io.LimitReader idiom).
+		// over-limit condition is detectable (io.LimitReader idiom). When
+		// remaining == 0 this also lets the underlying reader prove EOF,
+		// rather than falsely rejecting an exact-cap body.
 		p = p[:pr.remaining+1]
 	}
 
@@ -91,6 +104,12 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 
 	if pr.remaining < 0 {
 		return n, service.ErrOverLimit
+	}
+	if errors.Is(err, io.EOF) {
+		// The request body is complete. Do not leave a rolling deadline or
+		// watchdog armed while the handler performs post-upload DB work and
+		// writes its response.
+		pr.stopGuard()
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		pr.mu.Lock()
@@ -116,8 +135,14 @@ func isTimeoutErr(err error) bool {
 // Close releases the guards: stops the watchdog and clears the connection
 // read deadline so a keep-alive connection's next request starts fresh.
 func (pr *progressReader) Close() error {
+	pr.stopGuard()
+	return pr.closeBody()
+}
+
+func (pr *progressReader) stopGuard() {
 	pr.mu.Lock()
-	pr.closed = true
+	pr.guardDone = true
+	pr.watchGen++ // invalidate a callback already queued when Stop loses the race
 	if pr.watchdog != nil {
 		pr.watchdog.Stop()
 	}
@@ -125,5 +150,11 @@ func (pr *progressReader) Close() error {
 	if pr.deadline {
 		_ = pr.rc.SetReadDeadline(time.Time{})
 	}
-	return nil
+}
+
+func (pr *progressReader) closeBody() error {
+	pr.closeOnce.Do(func() {
+		pr.closeErr = pr.r.Close()
+	})
+	return pr.closeErr
 }

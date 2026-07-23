@@ -176,13 +176,15 @@ func newHTTPServer(port int, handler http.Handler) *http.Server {
 		Handler:   handler,
 		Protocols: protocols,
 		HTTP2:     &http.HTTP2Config{MaxConcurrentStreams: 100},
-		// Spec 020 (FR-009): the global ReadTimeout is replaced by a header
-		// deadline + per-request read deadlines. Upload handlers extend the
-		// deadline on progress (progressReader); every other route gets a
-		// fixed 30 s read deadline from the router middleware, preserving
-		// the pre-020 behavior.
+		// Spec 020 (FR-009): ordinary request bodies retain the fixed 30 s
+		// read cap; upload handlers override it with a rolling deadline on
+		// every read (progressReader). WriteTimeout must be zero because it is
+		// an absolute deadline starting after request headers, so it would
+		// kill healthy long uploads/downloads based on duration alone. Blob
+		// responses enforce their own rolling write-idle deadline.
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1MB
 	}

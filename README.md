@@ -90,12 +90,13 @@ make build
 Part of the cross-repo `008-continuous-file-backup` feature. **Off by default** — a
 pure opt-in that leaves the original write paths byte-for-byte unchanged.
 
-When enabled, every committed **non-temporary** document create / content-replace also
-commits a `file_backup_outbox` row **in the same transaction** as the `file` write (so
-there is never a committed file without its backup hint, and never an outbox row without
-a file). After the commit the service emits a best-effort `NOTIFY file_backup_outbox` to
-wake the downstream backup worker; the durable table plus the worker's poll floor cover a
-lost notification. Temporary-location objects, and the flag-off path, enqueue nothing.
+When enabled, every committed **non-temporary** document create / content-replace, plus every
+temporary→permanent promotion, commits a `file_backup_outbox` row **in the same transaction**
+as the `file` write (so there is never a committed file without its backup hint, and never an
+outbox row without a file). After the commit the service emits a best-effort
+`NOTIFY file_backup_outbox` to wake the downstream backup worker; the durable table plus the
+worker's poll floor cover a lost notification. Temporary-location objects, and the flag-off
+path, enqueue nothing.
 
 `FILE_BACKUP_HOT_MIME_PREFIXES` marks user-authored, non-reconstructable classes
 (office/OOXML, ODF, legacy Word/Excel/PowerPoint, Yjs) as priority `1` (hot) for the
@@ -107,7 +108,8 @@ hourly prune of `done` rows older than `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS`
 the shared outbox bounded. `db/schema/outbox.sql` is a sqlc codegen mirror only.
 
 Producer activity is counted on the expvar endpoint (`/internal/debug/vars`):
-`file_backup_outbox_enqueued_total` and `file_backup_outbox_pruned_total`.
+`file_backup_outbox_enqueued_total`, `file_backup_outbox_pruned_total`, and
+`file_backup_outbox_orphaned_total`.
 
 ## Development
 

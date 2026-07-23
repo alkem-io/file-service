@@ -38,9 +38,10 @@ digests). `Commit` performs the backend's publish step; `Abort` is safe to
 call after failed `Commit` and is deferred on every path.
 
 **Rationale**: backend-neutral per the spec's no-atomic-rename assumption —
-FS implements Commit as stat-dedup + rename (reusing today's temp+rename
-code, which already exists in `local.Save`); a future S3 adapter implements
-it as complete-multipart + server-side copy, with Abort = abort-multipart.
+FS implements Commit as a no-overwrite hard link (with O_EXCL create+copy
+fallback), so concurrent identical commits cannot overwrite each other; a
+future S3 adapter implements it as complete-multipart + server-side copy,
+with Abort = abort-multipart.
 Putting the hash inside the stage keeps the identity computation in one
 place per backend pipeline and lets Commit dedup without re-reading.
 
@@ -123,8 +124,11 @@ preserving today's effective behavior.
 
 **Rationale**: progress-based semantics per the clarified FR-009; per-route
 deadline control is exactly what `ResponseController` exists for (Go ≥1.20),
-no middleware framework needed. The global `WriteTimeout: 60s` stays (uploads
-write small responses).
+no middleware framework needed. The server keeps a 30 s `ReadTimeout` for
+ordinary request bodies; upload reads continually extend it. Global
+`WriteTimeout` is disabled because it is absolute from request headers and
+would kill a healthy transfer based on total duration; streamed blob responses
+instead extend a 30 s write-idle deadline on every write.
 
 **Alternatives**: raising the global ReadTimeout — rejected in
 clarification (slowloris exposure scales with the cap).

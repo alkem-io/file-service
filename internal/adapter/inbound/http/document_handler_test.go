@@ -1211,6 +1211,24 @@ func TestDocumentHandler_ReplaceContent_ContentCollision_Returns409(t *testing.T
 	}
 }
 
+func TestDocumentHandler_ReplaceContent_ConcurrentChangeReturns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old-hash", MimeType: "application/pdf"}
+	repo.updateErr = model.ErrDocumentNotFound // expected-old-hash CAS applied zero rows
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", strings.NewReader("new content"))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 when another replace wins; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestDocumentHandler_ReplaceContent_InternalError(t *testing.T) {
 	h, repo, storage := newDocHandler()
 	repo.doc = model.Document{ID: uuid.New(), ExternalID: "old"}
@@ -1225,6 +1243,37 @@ func TestDocumentHandler_ReplaceContent_InternalError(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+}
+
+type abortedRequestBody struct {
+	sent bool
+}
+
+func (b *abortedRequestBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b.sent = true
+	return copy(p, "partial replacement"), nil
+}
+
+func (b *abortedRequestBody) Close() error { return nil }
+
+func TestDocumentHandler_ReplaceContent_ClientAbortReturns400(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "old", MimeType: "application/pdf"}
+
+	r := chi.NewRouter()
+	r.Put("/internal/file/{id}/content", h.ReplaceContent)
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/file/"+docID.String()+"/content", &abortedRequestBody{})
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an aborted request stream; body: %s", rr.Code, rr.Body.String())
 	}
 }
 

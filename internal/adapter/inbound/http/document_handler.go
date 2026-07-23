@@ -638,7 +638,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), docID, bucketID, tempLoc, displayName, doc.Version)
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), doc, bucketID, tempLoc, displayName)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
@@ -741,7 +741,10 @@ func (h *DocumentHandler) ReplaceContent(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, service.ErrImageProcessing):
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, service.ErrConflict):
-			writeJSONError(w, http.StatusConflict, "new content conflicts with another document in this bucket")
+			writeJSONError(w, http.StatusConflict, "document content changed concurrently or conflicts with another document in this bucket")
+		case isClientStreamError(err):
+			IngestOutcomes.Add("client_abort", 1)
+			writeJSONError(w, http.StatusBadRequest, "upload aborted before completion")
 		default:
 			h.Logger.Error("failed to replace content", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")

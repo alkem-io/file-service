@@ -308,8 +308,8 @@ func (q *Queries) ListImagesNeedingDims(ctx context.Context, arg ListImagesNeedi
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows
 UPDATE file
 SET "externalID" = $2, "mimeType" = $3, size = $4, "updatedDate" = $5,
-    content_metadata = $6
-WHERE id = $1
+    content_metadata = $6, version = version + 1
+WHERE id = $1 AND "externalID" = $7 AND version = $8
 `
 
 type UpdateDocumentFileParams struct {
@@ -319,10 +319,16 @@ type UpdateDocumentFileParams struct {
 	Size            int32              `json:"size"`
 	UpdatedDate     pgtype.Timestamptz `json:"updatedDate"`
 	ContentMetadata []byte             `json:"content_metadata"`
+	ExternalID_2    string             `json:"externalID_2"`
+	Version         int32              `json:"version"`
 }
 
 // Updates content fields. content_metadata replaces any prior value (Replace
 // emits fresh dims via Process; the old row's content_metadata is discarded).
+// Compare-and-set on both the externalID and version the caller read before
+// streaming, and bump version on success. This serializes content replacement
+// with metadata updates (especially temporary→permanent promotion): neither may
+// commit based on stale routing state and thereby miss or misroute an outbox hint.
 func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFileParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateDocumentFile,
 		arg.ID,
@@ -331,6 +337,8 @@ func (q *Queries) UpdateDocumentFile(ctx context.Context, arg UpdateDocumentFile
 		arg.Size,
 		arg.UpdatedDate,
 		arg.ContentMetadata,
+		arg.ExternalID_2,
+		arg.Version,
 	)
 	if err != nil {
 		return 0, err

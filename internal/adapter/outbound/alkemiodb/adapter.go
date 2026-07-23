@@ -137,13 +137,15 @@ func isUniqueViolation(err error) bool {
 // UpdateFile rewrites the content fields (externalID, mimeType, size) plus
 // content_metadata in one statement — the Replace flow. Returns
 // model.ErrDuplicateKey when the new content hash collides with another row
-// in the same bucket, and model.ErrDocumentNotFound when the row is gone.
-func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
+// in the same bucket, and model.ErrDocumentNotFound when the row is gone or
+// expectedExternalID/version no longer match (a concurrent content or metadata
+// mutation won).
+func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
 		return err
 	}
-	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
@@ -158,7 +160,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, externalID, mime
 
 // updateFileParams maps the Replace content fields to the sqlc update params — the ONE owner,
 // shared by UpdateFile and the transactional UpdateFileWithOutbox.
-func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw []byte) queries.UpdateDocumentFileParams {
+func updateFileParams(id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, raw []byte) queries.UpdateDocumentFileParams {
 	return queries.UpdateDocumentFileParams{
 		ID:              uuidToPgx(id),
 		ExternalID:      externalID,
@@ -166,6 +168,8 @@ func updateFileParams(id uuid.UUID, externalID, mimeType string, size int, raw [
 		Size:            safeInt32(size),
 		UpdatedDate:     timeToPgxNow(),
 		ContentMetadata: raw,
+		ExternalID_2:    expectedExternalID,
+		Version:         safeInt32(expectedVersion),
 	}
 }
 

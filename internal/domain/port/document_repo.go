@@ -23,8 +23,11 @@ type DocumentRepo interface {
 	// serialization to bytes.
 	Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error)
 	// UpdateFile mutates content fields plus content_metadata in one
-	// statement (Replace flow). The new metadata replaces any prior value.
-	UpdateFile(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
+	// statement (Replace flow). expectedExternalID and expectedVersion are
+	// the row identity read before streaming; a mismatch applies zero rows
+	// so content replacement is serialized with concurrent replacements and
+	// metadata changes. A successful replace increments version.
+	UpdateFile(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata) error
 	// UpdateMetadata mutates the non-content fields (bucket, temporary
 	// location, display name) under optimistic locking: the write applies
 	// only while the row's version still equals the given version, and bumps

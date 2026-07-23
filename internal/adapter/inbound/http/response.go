@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -25,7 +26,19 @@ import (
 func streamBlob(w http.ResponseWriter, logger *zap.Logger, rc io.ReadCloser, size int64, key string) {
 	defer func() { _ = rc.Close() }()
 	src := &readErrCapture{r: rc}
-	written, err := io.Copy(w, src)
+	guard := newWriteIdleGuard(w, 30*time.Second)
+	defer guard.close()
+	// Never write beyond the Content-Length captured from the opened handle.
+	// A corrupted/mutated backing file that grows after Stat therefore cannot
+	// spill an extra byte into HTTP framing and masquerade as a client-write
+	// failure ("wrote more than the declared Content-Length").
+	limited := io.LimitReader(src, size)
+	// Keep the real ResponseWriter as io.Copy's destination (also lets the
+	// OpenAPI generator recognize a binary response). The source wrapper
+	// refreshes the write deadline after each successful read, immediately
+	// before io.Copy writes that chunk.
+	guarded := &writeDeadlineReader{r: limited, guard: guard}
+	written, err := io.Copy(w, guarded)
 	switch {
 	case err != nil && src.err != nil:
 		logger.Warn("blob stream truncated by a backend read fault — aborting connection",
@@ -38,6 +51,50 @@ func streamBlob(w http.ResponseWriter, logger *zap.Logger, rc io.ReadCloser, siz
 			zap.String("key", key), zap.Int64("written", written), zap.Int64("size", size))
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// writeIdleGuard replaces net/http.Server.WriteTimeout's absolute
+// header-to-finish deadline with progress semantics suitable for large streamed
+// bodies: each write gets a fresh idle window. If the transport cannot expose
+// deadlines, writes still proceed; client cancellation remains visible through
+// ResponseWriter.Write.
+type writeIdleGuard struct {
+	rc        *http.ResponseController
+	idle      time.Duration
+	supported bool
+}
+
+func newWriteIdleGuard(w http.ResponseWriter, idle time.Duration) *writeIdleGuard {
+	g := &writeIdleGuard{rc: http.NewResponseController(w), idle: idle}
+	if err := g.rc.SetWriteDeadline(time.Now().Add(idle)); err == nil {
+		g.supported = true
+	}
+	return g
+}
+
+func (g *writeIdleGuard) refresh() {
+	if g.supported {
+		_ = g.rc.SetWriteDeadline(time.Now().Add(g.idle))
+	}
+}
+
+func (g *writeIdleGuard) close() {
+	if g.supported {
+		_ = g.rc.SetWriteDeadline(time.Time{})
+	}
+}
+
+type writeDeadlineReader struct {
+	r     io.Reader
+	guard *writeIdleGuard
+}
+
+func (r *writeDeadlineReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if n > 0 {
+		r.guard.refresh()
+	}
+	return n, err
 }
 
 type errorResponse struct {

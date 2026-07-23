@@ -111,7 +111,7 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 	br := bufio.NewReaderSize(r, sniffPrefixSize)
 	prefix, err := br.Peek(sniffPrefixSize)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
-		s.logIngest("prefix read failed", "", int64(len(prefix)), err)
+		s.logIngestTransport("prefix read failed", "", int64(len(prefix)), err)
 		return nil, fmt.Errorf("read upload prefix: %w", err)
 	}
 
@@ -147,12 +147,17 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	cw := &countingWriter{w: stage}
 
 	if hasContent && transcodableMIME(mimeType) {
-		result, terr := s.Processor.TranscodeStream(br, cw, mimeType)
+		// The image library can collapse a request-stream failure into an
+		// opaque decode/load error. Capture the source error independently so
+		// a client disconnect, over-limit read, or idle timeout is never
+		// misreported as corrupt image content.
+		src := &readFaultCapture{r: br}
+		result, terr := s.Processor.TranscodeStream(src, cw, mimeType)
 		if terr != nil {
 			su.Discard()
-			if isTransportError(terr, cw) {
-				s.logIngest("transcode transport failure", mimeType, cw.n, terr)
-				return nil, terr
+			if cw.writeErr == nil && src.err != nil {
+				s.logIngestTransport("transcode transport failure", mimeType, cw.n, src.err)
+				return nil, src.err
 			}
 			if errors.Is(terr, port.ErrPixelBudgetExceeded) {
 				s.logIngest("rejected: pixel budget", mimeType, cw.n, terr)
@@ -169,10 +174,11 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 		buf := make([]byte, copyBufferSize)
 		if _, cerr := io.CopyBuffer(cw, br, buf); cerr != nil {
 			su.Discard()
-			s.logIngest("stream copy failed", mimeType, cw.n, cerr)
 			if cw.writeErr != nil {
+				s.logIngest("stream copy failed", mimeType, cw.n, cerr)
 				return nil, fmt.Errorf("stage write: %w", cerr)
 			}
+			s.logIngestTransport("stream copy failed", mimeType, cw.n, cerr)
 			return nil, cerr // transport-side: over-limit, stall, client abort
 		}
 	}
@@ -219,15 +225,6 @@ func (s *FileService) measureStagedImageDims(su *StagedUpload) {
 		s.logIngest("pass-through image measurement returned incomplete dimensions; leaving dims for sweep",
 			su.MimeType, su.Size, nil)
 	}
-}
-
-// isTransportError reports whether err originates from the request stream
-// (reader side) rather than from processing or storage.
-func isTransportError(err error, cw *countingWriter) bool {
-	if cw.writeErr != nil {
-		return false
-	}
-	return errors.Is(err, ErrOverLimit) || errors.Is(err, ErrStalled)
 }
 
 // CompleteUpload validates the staged content against the bucket policy and
@@ -365,9 +362,21 @@ func detectZipOfficeMIME(ra io.ReaderAt, size int64) (string, bool) {
 // logIngest emits the FR-008 structured failure log: outcome derivable from
 // the error class, transport vs service distinguishable by field.
 func (s *FileService) logIngest(msg, mimeType string, bytes int64, err error) {
+	s.logIngestClassified(msg, mimeType, bytes, err,
+		errors.Is(err, ErrOverLimit) || errors.Is(err, ErrStalled))
+}
+
+// logIngestTransport records a failure known from its call site to have
+// originated on the request-reader side. Generic client disconnect errors do
+// not share one sentinel, so they cannot be classified reliably from err alone.
+func (s *FileService) logIngestTransport(msg, mimeType string, bytes int64, err error) {
+	s.logIngestClassified(msg, mimeType, bytes, err, true)
+}
+
+func (s *FileService) logIngestClassified(msg, mimeType string, bytes int64, err error, transport bool) {
 	s.Logger.Warn("ingest: "+msg,
 		zap.String("mimeType", mimeType),
 		zap.Int64("bytes", bytes),
-		zap.Bool("transport", errors.Is(err, ErrOverLimit) || errors.Is(err, ErrStalled)),
+		zap.Bool("transport", transport),
 		zap.Error(err))
 }

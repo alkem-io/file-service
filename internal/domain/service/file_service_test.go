@@ -49,6 +49,8 @@ type mockRepo struct {
 	// Replace-path capture (spec 019): persisted MIME and call count.
 	updateFileCalls    int
 	lastUpdateFileMime string
+	lastUpdateExpected string
+	lastUpdateExternal string
 
 	// MIME-repair capture (spec 019).
 	suspects           []model.Document
@@ -96,9 +98,11 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata
 	}
 	return doc.ID, m.createErr
 }
-func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, mimeType string, _ int, contentMetadata model.ContentMetadata) error {
+func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, expectedExternalID string, _ int, externalID, mimeType string, _ int, contentMetadata model.ContentMetadata) error {
 	m.updateFileCalls++
 	m.lastUpdateFileMime = mimeType
+	m.lastUpdateExpected = expectedExternalID
+	m.lastUpdateExternal = externalID
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
@@ -588,7 +592,7 @@ func (m *mockRepoRace) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ i
 func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
 }
-func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
+func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
@@ -931,7 +935,7 @@ func (m *copyRaceRepo) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ i
 func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.ContentMetadata) (uuid.UUID, error) {
 	return uuid.Nil, m.createErr
 }
-func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata) error {
+func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
 func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
@@ -1032,6 +1036,26 @@ func TestStoreAndLink_DBFails_DoesNotDeleteBlob(t *testing.T) {
 	}
 }
 
+func TestStoreAndLink_ConcurrentReplaceLosesCASAndReturnsConflict(t *testing.T) {
+	storage := &mockStorage{}
+	repo := &mockRepo{
+		doc:       model.Document{ID: uuid.New(), ExternalID: "old-hash", MimeType: "application/pdf"},
+		updateErr: model.ErrDocumentNotFound, // zero-row expected-old-hash CAS
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
+
+	_, err := svc.StoreAndLink(context.Background(), repo.doc.ID, []byte("new content"))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict for a stale concurrent replace", err)
+	}
+	if repo.lastUpdateExpected != "old-hash" {
+		t.Fatalf("expected-old hash = %q, want old-hash", repo.lastUpdateExpected)
+	}
+	if storage.deleted {
+		t.Fatal("a CAS-losing replace must not run stale old-blob cleanup")
+	}
+}
+
 func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 	docID := uuid.New()
 	newBucket := uuid.New()
@@ -1043,7 +1067,7 @@ func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentMetadata(context.Background(), docID, newBucket, false, "renamed.txt", 1)
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: docID, Version: 1}, newBucket, false, "renamed.txt")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1057,7 +1081,7 @@ func TestUpdateDocumentMetadata_NotFound(t *testing.T) {
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, uuid.New(), false, "name.txt")
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
@@ -1071,7 +1095,7 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, uuid.New(), false, "name.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1246,7 +1270,7 @@ func TestUpdateDocumentMetadata_VersionConflict(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 3)
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 3}, uuid.New(), false, "name.txt")
 	if err == nil {
 		t.Fatal("expected error for version conflict")
 	}

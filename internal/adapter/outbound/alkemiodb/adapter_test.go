@@ -162,29 +162,40 @@ func TestUpdateFile(t *testing.T) {
 	// Get a real document to update
 	var id [16]byte
 	var origExtID, origMime string
-	var origSize int32
+	var origSize, origVersion int32
 	err := pool.QueryRow(context.Background(),
-		`SELECT id, "externalID", "mimeType", size FROM file LIMIT 1`,
-	).Scan(&id, &origExtID, &origMime, &origSize)
+		`SELECT id, "externalID", "mimeType", size, version FROM file LIMIT 1`,
+	).Scan(&id, &origExtID, &origMime, &origSize, &origVersion)
 	if err != nil {
 		t.Skip("no documents")
 	}
 	docID := uuid.UUID(id)
 
 	newExtID := "updated-" + uuid.New().String()[:8]
-	err = a.UpdateFile(context.Background(), docID, newExtID, "text/plain", 99, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), docID, origExtID, int(origVersion), newExtID, "text/plain", 99, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
 	// Restore original values
 	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, origExtID, origMime, int(origSize), model.ContentMetadata{})
+		_ = a.UpdateFile(context.Background(), docID, newExtID, int(origVersion+1), origExtID, origMime, int(origSize), model.ContentMetadata{})
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
 	if doc.ExternalID != newExtID {
 		t.Errorf("externalID = %q, want %q", doc.ExternalID, newExtID)
+	}
+
+	// A stale writer that still expects the original hash must lose the CAS
+	// and leave the winning content untouched.
+	err = a.UpdateFile(context.Background(), docID, origExtID, int(origVersion), "loser-hash", "text/plain", 1, model.ContentMetadata{})
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("stale UpdateFile = %v, want ErrDocumentNotFound", err)
+	}
+	doc, _ = a.GetByID(context.Background(), docID)
+	if doc.ExternalID != newExtID {
+		t.Fatalf("stale UpdateFile overwrote winner: externalID = %q, want %q", doc.ExternalID, newExtID)
 	}
 }
 
@@ -193,7 +204,7 @@ func TestUpdateFile_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateFile(context.Background(), uuid.New(), "hash", "text/plain", 1, model.ContentMetadata{})
+	err := a.UpdateFile(context.Background(), uuid.New(), "oldhash", 1, "hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}

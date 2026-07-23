@@ -68,7 +68,7 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetad
 	m.lastCreateContentMetadata = contentMetadata
 	return doc.ID, m.createErr
 }
-func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
+func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }

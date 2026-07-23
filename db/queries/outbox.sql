@@ -14,19 +14,16 @@ VALUES ($1, $2, $3, $4, $5, $6);
 DELETE FROM file_backup_outbox
 WHERE status = 'done' AND "createdDate" < $1;
 
--- name: DeleteBackupOutboxPendingForFile :execrows
--- Orphan hygiene: when THIS file's last-referenced blob is removed (refcount→0), its own
--- still-pending outbox hint points at bytes that no longer exist — the consumer's fetch could
--- only ever 404. file-service is the one deleting the blob, so it removes the dead hint too
--- (master-of-orphans). Scoped to ("fileId", "externalID"), NOT the hash alone: a concurrent
--- re-upload of the SAME content by ANOTHER document enqueues a row with the same "externalID" but
--- a different "fileId", which must not be touched. The NOT EXISTS guard closes the remaining
--- same-document race: if a concurrent replace put THIS document's content BACK to this hash
--- (A→B→A) and re-enqueued it, the file row again ties $1 to $2, so its still-live hint is spared —
--- the row is deleted ONLY when this document genuinely no longer references this content, checked
--- atomically against the owner's own `file` table (producer-side; not the consumer's wall).
+-- name: DeleteBackupOutboxPendingByHash :execrows
+-- Orphan hygiene: after file-service removes an unreferenced blob, ALL still-pending hints for
+-- that hash point at bytes that no longer exist. Delete the whole orphan set, including hints for
+-- sibling documents that shared the blob and were deleted earlier. The hash-wide delete is guarded
+-- by the owner's live `file` table: if any document currently references the hash, no hint is
+-- touched. This preserves a concurrent re-upload safely under PostgreSQL statement snapshots:
+-- a re-upload committed before this statement is visible to NOT EXISTS and blocks the delete; one
+-- committed after the snapshot has an outbox row invisible to this DELETE and therefore untouched.
 -- in_progress rows are left to the consumer's own 404→skip backstop; done/skipped/dead_letter
 -- are history, untouched.
 DELETE FROM file_backup_outbox o
-WHERE o."fileId" = $1 AND o."externalID" = $2 AND o.status = 'pending'
-  AND NOT EXISTS (SELECT 1 FROM file f WHERE f.id = $1 AND f."externalID" = $2);
+WHERE o."externalID" = $1 AND o.status = 'pending'
+  AND NOT EXISTS (SELECT 1 FROM file f WHERE f."externalID" = $1);
