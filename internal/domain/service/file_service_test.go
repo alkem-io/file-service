@@ -43,6 +43,7 @@ type mockRepo struct {
 	countErr      error
 
 	// Captured args from Create / UpdateFile content_metadata params.
+	lastCreateDoc                 model.Document
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
@@ -92,6 +93,7 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 }
 func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
+	m.lastCreateDoc = doc
 	m.lastCreateContentMetadata = contentMetadata
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
@@ -307,6 +309,29 @@ func TestCreateDocument_Happy(t *testing.T) {
 	}
 }
 
+func TestCreateDocument_OmittedAuthorizationPersistsNil(t *testing.T) {
+	repo := &mockRepo{}
+	svc := &FileService{
+		Logger:    nopLogger,
+		Repo:      repo,
+		Storage:   &mockStorage{},
+		Processor: &mockProcessor{},
+	}
+
+	doc, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		// AuthorizationID intentionally omitted: internal snapshot rows are
+		// stored with SQL NULL authorization.
+	}, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	if doc.AuthorizationID != uuid.Nil || repo.lastCreateDoc.AuthorizationID != uuid.Nil {
+		t.Fatalf("authorization = response %s / repo %s, want uuid.Nil", doc.AuthorizationID, repo.lastCreateDoc.AuthorizationID)
+	}
+}
+
 // Dedup: same content in same bucket → existing row returned, Reused=true,
 // caller-supplied auth/tagset ignored.
 func TestCreateDocument_Dedup_SameContentSameBucket_ReturnsExisting(t *testing.T) {
@@ -385,9 +410,9 @@ func TestCreateDocument_Dedup_SameContentDifferentBucket_InsertsNew(t *testing.T
 	}
 }
 
-// Concurrent race: first Create fails with ErrDuplicateKey (other writer
-// won the race on unique(externalID, storageBucketID)). Service re-queries
-// and returns the winner with Reused=true.
+// Defensive content-winner classification: a schema variant reports
+// ErrDuplicateKey and the follow-up (externalID, bucket) probe finds the
+// concurrent row. The service returns that row with Reused=true.
 func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	winnerID := uuid.New()
 	winnerAuth := uuid.New()
@@ -431,6 +456,53 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 	if doc.AuthorizationID != winnerAuth {
 		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+}
+
+func TestCreateDocument_DuplicateKeyWithoutContentWinnerReturnsConflict(t *testing.T) {
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}, []byte("content"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want ErrConflict for authorizationId/tagsetId collision", err)
+	}
+}
+
+func TestCreateDocument_DuplicateKeyWinnerLookupFailurePropagates(t *testing.T) {
+	dbErr := errors.New("database unavailable")
+	call := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			call++
+			if call == 1 {
+				return model.Document{}, model.ErrDocumentNotFound
+			}
+			return model.Document{}, dbErr
+		},
+		createErr: model.ErrDuplicateKey,
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}, []byte("content"), "", nil, 0)
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("error = %v, want wrapped lookup failure", err)
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("transport failure must not be classified as a client conflict: %v", err)
 	}
 }
 
@@ -698,6 +770,22 @@ func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 
 // CopyDocument: happy path. Source exists in bucket A; copy to bucket B
 // produces a fresh row with same content metadata, caller's auth/tagset.
+func TestCopyDocument_RequiresAuthorization(t *testing.T) {
+	repo := &mockRepo{}
+	svc := &FileService{Logger: nopLogger, Repo: repo}
+
+	_, err := svc.CopyDocument(context.Background(), uuid.New(), model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.Nil,
+	})
+	if !errors.Is(err, ErrInvalidAuthorizationID) {
+		t.Fatalf("error = %v, want ErrInvalidAuthorizationID", err)
+	}
+	if repo.createCalls != 0 {
+		t.Fatalf("copy with no authorization must not create a row; calls=%d", repo.createCalls)
+	}
+}
+
 func TestCopyDocument_Happy(t *testing.T) {
 	sourceID := uuid.New()
 	bucketA := uuid.New()

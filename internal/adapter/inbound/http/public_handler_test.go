@@ -39,6 +39,7 @@ type mockDocRepo struct {
 	lastUpdateVersion     int
 
 	// Captured args from Create / UpdateFile content_metadata params (US1+).
+	lastCreateDoc                 model.Document
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
@@ -65,6 +66,7 @@ func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ u
 	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
+	m.lastCreateDoc = doc
 	m.lastCreateContentMetadata = contentMetadata
 	return doc.ID, m.createErr
 }

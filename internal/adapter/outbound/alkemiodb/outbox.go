@@ -16,8 +16,8 @@ import (
 // committed non-temporary file row carries its backup hint). After commit it emits a best-effort
 // NOTIFY so the backup worker wakes immediately — the durable table + the worker's poll floor
 // cover a lost NOTIFY. A unique violation on the document → model.ErrDuplicateKey with NO outbox
-// row written (a dedup hit means the content already exists and was already captured); the
-// service's dedup path re-queries the winner exactly as on the non-outbox path.
+// row written; the service performs the same one-shot content-winner/conflict classification as
+// on the non-outbox path.
 func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata, priority int16) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {

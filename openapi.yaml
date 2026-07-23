@@ -358,7 +358,7 @@ paths:
           content:
             application/json; charset=utf-8:
               schema:
-                $ref: '#/components/schemas/skipDedup-requested-but-a-row-with-this-content-already-exists-in-the-destination-bucket'
+                $ref: '#/components/schemas/copy-conflicts-with-an-existing-row'
           description: Conflict
         "500":
           content:

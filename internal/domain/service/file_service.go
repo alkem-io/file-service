@@ -96,7 +96,8 @@ var (
 
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
 // in the same commit, FR-001) when the producer is on and the object is non-temporary, else the
-// original non-transactional Repo.Create. Both return model.ErrDuplicateKey on the dedup race.
+// original non-transactional Repo.Create. Both return model.ErrDuplicateKey on any unique
+// violation; insertDocument classifies it after the write.
 func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
 		_, err := s.Outbox.CreateWithOutbox(ctx, doc, meta, s.priorityForMime(doc.MimeType))
@@ -181,6 +182,12 @@ func (s *FileService) findDedupDocument(ctx context.Context, externalID string, 
 // destination bucket already has a row with the same externalID, return
 // it as-is with Reused=true, matching the CreateDocument contract.
 func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, input model.CopyDocumentInput) (*model.Document, error) {
+	// Copy always creates a policy-owned logical document. Only the internal
+	// create flow may deliberately omit authorization.
+	if input.AuthorizationID == uuid.Nil {
+		return nil, ErrInvalidAuthorizationID
+	}
+
 	source, err := s.Repo.GetByID(ctx, sourceID)
 	if err != nil {
 		// ErrDocumentNotFound surfaces as 404 in the handler.
@@ -329,20 +336,24 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 	}
 
 	if errors.Is(err, model.ErrDuplicateKey) {
-		// SkipDedup means the caller explicitly asked for a fresh row. If the
-		// schema enforces unique(externalID, storageBucketID), we can't honor
-		// that intent — surface as ErrConflict rather than masquerading as a
-		// dedup hit (which would silently corrupt placeholder flows).
+		// SkipDedup means the caller explicitly asked for a fresh row. Any
+		// uniqueness failure means that insert cannot be honored; never
+		// masquerade it as a dedup hit and corrupt placeholder flows.
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Default path: another concurrent creator won the race on the
-		// unique(externalID, storageBucketID) index. Re-query and return
-		// the winner with Reused=true.
+		// One probe disambiguates the constraint without depending on its
+		// database-generated name: a matching content row is a valid dedup
+		// winner; no match means another unique column collided.
 		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
 		if findErr == nil {
 			raced.Reused = true
 			return &raced, nil
+		}
+		if errors.Is(findErr, model.ErrDocumentNotFound) {
+			// No content winner exists, so treat this as a non-dedup unique
+			// collision (normally authorizationId or tagsetId).
+			return nil, ErrConflict
 		}
 		s.Logger.Warn("dedup: unique violation but re-query failed",
 			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
@@ -567,10 +578,12 @@ var (
 	// the actor the required privilege. An evaluation that could not run at
 	// all surfaces as a wrapped transport error instead.
 	ErrForbidden = errors.New("forbidden")
-	// ErrConflict covers both flavors of write conflict: an optimistic-lock
-	// version mismatch on metadata updates, and a content-hash collision
-	// when SkipDedup forbids reusing the existing row.
-	ErrConflict = errors.New("conflict: document was modified concurrently")
+	// ErrConflict covers optimistic-lock failures and unique-column collisions
+	// that cannot be satisfied as a valid dedup hit.
+	ErrConflict = errors.New("conflict")
+	// ErrInvalidAuthorizationID rejects copy requests without a real policy ID.
+	// Create may intentionally use uuid.Nil, which persists as SQL NULL.
+	ErrInvalidAuthorizationID = errors.New("authorization ID is required for copy")
 	// ErrPayloadTooLarge rejects an upload exceeding the bucket's maxFileSize
 	// policy (distinct from the transport-level ErrOverLimit cap).
 	ErrPayloadTooLarge = errors.New("payload too large")
