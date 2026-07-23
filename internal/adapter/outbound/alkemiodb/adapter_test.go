@@ -174,20 +174,32 @@ func TestUpdateFile(t *testing.T) {
 		t.Fatalf("UpdateFile: %v", err)
 	}
 
-	doc, _ := a.GetByID(context.Background(), docID)
+	doc, err := a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID after UpdateFile: %v", err)
+	}
 	if doc.ExternalID != newExtID {
 		t.Errorf("externalID = %q, want %q", doc.ExternalID, newExtID)
 	}
 
-	// A stale writer that still expects the original hash must lose the CAS
-	// and leave the winning content untouched.
-	err = a.UpdateFile(context.Background(), docID, original.ExternalID, original.Version, "loser-hash", "text/plain", 1, model.ContentMetadata{})
+	// Prove each CAS predicate independently: a stale version loses even with the current hash.
+	err = a.UpdateFile(context.Background(), docID, newExtID, original.Version, "loser-version", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
-		t.Fatalf("stale UpdateFile = %v, want ErrDocumentNotFound", err)
+		t.Fatalf("stale-version UpdateFile = %v, want ErrDocumentNotFound", err)
 	}
-	doc, _ = a.GetByID(context.Background(), docID)
+
+	// A stale hash also loses even with the current version.
+	err = a.UpdateFile(context.Background(), docID, original.ExternalID, doc.Version, "loser-hash", "text/plain", 1, model.ContentMetadata{})
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("stale-hash UpdateFile = %v, want ErrDocumentNotFound", err)
+	}
+
+	doc, err = a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID after stale updates: %v", err)
+	}
 	if doc.ExternalID != newExtID {
-		t.Fatalf("stale UpdateFile overwrote winner: externalID = %q, want %q", doc.ExternalID, newExtID)
+		t.Fatalf("stale updates overwrote winner: externalID = %q, want %q", doc.ExternalID, newExtID)
 	}
 }
 

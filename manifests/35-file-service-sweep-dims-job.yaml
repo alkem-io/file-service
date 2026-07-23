@@ -91,13 +91,6 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: ALKEMIO_DATABASE_NAME
               value: "alkemio"
-            # The sweep never authorizes, but it loads the same config as `serve`, which requires an
-            # auth transport to be set — reuse the deployment's AUTH_SERVICE_URL. The value is unused.
-            - name: AUTH_SERVICE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: alkemio-config
-                  key: AUTH_SERVICE_URL
             - name: LOCAL_STORAGE_PATH
               valueFrom:
                 configMapKeyRef:

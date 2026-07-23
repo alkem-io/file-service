@@ -38,12 +38,20 @@ type appBase struct {
 // func to defer. On any failure it reports and returns (nil, nil, nonzero-code); callers return
 // that code. Shared by `serve` and every sweep subcommand so they can't drift on bootstrap.
 func setupBase() (*appBase, func(), int) {
+	return setupBaseWith(config.Load)
+}
+
+func setupSweepBase() (*appBase, func(), int) {
+	return setupBaseWith(config.LoadForSweep)
+}
+
+func setupBaseWith(loadConfig func() (*config.Config, error)) (*appBase, func(), int) {
 	logger, err := config.NewLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
 		return nil, nil, 1
 	}
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		logger.Error("failed to load config", zap.Error(err))
 		_ = logger.Sync()
@@ -218,14 +226,12 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 
 // runSweepDims runs the image-dimension backfill ONCE and exits — the one-shot `sweep-dims`
 // subcommand, invoked as a k8s Job after a deploy to drain the finite legacy set (spec 019/020).
-// At RUNTIME the sweep never authorizes (it only reads storage + writes content_metadata), so it
-// builds the service with a nil auth port and no NATS. It does, however, load the SAME config as
-// serve (one binary, one config surface), so config.Load still requires AUTH_SERVICE_URL or NATS_URL
-// to be set — the Job manifest reuses serve's env, where they already are. Do NOT author the Job to
-// omit them expecting "no auth"; the value is simply unused. SIGINT/SIGTERM cancels the sweep for a
-// clean Job termination; exit code is dimsJobExitCode.
+// At runtime the sweep never authorizes (it only reads storage + writes content_metadata), so it
+// builds the service with a nil auth port and no NATS. LoadForSweep validates the shared storage,
+// database, imaging, and ingest config without requiring an unused auth transport. SIGINT/SIGTERM
+// cancels the sweep for a clean Job termination; exit code is dimsJobExitCode.
 func runSweepDims() int {
-	base, cleanup, code := setupBase()
+	base, cleanup, code := setupSweepBase()
 	if base == nil {
 		return code
 	}
