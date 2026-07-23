@@ -42,7 +42,7 @@ type mockDocRepo struct {
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
-	// Lazy-backfill capture (US1).
+	// Dimension-backfill capture.
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
 	lastBackfillExternalID string
@@ -72,12 +72,15 @@ func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ 
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
-func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) error {
+func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) (bool, error) {
 	m.backfillCalls++
 	m.lastBackfillID = id
 	m.lastBackfillExternalID = expectedExternalID
 	m.lastBackfillPayload = metadata
-	return m.backfillErr
+	if m.backfillErr != nil {
+		return false, m.backfillErr
+	}
+	return true, nil
 }
 func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
 	m.updateMetadataCalls++

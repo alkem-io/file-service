@@ -373,11 +373,15 @@ func TestAdapter_BackfillContentMetadata_DoesNotBumpVersion(t *testing.T) {
 	}
 
 	w, h := 100, 50
-	if err := a.BackfillContentMetadata(
+	applied, err := a.BackfillContentMetadata(
 		context.Background(), docID, externalID,
 		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("BackfillContentMetadata: %v", err)
+	}
+	if !applied {
+		t.Fatal("BackfillContentMetadata did not apply")
 	}
 
 	// Verify content_metadata changed AND version did not bump.
@@ -409,12 +413,20 @@ func TestAdapter_BackfillContentMetadata_IsIdempotent(t *testing.T) {
 	payload := model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h}
 	// First call wins the compare-and-set; second is a 0-rows-affected no-op
 	// (content_metadata is no longer empty), which the adapter treats as
-	// success — i.e. the helper is safe to call repeatedly.
-	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
+	// a non-error with applied=false — i.e. the helper is safe to call repeatedly.
+	applied, err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload)
+	if err != nil {
 		t.Fatalf("first BackfillContentMetadata: %v", err)
 	}
-	if err := a.BackfillContentMetadata(context.Background(), docID, externalID, payload); err != nil {
+	if !applied {
+		t.Fatal("first BackfillContentMetadata did not apply")
+	}
+	applied, err = a.BackfillContentMetadata(context.Background(), docID, externalID, payload)
+	if err != nil {
 		t.Fatalf("second BackfillContentMetadata: %v", err)
+	}
+	if applied {
+		t.Fatal("second BackfillContentMetadata unexpectedly applied")
 	}
 
 	var meta []byte
@@ -441,7 +453,7 @@ func TestAdapter_BackfillContentMetadata_RaceLost_DoesNotOverwrite(t *testing.T)
 	defer cleanup()
 
 	// Simulate "Replace ran" by changing the row's externalID after the
-	// lazy-backfill measured against the original.
+	// dimension sweep measured against the original.
 	if _, err := pool.Exec(context.Background(),
 		`UPDATE file SET "externalID" = $1 WHERE id = $2`,
 		externalID+"-replaced", docID,
@@ -450,11 +462,15 @@ func TestAdapter_BackfillContentMetadata_RaceLost_DoesNotOverwrite(t *testing.T)
 	}
 
 	w, h := 100, 50
-	if err := a.BackfillContentMetadata(
+	applied, err := a.BackfillContentMetadata(
 		context.Background(), docID, externalID, // expectedExternalID = pre-replace
 		model.ContentMetadata{Populated: true, ImageWidth: &w, ImageHeight: &h},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("BackfillContentMetadata returned err on race-lost (should be nil): %v", err)
+	}
+	if applied {
+		t.Fatal("BackfillContentMetadata reported applied after externalID changed")
 	}
 
 	var meta []byte

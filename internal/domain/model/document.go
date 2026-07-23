@@ -15,7 +15,7 @@ import (
 // JSONB column. Empty (Populated=false) means the row has no metadata
 // recorded. Populated=true with DecodeFailed=true means the decoder ran
 // and confirmed the bytes are unreadable — a permanent sentinel; the
-// lazy-backfill MUST short-circuit on this. Populated=true with
+// dimension sweep MUST short-circuit on this. Populated=true with
 // ImageWidth/ImageHeight non-nil is the normal measured case. Populated
 // can be true with all other fields zero/nil for non-image rows.
 type ContentMetadata struct {
@@ -25,7 +25,7 @@ type ContentMetadata struct {
 	// Populated tracks whether the JSONB column was non-empty (i.e. not
 	// `{}`). A read of an empty `{}` column produces Populated=false; a
 	// read of any non-empty JSON object — including {"_decodeFailed":
-	// true} — produces Populated=true. Lazy-backfill skips when
+	// true} — produces Populated=true. The dimension sweep skips when
 	// Populated=true regardless of dim fields.
 	Populated bool
 }

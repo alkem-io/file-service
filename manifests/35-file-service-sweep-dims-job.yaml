@@ -109,7 +109,7 @@ spec:
               cpu: 200m
               memory: 256Mi
             limits:
-              # Header-only decode (no pixel pass); mirrors the deployment's ceiling.
+              # Header-only decode (no pixel pass), with an explicit bounded ceiling.
               cpu: 500m
               memory: 512Mi
       volumes:

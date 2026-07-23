@@ -61,12 +61,13 @@ type mockRepo struct {
 	updateMimeErr      error
 	updateMimeLostRace bool
 
-	// Lazy-backfill capture (US1).
+	// Dimension-backfill capture.
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
 	lastBackfillExternalID string
 	lastBackfillPayload    model.ContentMetadata
 	backfillErr            error
+	backfillLostRace       bool
 }
 
 // Ensure mockRepo implements the full interface at compile time.
@@ -101,12 +102,15 @@ func (m *mockRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, mimeType string
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
-func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) error {
+func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) (bool, error) {
 	m.backfillCalls++
 	m.lastBackfillID = id
 	m.lastBackfillExternalID = expectedExternalID
 	m.lastBackfillPayload = metadata
-	return m.backfillErr
+	if m.backfillErr != nil {
+		return false, m.backfillErr
+	}
+	return !m.backfillLostRace, nil
 }
 func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return m.updateErr
@@ -218,11 +222,12 @@ type mockProcessor struct {
 	// MeasureDims override — used by the dims-backfill sweep tests. Defaults:
 	// returns (nil, nil, nil), the no-decoder-available signal, so the sweep
 	// skips the persist and leaves the row for a future run.
-	measureDimsW   *int
-	measureDimsH   *int
-	measureDimsErr error
-	measurePanic   bool   // MeasureDims panics for every row
-	panicOnContent []byte // MeasureDims panics only for the row whose bytes match (poison-row tests)
+	measureDimsW    *int
+	measureDimsH    *int
+	measureDimsErr  error
+	measurePanic    bool   // MeasureDims panics for every row
+	panicOnContent  []byte // MeasureDims panics only for the row whose bytes match (poison-row tests)
+	measureDimsHook func()
 
 	// detectMIME override — when non-empty, replaces the default
 	// application/octet-stream (replace-path reconciliation tests).
@@ -256,6 +261,9 @@ func (m *mockProcessor) MeasureDims(r io.Reader, _ string) (*int, *int, error) {
 	// Drain the reader as a real decoder does — the sweep wraps it to tell a storage read fault
 	// apart from a decode failure, and that wrapper only sees a fault if the bytes are pulled.
 	b, _ := io.ReadAll(r)
+	if m.measureDimsHook != nil {
+		m.measureDimsHook()
+	}
 	if m.measurePanic || (len(m.panicOnContent) > 0 && bytes.Equal(b, m.panicOnContent)) {
 		panic("simulated decode panic on a malformed blob")
 	}
@@ -583,8 +591,8 @@ func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _
 func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return nil
 }
-func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
-	return nil
+func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) (bool, error) {
+	return true, nil
 }
 func (m *mockRepoRace) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return model.DeletedDocument{}, nil
@@ -926,8 +934,8 @@ func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _
 func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
 	return nil
 }
-func (m *copyRaceRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) error {
-	return nil
+func (m *copyRaceRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) (bool, error) {
+	return true, nil
 }
 func (m *copyRaceRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
 	return model.DeletedDocument{}, nil
@@ -1295,7 +1303,7 @@ func TestStoreAndLink_DBFails_DedupDoesNotDeleteSharedBlob(t *testing.T) {
 	}
 }
 
-// --- US1: lazy-backfill on Create dedup hit (legacy image rows) ---
+// --- Content-metadata mapping and dedup healing ---
 
 func intpService(v int) *int { return &v }
 

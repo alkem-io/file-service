@@ -815,7 +815,7 @@ func TestProcessor_JPEG_NoOrientationTag_TreatsAsOrient1_Passthrough(t *testing.
 	}
 }
 
-// MeasureDims is the header-only port method used by lazy-backfill (T021
+// MeasureDims is the header-only port method used by the dimension sweep (T021
 // contract). On a successful load, it returns post-rotation dims; on a
 // vips-load failure it returns (nil, nil, err) — never (nil, nil, nil)
 // from the vips path.

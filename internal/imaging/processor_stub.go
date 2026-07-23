@@ -45,7 +45,8 @@ func (p *Processor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
 }
 
 // TranscodeStream (no-vips stub): pass-through copy, no decoding available.
-// Dims unreported (Measured=false) per the lazy-backfill convention.
+// Dims are unreported (Measured=false), so the row remains eligible for a
+// future vips-capable sweep.
 func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err

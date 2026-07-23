@@ -1,7 +1,7 @@
 // Package service is the domain core of the file-service: document upload
 // (buffered and streaming), content replacement with MIME guarding, copy,
 // metadata update, delete with blob refcounting, authorization checks, and
-// the lazy content-metadata backfill. It orchestrates everything through the
+// the offline content-metadata sweep. It orchestrates everything through the
 // port interfaces and knows nothing about HTTP, Postgres, or libvips.
 package service
 
@@ -26,10 +26,9 @@ import (
 // processResultToContentMetadata translates the processor's output into the
 // typed ContentMetadata persisted on the row. Decision tree:
 //
-//   - non-image MIME → Populated=true, no dims (writes "{}" via the adapter,
-//     but Populated=true so the lazy-backfill skips this row)
+//   - non-image MIME → empty metadata (the image-only sweep excludes it)
 //   - image MIME, Measured=false → Populated=false (no decoder available;
-//     lazy-backfill or a future vips run can retry)
+//     a future vips-capable sweep can retry)
 //   - image MIME, dims present → Populated=true with dims
 //   - image MIME, Measured=true, no dims → Populated=true with DecodeFailed
 func processResultToContentMetadata(r port.ProcessResult, mimeType string) model.ContentMetadata {
@@ -39,7 +38,7 @@ func processResultToContentMetadata(r port.ProcessResult, mimeType string) model
 		return model.ContentMetadata{Populated: false}
 	}
 	if !r.Measured {
-		return model.ContentMetadata{} // Populated=false; lazy-backfill may retry
+		return model.ContentMetadata{} // Populated=false; the dimension sweep may retry
 	}
 	if r.ImageWidth != nil && r.ImageHeight != nil {
 		return model.ContentMetadata{

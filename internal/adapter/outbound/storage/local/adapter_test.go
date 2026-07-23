@@ -104,9 +104,10 @@ func TestRead_InvalidExternalID(t *testing.T) {
 	dir := t.TempDir()
 	a := New(dir)
 
-	_, err := a.Read("../etc/passwd")
-	if err == nil {
-		t.Fatal("expected error for invalid external ID")
+	traversal := strings.Repeat("../", 20) + "etc/passwd"
+	_, err := a.Read(traversal)
+	if !errors.Is(err, port.ErrInvalidKey) {
+		t.Fatalf("err = %v, want ErrInvalidKey", err)
 	}
 }
 
@@ -523,12 +524,16 @@ func TestReadStream(t *testing.T) {
 	if size != int64(len("stream me")) {
 		t.Errorf("size = %d, want %d", size, len("stream me"))
 	}
-	b, _ := io.ReadAll(rc)
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadStream body: %v", err)
+	}
 	if string(b) != "stream me" {
 		t.Errorf("body = %q", b)
 	}
 
-	if _, _, err := a.ReadStream("../etc/passwd"); !errors.Is(err, port.ErrInvalidKey) {
+	traversal := strings.Repeat("../", 20) + "etc/passwd"
+	if _, _, err := a.ReadStream(traversal); !errors.Is(err, port.ErrInvalidKey) {
 		t.Errorf("traversal key: err = %v, want ErrInvalidKey", err)
 	}
 }

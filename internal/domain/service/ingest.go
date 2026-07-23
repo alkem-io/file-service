@@ -52,8 +52,8 @@ func transcodableMIME(mime string) bool {
 		return true
 	}
 	// BMP/AVIF have no streaming saver in the image library; like GIF/SVG
-	// they pass through byte-identical, dims arriving via the existing
-	// lazy backfill on first access (research R5 addendum).
+	// they pass through byte-identical. Their dims are populated by the
+	// explicit sweep-dims job (research R5 addendum), never by a read path.
 	return false
 }
 

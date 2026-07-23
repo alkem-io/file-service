@@ -36,10 +36,9 @@ type DocumentRepo interface {
 	// compare-and-set: only succeeds if the row currently has empty
 	// content_metadata AND its externalID matches expectedExternalID. This
 	// protects against a race where Replace ran on the same row between the
-	// lazy-backfill's storage read and its persist. A 0-rows-affected outcome
-	// signals "lost the race" — the helper returns nil (treats as success;
-	// the winner already wrote fresh metadata).
-	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error
+	// sweep's storage read and its persist. The bool reports whether the write
+	// applied; false with no error means the compare-and-set lost its race.
+	BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) (bool, error)
 	// Delete removes the row and returns the identifiers the caller needs
 	// for cleanup: the content hash (to decide whether the blob is now
 	// orphaned) and the authorization/tagset ids (owned by alkemio-server,

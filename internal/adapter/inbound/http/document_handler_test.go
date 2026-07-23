@@ -59,7 +59,7 @@ type stubProcessor struct {
 	processDimsH    *int
 	processMeasured bool // when true, forces Measured=true regardless of dims
 
-	// MeasureDims override (lazy-backfill tests).
+	// MeasureDims override (dimension-sweep tests).
 	measureDimsW   *int
 	measureDimsH   *int
 	measureDimsErr error
@@ -1931,7 +1931,7 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 
 	// Wire up the dedup hit for the second request: mockRepo.findDoc
 	// returning a row with the same externalID + bucket. ContentMetadata
-	// Populated=true so the lazy-backfill skips it (already measured).
+	// Populated=true marks it already measured.
 	repo.findDoc = &model.Document{
 		ID:              uuid.MustParse(resp1.ID),
 		ExternalID:      resp1.ExternalID,
@@ -1969,7 +1969,7 @@ func TestDocumentHandler_Create_RotatedPNG_DedupHitsOnReupload(t *testing.T) {
 
 // The PATCH response must surface the row's stored dims. Since dims now come from content_metadata
 // (populated at write time or by the sweep-dims job — never a decode on this path), this guards the
-// handler's field mapping, which the deleted lazy-backfill tests were the only thing exercising.
+// handler's field mapping, which the retired read-path backfill tests were the only thing exercising.
 func TestDocumentHandler_Patch_ResponseCarriesStoredDims(t *testing.T) {
 	docID := uuid.New()
 	w, h := 800, 600

@@ -204,29 +204,30 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 // bumping version. Compare-and-set: only writes when content_metadata is still
 // empty AND the row's externalID matches expectedExternalID. A 0-rows-affected
 // outcome means another writer (Replace, or another backfill) won the race; we
-// treat that as a non-error since the winner already wrote fresh metadata.
+// report that separately from a database error so sweep accounting stays honest.
 // FR-018.
-func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) error {
+func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, expectedExternalID string, contentMetadata model.ContentMetadata) (bool, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Defensive: writing "{}" would leave the row matching the lazy-backfill
+	// Defensive: writing "{}" would leave the row matching the sweep
 	// predicate (content_metadata = '{}'::jsonb), re-arming the helper to
-	// retry on every subsequent metadata read. Service layer never reaches
+	// retry on every subsequent sweep. Service layer never reaches
 	// here with an empty-equivalent value, but skip explicitly to keep the
 	// backfill loop closed even if a future caller misuses this method.
 	if string(raw) == `{}` {
-		return nil
+		return false, nil
 	}
-	_, err = a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
+	rowsAffected, err := a.queries.BackfillContentMetadata(ctx, queries.BackfillContentMetadataParams{
 		ID:              uuidToPgx(id),
 		ContentMetadata: raw,
 		ExternalID:      expectedExternalID,
 	})
-	// rowsAffected==0 → race lost (treated as success); any DB error
-	// surfaces normally.
-	return err
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected > 0, nil
 }
 
 // marshalContentMetadata serializes the typed value to the JSONB shape stored
@@ -236,7 +237,7 @@ func (a *Adapter) BackfillContentMetadata(ctx context.Context, id uuid.UUID, exp
 //
 // Rejects half-populated dims (exactly one of ImageWidth / ImageHeight set):
 // silently serializing those as "{}" would round-trip the row as
-// "unmeasured" and trigger lazy-backfill on every read — masking what is
+// "unmeasured" and trigger every later sweep — masking what is
 // almost certainly a caller bug.
 func marshalContentMetadata(meta model.ContentMetadata) ([]byte, error) {
 	if !meta.Populated {

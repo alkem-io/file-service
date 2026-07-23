@@ -16,23 +16,29 @@ import (
 type DimsBackfillSummary struct {
 	Measured     int  // dims computed and persisted
 	DecodeFailed int  // decoder ran and failed → {_decodeFailed:true} sentinel persisted
-	Skipped      int  // storage read / persist failed, or no decoder (stub) → left for a future run
+	Skipped      int  // no decoder, read/persist failure, or CAS not applied → not claimed successful
 	Aborted      bool // the sweep ended early (ctx cancelled or a page scan failed) — NOT a drained corpus
 }
 
 // dimsBackfillPageSize bounds one keyset page so a large first-run legacy set never loads whole.
 const dimsBackfillPageSize = 500
 
-// readFaultCapture records a non-EOF read error from the wrapped reader, so a caller can tell a
-// storage TRANSPORT fault from a decode failure after the decoder returns one opaque error.
+// readFaultCapture records transport errors plus byte/EOF state from the wrapped reader, so a
+// caller can tell a storage fault or short read from a decode failure after the decoder returns one
+// opaque error.
 type readFaultCapture struct {
-	r   io.Reader
-	err error
+	r      io.Reader
+	err    error
+	read   int64
+	sawEOF bool
 }
 
 func (c *readFaultCapture) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
+	c.read += int64(n)
+	if errors.Is(err, io.EOF) {
+		c.sawEOF = true
+	} else if err != nil {
 		c.err = err
 	}
 	return n, err
@@ -63,9 +69,16 @@ func (s *FileService) RunDimsBackfill(ctx context.Context) DimsBackfillSummary {
 			break
 		}
 		for i := range page {
+			if ctx.Err() != nil {
+				sum.Aborted = true
+				break
+			}
 			doc := page[i]
 			cursor = doc.ID // keyset advances even for rows we skip, so a poison row can't wedge the sweep
 			s.backfillOneDims(ctx, doc, &sum)
+		}
+		if sum.Aborted {
+			break
 		}
 	}
 	// Report convergence honestly: "completed" must not be logged for a pass that gave up early,
@@ -95,7 +108,7 @@ func (s *FileService) healKnownDims(ctx context.Context, doc *model.Document, me
 	doc.ImageWidth = meta.ImageWidth
 	doc.ImageHeight = meta.ImageHeight
 	doc.ContentMetadata = meta
-	if err := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, meta); err != nil {
+	if _, err := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, meta); err != nil {
 		s.Logger.Warn("dims heal: persist failed; the sweep will retry (response still carries dims)",
 			zap.String("documentID", doc.ID.String()), zap.Error(err))
 	}
@@ -106,8 +119,8 @@ func (s *FileService) healKnownDims(ctx context.Context, doc *model.Document, me
 // never retried), or a skip (read/persist error, or the no-vips stub) that leaves the row for a
 // future run — a transient read/persist failure is therefore re-attempted the NEXT time the
 // sweep-dims job runs, since the row stays unpopulated and keeps matching the scan. The
-// compare-and-set (on externalID)
-// protects against overwriting content that was replaced between the scan and the persist.
+// compare-and-set (on externalID) protects against overwriting content that was replaced between
+// the scan and the persist.
 //
 // A GO-level panic is contained PER ROW: the sweep decodes arbitrary legacy bytes through a CGo
 // image library, so without this one malformed blob would take down the whole sweep process (the
@@ -126,7 +139,7 @@ func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, s
 		}
 	}()
 
-	rc, _, err := s.Storage.ReadStream(doc.ExternalID)
+	rc, size, err := s.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		s.Logger.Warn("dims-backfill: storage read failed; leaving content_metadata empty",
 			zap.String("externalID", doc.ExternalID), zap.Error(err))
@@ -151,20 +164,40 @@ func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, s
 		s.Logger.Warn("dims-backfill: storage read faulted mid-header; leaving the row for a future run",
 			zap.String("externalID", doc.ExternalID), zap.Error(src.err))
 		sum.Skipped++
+	case measureErr != nil && src.sawEOF && src.read < size:
+		// The opened handle reported `size`, but delivered fewer bytes before a clean EOF. This is a
+		// storage race/fault, not proof that the immutable blob itself is undecodable. Only use this
+		// signal when EOF was actually observed: a successful header-only decoder intentionally
+		// stops well before size and must not be considered short.
+		s.Logger.Warn("dims-backfill: storage short-read mid-header; leaving the row for a future run",
+			zap.String("externalID", doc.ExternalID),
+			zap.Int64("read", src.read),
+			zap.Int64("expectedSize", size))
+		sum.Skipped++
 	case measureErr != nil:
 		sentinel := model.ContentMetadata{Populated: true, DecodeFailed: true}
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, sentinel); persistErr != nil {
+		applied, persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, sentinel)
+		if persistErr != nil {
 			s.Logger.Warn("dims-backfill: persist of _decodeFailed sentinel failed",
 				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
+			sum.Skipped++
+			return
+		}
+		if !applied {
 			sum.Skipped++
 			return
 		}
 		sum.DecodeFailed++
 	case w != nil && h != nil:
 		measured := model.ContentMetadata{Populated: true, ImageWidth: w, ImageHeight: h}
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, measured); persistErr != nil {
+		applied, persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, measured)
+		if persistErr != nil {
 			s.Logger.Warn("dims-backfill: persist of measured dims failed",
 				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
+			sum.Skipped++
+			return
+		}
+		if !applied {
 			sum.Skipped++
 			return
 		}

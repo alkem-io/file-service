@@ -71,8 +71,8 @@ type ImageProcessor interface {
 	// MeasureDims performs a header-only decode and returns post-rotation
 	// pixel dimensions. MUST NOT pixel-decode or re-encode (FR-018: "no
 	// pixel decode, microseconds even for large files"). Used by the
-	// service-layer lazy-backfill helper for legacy rows whose
-	// content_metadata is empty.
+	// explicit sweep-dims job for legacy rows whose content_metadata is
+	// empty.
 	//
 	// Contract:
 	//   - (dims, nil)        → success; both ImageWidth and ImageHeight non-nil.

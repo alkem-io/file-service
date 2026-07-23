@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/google/uuid"
@@ -151,6 +153,44 @@ func TestRunDimsBackfill_PersistFailure_CountsSkipped(t *testing.T) {
 	})
 }
 
+func TestRunDimsBackfill_CASLost_CountsSkipped(t *testing.T) {
+	w, h := 1, 2
+	t.Run("measured", func(t *testing.T) {
+		repo := &mockRepo{imagesNeedingDims: oneImageRow(), backfillLostRace: true}
+		svc := newDimsSvc(repo, &mockStorage{data: []byte("x")}, &mockProcessor{measureDimsW: &w, measureDimsH: &h})
+		if sum := svc.RunDimsBackfill(context.Background()); sum.Skipped != 1 || sum.Measured != 0 {
+			t.Fatalf("summary = %+v, want skipped=1 measured=0", sum)
+		}
+	})
+	t.Run("sentinel", func(t *testing.T) {
+		repo := &mockRepo{imagesNeedingDims: oneImageRow(), backfillLostRace: true}
+		svc := newDimsSvc(repo, &mockStorage{data: []byte("x")}, &mockProcessor{measureDimsErr: errors.New("corrupt")})
+		if sum := svc.RunDimsBackfill(context.Background()); sum.Skipped != 1 || sum.DecodeFailed != 0 {
+			t.Fatalf("summary = %+v, want skipped=1 decodeFailed=0", sum)
+		}
+	})
+}
+
+func TestRunDimsBackfill_CancelMidPage_StopsPromptly(t *testing.T) {
+	w, h := 1, 2
+	rows := []model.Document{
+		{ID: uuid.New(), ExternalID: "first", MimeType: "image/jpeg"},
+		{ID: uuid.New(), ExternalID: "second", MimeType: "image/jpeg"},
+		{ID: uuid.New(), ExternalID: "third", MimeType: "image/jpeg"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	repo := &mockRepo{imagesNeedingDims: rows}
+	proc := &mockProcessor{measureDimsW: &w, measureDimsH: &h, measureDimsHook: cancel}
+	svc := newDimsSvc(repo, &mockStorage{dataByID: map[string][]byte{
+		"first": {1}, "second": {2}, "third": {3},
+	}}, proc)
+
+	sum := svc.RunDimsBackfill(ctx)
+	if !sum.Aborted || sum.Measured != 1 || repo.backfillCalls != 1 {
+		t.Fatalf("summary=%+v backfillCalls=%d, want aborted after exactly one row", sum, repo.backfillCalls)
+	}
+}
+
 // [0] A TRANSPORT fault mid-header must NOT be mistaken for an undecodable image: writing the
 // permanent {_decodeFailed:true} sentinel would exclude a perfectly good image from this and every
 // future sweep. It must be a skip, with nothing persisted.
@@ -166,6 +206,22 @@ func TestRunDimsBackfill_ReadFaultMidHeader_IsSkippedNotSentinel(t *testing.T) {
 	}
 	if repo.backfillCalls != 0 {
 		t.Fatalf("backfillCalls = %d, want 0 — a read fault must never persist the permanent sentinel", repo.backfillCalls)
+	}
+}
+
+// A clean EOF before the size reported by the opened handle is also a storage fault (for example,
+// a backing-file truncation race), not evidence that the original immutable image is corrupt.
+func TestRunDimsBackfill_ShortReadMidHeader_IsSkippedNotSentinel(t *testing.T) {
+	repo := &mockRepo{imagesNeedingDims: oneImageRow()}
+	storage := &mockStorage{
+		streamBody: io.NopCloser(bytes.NewReader([]byte("short"))),
+		streamSize: 999,
+	}
+	svc := newDimsSvc(repo, storage, &mockProcessor{measureDimsErr: errors.New("vips load: unexpected EOF")})
+
+	sum := svc.RunDimsBackfill(context.Background())
+	if sum.Skipped != 1 || sum.DecodeFailed != 0 || repo.backfillCalls != 0 {
+		t.Fatalf("summary=%+v backfillCalls=%d, want short storage read skipped without sentinel", sum, repo.backfillCalls)
 	}
 }
 

@@ -27,7 +27,7 @@ type BackfillContentMetadataParams struct {
 
 // Compare-and-set: only writes when content_metadata is still empty AND
 // the row's externalID is the one we measured against. Protects against
-// the lazy-backfill overwriting freshly-replaced content's metadata.
+// the dimension sweep overwriting freshly-replaced content's metadata.
 // Updates only content_metadata; does NOT bump version (FR-018).
 func (q *Queries) BackfillContentMetadata(ctx context.Context, arg BackfillContentMetadataParams) (int64, error) {
 	result, err := q.db.Exec(ctx, backfillContentMetadata, arg.ID, arg.ContentMetadata, arg.ExternalID)
