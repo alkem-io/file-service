@@ -113,14 +113,13 @@ output re-baselined per amended SC-002).
 
 ## R6 — Timeout architecture
 
-**Decision**: Replace the server-wide `ReadTimeout: 30s` with
-`ReadHeaderTimeout: 10s`; introduce `progressReader` in the HTTP adapter
-that wraps upload bodies and calls
+**Decision**: Set `ReadHeaderTimeout: 10s` while retaining the server-wide
+`ReadTimeout: 30s` for ordinary request bodies; introduce `progressReader` in
+the HTTP adapter that wraps upload bodies and calls
 `http.NewResponseController(w).SetReadDeadline(now+idle)` after every
-successful `Read` (idle = `UPLOAD_IDLE_TIMEOUT_MS`, default 30 000). A read
-that trips the deadline surfaces as the `stalled` ingest outcome. Non-upload
-handlers receive a fixed whole-request deadline via the same controller,
-preserving today's effective behavior.
+successful `Read` (idle = `UPLOAD_IDLE_TIMEOUT_MS`, default 30 000), extending
+the deadline while upload bytes keep arriving. A read that trips the deadline
+surfaces as the `stalled` ingest outcome.
 
 **Rationale**: progress-based semantics per the clarified FR-009; per-route
 deadline control is exactly what `ResponseController` exists for (Go ≥1.20),

@@ -130,7 +130,10 @@ func TestMock_UpdateFileWithOutbox_Commits(t *testing.T) {
 	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(8)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashNew", "image/jpeg", int32(20),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "hashOld", int32(1)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "hashNew", int16(0),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), int64(20)).
@@ -155,12 +158,16 @@ func TestMock_UpdateFileWithOutbox_NotFoundRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mock.Close()
+	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(8)...).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "h", "text/plain", int32(1),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "old", int32(1)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectRollback()
 
-	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "old", 1, "h", "text/plain", 1, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "old", 1, "h", "text/plain", 1, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("want ErrDocumentNotFound, got %v", err)
 	}
@@ -177,13 +184,16 @@ func TestMock_UpdateFileWithOutbox_DuplicateRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mock.Close()
+	id := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(8)...).
+	mock.ExpectExec("UPDATE file").
+		WithArgs(pgtype.UUID{Bytes: id, Valid: true}, "h", "image/jpeg", int32(5),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), "old", int32(1)).
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
-	err = New(mock).UpdateFileWithOutbox(context.Background(), uuid.New(), "old", 1, "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
+	err = New(mock).UpdateFileWithOutbox(context.Background(), id, "old", 1, "h", "image/jpeg", 5, model.ContentMetadata{}, 0)
 	if !errors.Is(err, model.ErrDuplicateKey) {
 		t.Fatalf("want ErrDuplicateKey, got %v", err)
 	}

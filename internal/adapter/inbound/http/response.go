@@ -121,7 +121,7 @@ func writeStorageReadError(w http.ResponseWriter, logger *zap.Logger, err error,
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{
 		Error:   http.StatusText(status),

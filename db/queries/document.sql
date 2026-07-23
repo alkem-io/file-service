@@ -96,6 +96,9 @@ WHERE id = $1
 -- content_metadata is still unpopulated ('{}'). Keyset-paged by id ($1 = cursor, $2 = page size) so
 -- a large first-run legacy set never loads whole. The sweep reads each blob by externalID, does a
 -- header-only measure, and compare-and-sets the dims via BackfillContentMetadata.
+-- `file.id` is the primary key, so its B-tree index supports both `id > cursor` and ORDER BY id;
+-- each row is visited at most once during this finite manual sweep. A separate schema migration
+-- and partial index would add steady-state write cost for an operation intended to converge away.
 SELECT id, "externalID", "mimeType"
 FROM file
 WHERE "mimeType" LIKE 'image/%'

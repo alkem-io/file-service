@@ -159,28 +159,20 @@ func TestUpdateFile(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	// Get a real document to update
-	var id [16]byte
-	var origExtID, origMime string
-	var origSize, origVersion int32
-	err := pool.QueryRow(context.Background(),
-		`SELECT id, "externalID", "mimeType", size, version FROM file LIMIT 1`,
-	).Scan(&id, &origExtID, &origMime, &origSize, &origVersion)
+	// Use a test-owned row: mutating an arbitrary shared fixture would risk
+	// erasing its content_metadata while exercising the content-update CAS.
+	docID, _, cleanup := createTestRow(t, pool, []byte(`{}`))
+	defer cleanup()
+	original, err := a.GetByID(context.Background(), docID)
 	if err != nil {
-		t.Skip("no documents")
+		t.Fatalf("GetByID test row: %v", err)
 	}
-	docID := uuid.UUID(id)
 
 	newExtID := "updated-" + uuid.New().String()[:8]
-	err = a.UpdateFile(context.Background(), docID, origExtID, int(origVersion), newExtID, "text/plain", 99, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), docID, original.ExternalID, original.Version, newExtID, "text/plain", 99, model.ContentMetadata{})
 	if err != nil {
 		t.Fatalf("UpdateFile: %v", err)
 	}
-
-	// Restore original values
-	defer func() {
-		_ = a.UpdateFile(context.Background(), docID, newExtID, int(origVersion+1), origExtID, origMime, int(origSize), model.ContentMetadata{})
-	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
 	if doc.ExternalID != newExtID {
@@ -189,7 +181,7 @@ func TestUpdateFile(t *testing.T) {
 
 	// A stale writer that still expects the original hash must lose the CAS
 	// and leave the winning content untouched.
-	err = a.UpdateFile(context.Background(), docID, origExtID, int(origVersion), "loser-hash", "text/plain", 1, model.ContentMetadata{})
+	err = a.UpdateFile(context.Background(), docID, original.ExternalID, original.Version, "loser-hash", "text/plain", 1, model.ContentMetadata{})
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("stale UpdateFile = %v, want ErrDocumentNotFound", err)
 	}

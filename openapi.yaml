@@ -230,19 +230,19 @@ paths:
           description: OK
         "400":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -271,43 +271,43 @@ paths:
           description: Created
         "400":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "408":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Request Timeout
         "409":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
         "413":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Request Entity Too Large
         "415":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Unsupported Media Type
         "422":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.RejectedContentResponse'
           description: Unprocessable Entity
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -344,25 +344,25 @@ paths:
           description: Created
         "400":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/source-document-not-found'
           description: Not Found
         "409":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/skipDedup-requested-but-a-row-with-this-content-already-exists-in-the-destination-bucket'
           description: Conflict
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/internal-error'
           description: Internal Server Error
@@ -388,13 +388,13 @@ paths:
           description: OK
         "404":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -440,25 +440,25 @@ paths:
           description: OK
         "400":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "409":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -485,13 +485,13 @@ paths:
           description: OK
         "404":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -516,43 +516,43 @@ paths:
           description: OK
         "400":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Bad Request
         "404":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "408":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Request Timeout
         "409":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
         "413":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Request Entity Too Large
         "422":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.RejectedContentResponse'
           description: Unprocessable Entity
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -578,13 +578,13 @@ paths:
           description: OK
         "404":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/json:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
@@ -626,25 +626,25 @@ paths:
           description: Not Modified
         "403":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Forbidden
         "404":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "500":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
         "503":
           content:
-            application/octet-stream:
+            application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Service Unavailable

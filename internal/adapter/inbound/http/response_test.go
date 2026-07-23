@@ -66,3 +66,12 @@ func TestStreamBlob_NeverWritesPastDeclaredSize(t *testing.T) {
 		t.Fatalf("body = %q, want exactly the declared 3 bytes", got)
 	}
 }
+
+func TestWriteJSONErrorDeclaresJSONContentType(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSONError(w, http.StatusBadRequest, "bad input")
+
+	if got := w.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want JSON with UTF-8 charset", got)
+	}
+}
