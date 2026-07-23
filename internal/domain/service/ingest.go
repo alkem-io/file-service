@@ -159,7 +159,7 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 		// opaque decode/load error. Capture the source error independently so
 		// a client disconnect, over-limit read, or idle timeout is never
 		// misreported as corrupt image content.
-		src := &readFaultCapture{r: br}
+		src, fault := captureReadFaults(br)
 		result, terr := s.Processor.TranscodeStream(src, cw, mimeType)
 		if terr != nil {
 			su.Discard()
@@ -167,9 +167,9 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 				s.logIngest("transcode stage write failed", mimeType, cw.n, cw.writeErr)
 				return nil, fmt.Errorf("stage write: %w", cw.writeErr)
 			}
-			if src.err != nil {
-				s.logIngestTransport("transcode transport failure", mimeType, cw.n, src.err)
-				return nil, src.err
+			if fault.err != nil {
+				s.logIngestTransport("transcode transport failure", mimeType, cw.n, fault.err)
+				return nil, fault.err
 			}
 			if errors.Is(terr, port.ErrPixelBudgetExceeded) {
 				s.logIngest("rejected: pixel budget", mimeType, cw.n, terr)
@@ -217,13 +217,13 @@ func (s *FileService) measureStagedImageDims(su *StagedUpload) {
 		s.logIngest("pass-through image header unavailable; leaving dims for sweep", su.MimeType, su.Size, err)
 		return
 	}
-	src := &readFaultCapture{r: io.NewSectionReader(ra, 0, size)}
+	src, fault := captureReadFaults(io.NewSectionReader(ra, 0, size))
 	w, h, measureErr := s.Processor.MeasureDims(src, su.MimeType)
 	switch {
-	case measureErr != nil && src.err != nil:
+	case measureErr != nil && fault.err != nil:
 		s.logIngest("pass-through image stage read faulted; leaving dims for sweep",
-			su.MimeType, su.Size, src.err)
-	case measureErr != nil && src.sawEOF && src.read < size:
+			su.MimeType, su.Size, fault.err)
+	case measureErr != nil && fault.sawEOF && fault.read < size:
 		s.logIngest("pass-through image stage short-read; leaving dims for sweep",
 			su.MimeType, su.Size, measureErr)
 	case measureErr != nil:

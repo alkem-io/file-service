@@ -20,6 +20,18 @@ func oneImageRow() []model.Document {
 	return []model.Document{{ID: uuid.New(), ExternalID: "img1", MimeType: "image/jpeg"}}
 }
 
+func TestCaptureReadFaults_PreservesSeekSupport(t *testing.T) {
+	seekable, _ := captureReadFaults(bytes.NewReader([]byte("image")))
+	if _, ok := seekable.(io.Seeker); !ok {
+		t.Fatal("fault capture hid io.Seeker from a seekable image source")
+	}
+
+	nonSeekable, _ := captureReadFaults(io.LimitReader(bytes.NewReader([]byte("image")), 5))
+	if _, ok := nonSeekable.(io.Seeker); ok {
+		t.Fatal("fault capture falsely advertised io.Seeker for a non-seekable source")
+	}
+}
+
 // A successful measure persists the dims via the compare-and-set and counts measured.
 func TestRunDimsBackfill_Measured(t *testing.T) {
 	w, h := 800, 600

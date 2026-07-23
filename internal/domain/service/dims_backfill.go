@@ -23,25 +23,54 @@ type DimsBackfillSummary struct {
 // dimsBackfillPageSize bounds one keyset page so a large first-run legacy set never loads whole.
 const dimsBackfillPageSize = 500
 
-// readFaultCapture records transport errors plus byte/EOF state from the wrapped reader, so a
-// caller can tell a storage fault or short read from a decode failure after the decoder returns one
-// opaque error.
-type readFaultCapture struct {
-	r      io.Reader
+// readFaultState records transport errors plus byte/EOF state, so a caller can tell a storage
+// fault or short read from a decode failure after the decoder returns one opaque error.
+type readFaultState struct {
 	err    error
 	read   int64
 	sawEOF bool
 }
 
+func (s *readFaultState) observe(n int, err error) {
+	s.read += int64(n)
+	if errors.Is(err, io.EOF) {
+		s.sawEOF = true
+	} else if err != nil {
+		s.err = err
+	}
+}
+
+type readFaultCapture struct {
+	r     io.Reader
+	state *readFaultState
+}
+
 func (c *readFaultCapture) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	c.read += int64(n)
-	if errors.Is(err, io.EOF) {
-		c.sawEOF = true
-	} else if err != nil {
-		c.err = err
-	}
+	c.state.observe(n, err)
 	return n, err
+}
+
+// readSeekFaultCapture preserves io.Seeker when the storage/staging reader provides it. Some image
+// loaders (notably AVIF) require random access; hiding Seek would make libvips treat a local file as
+// a bounded non-seekable pipe and could turn a valid image into a false permanent decode failure.
+type readSeekFaultCapture struct {
+	io.ReadSeeker
+	state *readFaultState
+}
+
+func (c *readSeekFaultCapture) Read(p []byte) (int, error) {
+	n, err := c.ReadSeeker.Read(p)
+	c.state.observe(n, err)
+	return n, err
+}
+
+func captureReadFaults(r io.Reader) (io.Reader, *readFaultState) {
+	state := new(readFaultState)
+	if rs, ok := r.(io.ReadSeeker); ok {
+		return &readSeekFaultCapture{ReadSeeker: rs, state: state}, state
+	}
+	return &readFaultCapture{r: r, state: state}, state
 }
 
 // RunDimsBackfill populates image dimensions for LEGACY image rows whose content_metadata is still
@@ -157,22 +186,22 @@ func (s *FileService) backfillOneDims(ctx context.Context, doc model.Document, s
 	// {_decodeFailed:true} sentinel — excluding a perfectly good image from this and every future
 	// sweep, with nothing that would ever retry it. Only a real decode failure earns the sentinel;
 	// an I/O fault is a skip, retried on the next sweep-dims run.
-	src := &readFaultCapture{r: rc}
+	src, fault := captureReadFaults(rc)
 	w, h, measureErr := s.Processor.MeasureDims(src, doc.MimeType)
 
 	switch {
-	case measureErr != nil && src.err != nil:
+	case measureErr != nil && fault.err != nil:
 		s.Logger.Warn("dims-backfill: storage read faulted mid-header; leaving the row for a future run",
-			zap.String("externalID", doc.ExternalID), zap.Error(src.err))
+			zap.String("externalID", doc.ExternalID), zap.Error(fault.err))
 		sum.Skipped++
-	case measureErr != nil && src.sawEOF && src.read < size:
+	case measureErr != nil && fault.sawEOF && fault.read < size:
 		// The opened handle reported `size`, but delivered fewer bytes before a clean EOF. This is a
 		// storage race/fault, not proof that the immutable blob itself is undecodable. Only use this
 		// signal when EOF was actually observed: a successful header-only decoder intentionally
 		// stops well before size and must not be considered short.
 		s.Logger.Warn("dims-backfill: storage short-read mid-header; leaving the row for a future run",
 			zap.String("externalID", doc.ExternalID),
-			zap.Int64("read", src.read),
+			zap.Int64("read", fault.read),
 			zap.Int64("expectedSize", size))
 		sum.Skipped++
 	case measureErr != nil:

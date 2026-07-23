@@ -110,6 +110,23 @@ func TestResponseWriteDeadline_BoundsImplicitFinalResponse(t *testing.T) {
 	}
 }
 
+func TestResponseWriteDeadline_DoesNotFlushWhilePanicking(t *testing.T) {
+	w := &deadlineResponseWriter{}
+	handler := responseWriteDeadline(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected downstream panic to propagate")
+		}
+		if w.flushes != 0 || len(w.deadlines) != 0 {
+			t.Fatalf("panic unwind flushed=%d deadlines=%v, want no response commit", w.flushes, w.deadlines)
+		}
+	}()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
 func TestWriteIdleGuard_ReachesTransportThroughStatusWriter(t *testing.T) {
 	transport := &deadlineResponseWriter{}
 	w := &statusWriter{ResponseWriter: transport}

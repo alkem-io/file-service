@@ -24,8 +24,10 @@ func responseWriteDeadline(next http.Handler) http.Handler {
 			controller:     http.NewResponseController(w),
 			idle:           responseWriteIdleTimeout,
 		}
-		defer dw.finish()
 		next.ServeHTTP(dw, r)
+		// Only flush after a normal return. If next panics, unwinding must reach the outer recovery
+		// middleware before anything commits net/http's implicit 200 response.
+		dw.finish()
 	})
 }
 
