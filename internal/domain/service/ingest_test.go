@@ -141,6 +141,22 @@ func TestStageUpload_TranscodeClientAbortIsTransportFailure(t *testing.T) {
 	assertSingleAbortedStage(t, storage)
 }
 
+func TestStageUpload_TranscodeStageWriteFailureIsInfrastructureFailure(t *testing.T) {
+	writeErr := errors.New("disk full")
+	storage := &mockStorage{stageWriteErr: writeErr}
+	svc := newIngestService(storage, &mockRepo{})
+	svc.Processor = &mockProcessor{detectMIME: "image/jpeg"}
+
+	_, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("err = %v, want stage write error", err)
+	}
+	if errors.Is(err, ErrImageProcessing) {
+		t.Fatalf("stage write failure was misclassified as ErrImageProcessing: %v", err)
+	}
+	assertSingleAbortedStage(t, storage)
+}
+
 // (d) Trailing bucket-policy violation (fields after the file part,
 // research R4): rejection + abort, no publish.
 func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {

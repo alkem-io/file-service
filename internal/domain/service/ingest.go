@@ -155,7 +155,11 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 		result, terr := s.Processor.TranscodeStream(src, cw, mimeType)
 		if terr != nil {
 			su.Discard()
-			if cw.writeErr == nil && src.err != nil {
+			if cw.writeErr != nil {
+				s.logIngest("transcode stage write failed", mimeType, cw.n, cw.writeErr)
+				return nil, fmt.Errorf("stage write: %w", cw.writeErr)
+			}
+			if src.err != nil {
 				s.logIngestTransport("transcode transport failure", mimeType, cw.n, src.err)
 				return nil, src.err
 			}
