@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,9 +15,12 @@ import (
 // recordingOutbox is a fake BackupOutboxRepo that records which transactional path ran and the
 // priority it was handed — enough to assert the flag/temporary-location routing (FR-001).
 type recordingOutbox struct {
-	createCalls  int
-	updateCalls  int
-	lastPriority int16
+	createCalls      int
+	updateCalls      int
+	promoteCalls     int
+	lastPriority     int16
+	deletePendingFor []string
+	deletePendingN   int64
 }
 
 var _ port.BackupOutboxRepo = (*recordingOutbox)(nil)
@@ -27,14 +31,68 @@ func (o *recordingOutbox) CreateWithOutbox(_ context.Context, _ model.Document, 
 	return uuid.New(), nil
 }
 
-func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _, _ string, _ int, _ model.ContentMetadata, priority int16) error {
+func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, _ model.ContentMetadata, priority int16) error {
 	o.updateCalls++
+	o.lastPriority = priority
+	return nil
+}
+
+func (o *recordingOutbox) PromoteWithOutbox(_ context.Context, _ model.Document, _ uuid.UUID, _ string, priority int16) error {
+	o.promoteCalls++
 	o.lastPriority = priority
 	return nil
 }
 
 func (o *recordingOutbox) PruneBackupOutbox(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (o *recordingOutbox) DeletePendingByHash(_ context.Context, externalID string) (int64, error) {
+	o.deletePendingFor = append(o.deletePendingFor, externalID)
+	return o.deletePendingN, nil
+}
+
+// When the last reference to a blob is deleted and the producer is ON, all pending hints for the
+// now-missing hash are dropped. With the producer OFF only the outbox step is skipped.
+func TestCleanupOrphanedBlobDropsPendingOutboxRows(t *testing.T) {
+	// The counter advances by the exact number of rows removed, including sibling hints.
+	outbox := &recordingOutbox{deletePendingN: 2}
+	storage := &mockStorage{data: []byte("x")}
+	s := &FileService{Storage: storage, Outbox: outbox, Logger: nopLogger}
+	before := backupOutboxOrphaned.Value()
+	s.cleanupOrphanedBlob(context.Background(), "somehash")
+	if !storage.deleted {
+		t.Fatal("the orphaned blob must be deleted")
+	}
+	if len(outbox.deletePendingFor) != 1 || outbox.deletePendingFor[0] != "somehash" {
+		t.Fatalf("pending outbox rows not dropped for hash: got %v", outbox.deletePendingFor)
+	}
+	if got := backupOutboxOrphaned.Value() - before; got != 2 {
+		t.Fatalf("orphan-hygiene counter must advance by the rows removed (2), got +%d", got)
+	}
+
+	// Producer OFF (nil Outbox): only the outbox step is skipped — the blob delete path is
+	// unchanged, so the blob must STILL be deleted (and no panic on the nil Outbox).
+	offStorage := &mockStorage{data: []byte("x")}
+	sOff := &FileService{Storage: offStorage, Logger: nopLogger}
+	sOff.cleanupOrphanedBlob(context.Background(), "somehash")
+	if !offStorage.deleted {
+		t.Fatal("producer off must not change the blob-delete path — the blob must still be deleted")
+	}
+
+	// Blob delete FAILING must keep the row: while the blob exists it is still backable.
+	// (deletePendingN is irrelevant here — DeletePendingByHash is never reached; the failed
+	// Storage.Delete returns first, which is exactly what the assertion below proves.)
+	failing := &recordingOutbox{}
+	sFail := &FileService{
+		Storage: &mockStorage{data: []byte("x"), deleteErr: errors.New("fs busy")},
+		Outbox:  failing,
+		Logger:  nopLogger,
+	}
+	sFail.cleanupOrphanedBlob(context.Background(), "somehash")
+	if len(failing.deletePendingFor) != 0 {
+		t.Fatal("outbox row must be kept when the blob delete failed (blob still backable)")
+	}
 }
 
 func TestPriorityForMime(t *testing.T) {
@@ -128,6 +186,47 @@ func TestWriteReplaceRouting(t *testing.T) {
 		_ = s.writeReplace(context.Background(), model.Document{TemporaryLocation: true}, uuid.New(), "h", "image/jpeg", 5, model.ContentMetadata{})
 		if repo.updateFileCalls != 1 || ob.updateCalls != 0 {
 			t.Fatalf("temporary must NOT enqueue: repo=%d outbox=%d", repo.updateFileCalls, ob.updateCalls)
+		}
+	})
+}
+
+func TestMetadataPromotionRouting(t *testing.T) {
+	current := model.Document{
+		ID: uuid.New(), ExternalID: "hash", MimeType: "application/x-yjs",
+		Size: 42, TemporaryLocation: true, Version: 3,
+	}
+	bucket := uuid.New()
+
+	t.Run("temporary-to-permanent-enqueues-atomically", func(t *testing.T) {
+		repo, ob := &mockRepo{doc: current}, &recordingOutbox{}
+		s := &FileService{
+			Repo: repo, Outbox: ob, HotMimePrefixes: []string{"application/x-yjs"}, Logger: nopLogger,
+		}
+		before := backupOutboxEnqueued.Value()
+		if _, err := s.UpdateDocumentMetadata(context.Background(), current, bucket, false, "final.yjs"); err != nil {
+			t.Fatalf("UpdateDocumentMetadata: %v", err)
+		}
+		if ob.promoteCalls != 1 {
+			t.Fatalf("promotion calls = %d, want 1", ob.promoteCalls)
+		}
+		if ob.lastPriority != 1 {
+			t.Fatalf("promotion priority = %d, want hot priority 1", ob.lastPriority)
+		}
+		if got := backupOutboxEnqueued.Value() - before; got != 1 {
+			t.Fatalf("promotion enqueue counter = +%d, want +1", got)
+		}
+	})
+
+	t.Run("already-permanent-metadata-update-does-not-enqueue", func(t *testing.T) {
+		permanent := current
+		permanent.TemporaryLocation = false
+		repo, ob := &mockRepo{doc: permanent}, &recordingOutbox{}
+		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
+		if _, err := s.UpdateDocumentMetadata(context.Background(), permanent, bucket, false, "renamed.yjs"); err != nil {
+			t.Fatalf("UpdateDocumentMetadata: %v", err)
+		}
+		if ob.promoteCalls != 0 {
+			t.Fatalf("ordinary metadata update enqueued %d times, want 0", ob.promoteCalls)
 		}
 	})
 }

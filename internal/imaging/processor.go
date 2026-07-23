@@ -93,10 +93,15 @@ func (p *Processor) Process(content []byte, mimeType string) (port.ProcessResult
 	}
 }
 
-// MeasureDims is the header-only port method for the lazy-backfill path.
+// MeasureDims is the header-only port method for the offline dimension sweep.
 // MUST NOT pixel-decode or re-encode (FR-018).
-func (p *Processor) MeasureDims(content []byte, _ string) (*int, *int, error) {
-	img, err := vips.NewImageFromBuffer(content)
+func (p *Processor) MeasureDims(r io.Reader, _ string) (*int, *int, error) {
+	// Streamed, header-only: AccessSequential + a VipsSource-backed reader load (same primitive as
+	// TranscodeStream) so libvips reads only the header for W/H and never buffers the whole image —
+	// no pixel decode (FR-018), constant memory even for a large legacy blob.
+	params := vips.NewImportParams()
+	params.Access.Set(vips.AccessSequential)
+	img, err := vips.LoadImageFromReader(r, params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vips load: %w", err)
 	}

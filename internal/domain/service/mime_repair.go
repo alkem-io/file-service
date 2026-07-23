@@ -3,10 +3,12 @@ package service
 import (
 	"bytes"
 	"context"
+	"io"
 
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
+	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // MimeRepairSummary reports what the boot-time MIME repair did. The caller
@@ -19,6 +21,21 @@ type MimeRepairSummary struct {
 }
 
 var zipMagic = []byte("PK")
+
+// mimeSniffPrefixLen bounds the prefix read for the magic-byte check — far more than the 2-byte
+// zipMagic, but a fixed cap so a large blob is never buffered whole just to inspect its head.
+const mimeSniffPrefixLen = 512
+
+// readBlobPrefix reads at most n leading bytes of a blob over a stream (never buffering the whole
+// object into memory), enough for a magic-byte sniff.
+func readBlobPrefix(s port.StoragePort, externalID string, n int64) ([]byte, error) {
+	rc, _, err := s.ReadStream(externalID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(io.LimitReader(rc, n))
+}
 
 // RunMimeRepair heals documents corrupted by the pre-fix replace path
 // (spec 019 FR-006): office-named rows stored with a generic MIME type.
@@ -48,7 +65,10 @@ func (s *FileService) RunMimeRepair(ctx context.Context) MimeRepairSummary {
 			continue
 		}
 
-		content, err := s.Storage.Read(doc.ExternalID)
+		// Only the leading bytes are needed (non-empty check + zip magic) — read a bounded prefix
+		// over a stream rather than buffering the whole blob, so a large office doc can't spike RSS
+		// during the boot-time repair sweep.
+		content, err := readBlobPrefix(s.Storage, doc.ExternalID, mimeSniffPrefixLen)
 		if err != nil {
 			sum.Errors++
 			s.Logger.Error("mime-repair: content read failed",

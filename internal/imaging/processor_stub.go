@@ -37,15 +37,16 @@ func (p *Processor) Process(content []byte, mimeType string) (port.ProcessResult
 	return port.ProcessResult{Content: content, MimeType: mimeType, Measured: false}, nil
 }
 
-// MeasureDims reports "no decoder available" as (nil, nil, nil);
-// backfillIfNeeded skips the persist so legacy rows remain {} and a future
+// MeasureDims reports "no decoder available" as (nil, nil, nil); the dims
+// backfill sweep skips the persist so legacy rows remain {} and a future
 // vips environment can retry.
-func (p *Processor) MeasureDims(_ []byte, _ string) (*int, *int, error) {
+func (p *Processor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
 	return nil, nil, nil
 }
 
 // TranscodeStream (no-vips stub): pass-through copy, no decoding available.
-// Dims unreported (Measured=false) per the lazy-backfill convention.
+// Dims are unreported (Measured=false), so the row remains eligible for a
+// future vips-capable sweep.
 func (p *Processor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err

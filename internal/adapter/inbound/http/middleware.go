@@ -161,3 +161,9 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap keeps optional transport features reachable through the request-logging wrapper,
+// including http.ResponseController's read/write deadline support.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

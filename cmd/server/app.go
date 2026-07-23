@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +26,49 @@ import (
 	"github.com/alkem-io/file-service/internal/imaging"
 	"github.com/alkem-io/file-service/internal/resilience"
 )
+
+// appBase is the wiring every subcommand needs: a logger, the loaded config, and a DB pool.
+type appBase struct {
+	logger *zap.Logger
+	cfg    *config.Config
+	pool   *pgxpool.Pool
+}
+
+// setupBase builds the shared bootstrap (logger → config → DB pool) and returns it with a cleanup
+// func to defer. On any failure it reports and returns (nil, nil, nonzero-code); callers return
+// that code. Shared by `serve` and every sweep subcommand so they can't drift on bootstrap.
+func setupBase() (*appBase, func(), int) {
+	return setupBaseWith(config.Load)
+}
+
+func setupSweepBase() (*appBase, func(), int) {
+	return setupBaseWith(config.LoadForSweep)
+}
+
+func setupBaseWith(loadConfig func() (*config.Config, error)) (*appBase, func(), int) {
+	logger, err := config.NewLogger()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
+		return nil, nil, 1
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		logger.Error("failed to load config", zap.Error(err))
+		_ = logger.Sync()
+		return nil, nil, 1
+	}
+	pool, err := connectDatabase(context.Background(), cfg.AlkemioDB)
+	if err != nil {
+		logger.Error("failed to connect to database", zap.Error(err))
+		_ = logger.Sync()
+		return nil, nil, 1
+	}
+	cleanup := func() {
+		pool.Close()
+		_ = logger.Sync()
+	}
+	return &appBase{logger: logger, cfg: cfg, pool: pool}, cleanup, 0
+}
 
 func connectDatabase(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, cfg.ConnString())
@@ -138,13 +184,16 @@ func newHTTPServer(port int, handler http.Handler) *http.Server {
 		Handler:   handler,
 		Protocols: protocols,
 		HTTP2:     &http.HTTP2Config{MaxConcurrentStreams: 100},
-		// Spec 020 (FR-009): the global ReadTimeout is replaced by a header
-		// deadline + per-request read deadlines. Upload handlers extend the
-		// deadline on progress (progressReader); every other route gets a
-		// fixed 30 s read deadline from the router middleware, preserving
-		// the pre-020 behavior.
+		// Spec 020 (FR-009): ordinary request bodies retain the fixed 30 s
+		// read cap; upload handlers override it with a rolling deadline on
+		// every read (progressReader). WriteTimeout must be zero because it is
+		// an absolute deadline starting after request headers, so it would
+		// kill healthy long uploads/downloads based on duration alone. Blob
+		// and ordinary responses use a lazy rolling write-idle deadline in
+		// the HTTP router instead.
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1MB
 	}
@@ -174,6 +223,61 @@ func runMimeRepair(ctx context.Context, fileSvc *service.FileService, logger *za
 		zap.Int("unrecoverable", sum.Unrecoverable),
 		zap.Int("skipped_not_office", sum.SkippedNotOffice),
 		zap.Int("errors", sum.Errors))
+}
+
+// runSweepDims runs the image-dimension backfill ONCE and exits — the one-shot `sweep-dims`
+// subcommand, invoked as a k8s Job after a deploy to drain the finite legacy set (spec 019/020).
+// At runtime the sweep never authorizes (it only reads storage + writes content_metadata), so it
+// builds the service with a nil auth port and no NATS. LoadForSweep validates the shared storage,
+// database, imaging, and ingest config without requiring an unused auth transport. SIGINT/SIGTERM
+// cancels the sweep for a clean Job termination; exit code is dimsJobExitCode.
+func runSweepDims() int {
+	base, cleanup, code := setupSweepBase()
+	if base == nil {
+		return code
+	}
+	defer cleanup()
+	logger := base.logger
+
+	fileSvc := buildFileService(base.pool, nil, base.cfg, logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("dims-backfill job starting")
+	sum := fileSvc.RunDimsBackfill(ctx)
+	if sum.Aborted {
+		logger.Warn("dims-backfill job ENDED EARLY — rerun to finish",
+			zap.Int("measured", sum.Measured),
+			zap.Int("decode_failed", sum.DecodeFailed),
+			zap.Int("skipped", sum.Skipped))
+	} else {
+		logger.Info("dims-backfill job complete",
+			zap.Int("measured", sum.Measured),
+			zap.Int("decode_failed", sum.DecodeFailed),
+			zap.Int("skipped", sum.Skipped))
+	}
+	return dimsJobExitCode(sum)
+}
+
+// dimsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is
+// unit-testable (mirrors file-backup-service's backfillVerdict, and the same reasoning). Exit 1 ONLY
+// when the pass ENDED EARLY (Aborted: a page-scan error or a shutdown signal) — the one hard failure
+// where the scan itself broke, so a rerun is warranted. Everything else is exit 0.
+//
+// Skips do NOT gate the exit code, because an all-skipped pass is genuinely AMBIGUOUS and the exit
+// code cannot tell the two cases apart: it can be the sweep's convergent tail (a handful of rows
+// whose blobs are permanently gone / reliably panic libvips — they will skip on EVERY future run,
+// so failing on them means the Job can never reach a clean exit 0 and an operator's rerun loop never
+// terminates), OR a transient storage/DB outage (skips everything, but self-heals next run). The
+// operator running the Job reads the logged measured/decode_failed/skipped summary to tell them
+// apart — a heuristic exit code would be wrong in one direction or the other. (This is exactly the
+// all-skipped ruling from file-backup-service's backfillVerdict.)
+func dimsJobExitCode(sum service.DimsBackfillSummary) int {
+	if sum.Aborted {
+		return 1
+	}
+	return 0
 }
 
 // runOutboxPrune periodically drops consumer-finished backup-outbox rows older than the

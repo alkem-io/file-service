@@ -1,0 +1,129 @@
+# One-shot image-dimension backfill (spec 019/020). Run MANUALLY after a deploy to populate
+# imageWidth/imageHeight on legacy image rows whose content_metadata is still empty (new writes
+# measure dims inline; this drains the finite pre-existing set). It is NOT part of the auto-applied
+# deployment — apply it deliberately, and delete/recreate it to re-run:
+#
+#   kubectl -n <ns> apply -f 35-file-service-sweep-dims-job.yaml
+#   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-dims   # read measured/decode_failed/skipped
+#
+# TWO placeholders are FAIL-CLOSED — the pod will not start / not schedule until you set them, so a
+# verbatim apply can never run the wrong build or the wrong volume (this Job has no `kubectl set
+# image` / overlay automation, and the backfill is IRREVERSIBLE — a decode failure persists a
+# permanent {_decodeFailed:true} sentinel no later run retries):
+#   - image:      pin to the SAME SHA-tag the TARGET namespace's file-service deployment runs. Do NOT
+#                 use :latest — with no set-image step it would run a floating, possibly-unshipped
+#                 build whose decode verdicts would be baked into the DB permanently.
+#   - claimName:  MATCH the claimName the TARGET env's file-service deployment mounts — read it
+#                 straight off that deployment, don't guess. Known at time of writing: dev
+#                 file-storage-pvc2 (25-), test file-storage-pvc (26-), prod file-storage-pvc
+#                 (infra-ops base file-service deployment).
+#
+# Storage is an NFS ReadWriteMany PVC (accessMode declared in dev-orchestration / infra-ops, not in
+# this repo), so the sweep pod can mount it on ANY node — the same node as the serving pod or a
+# different one; RWX has no single-mounter/co-location constraint. The sweep reads blobs directly
+# from the mounted volume.
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: alkemio-file-service-sweep-dims
+  # DISTINCT app label — deliberately NOT `alkemio-file-service`, so this non-serving pod is never
+  # picked up by the file-service Service selector (30-...-service.yaml selects app:
+  # alkemio-file-service). A sweep pod enrolled as a Service endpoint would refuse the in-cluster
+  # file-service traffic routed to it (it has no HTTP listener).
+  labels:
+    app: alkemio-file-service-sweep-dims
+    component: sweep-dims
+spec:
+  # ENDED-EARLY (a page-scan error / SIGTERM) exits 1; retry a couple of times then stop. An
+  # all-skipped pass exits 0 (ambiguous — a convergent orphan tail or a transient outage — read the
+  # logged counts to tell them apart), so backoffLimit is not a substitute for reading the summary.
+  backoffLimit: 2
+  # Reap the finished Job pod after an hour so a re-run isn't blocked by the old object.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      # The POD-template labels are what the file-service Service selects on — must NOT include
+      # app: alkemio-file-service (see the header labels comment).
+      labels:
+        app: alkemio-file-service-sweep-dims
+        component: sweep-dims
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: alkemio-file-service-sweep-dims
+          # FAIL-CLOSED PLACEHOLDER — replace with the deployment's SHA-tagged image before applying
+          # (see header). Left as-is, the pull fails loudly (ImagePullBackOff) rather than silently
+          # running :latest.
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:SET-ME-TO-DEPLOYMENT-SHA
+          imagePullPolicy: Always
+          args: ["sweep-dims"]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ALKEMIO_DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_HOST
+            - name: ALKEMIO_DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_PORT
+            - name: ALKEMIO_DATABASE_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_USER
+            - name: ALKEMIO_DATABASE_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_PASSWORD
+            - name: ALKEMIO_DATABASE_NAME
+              value: "alkemio"
+            - name: LOCAL_STORAGE_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: LOCAL_STORAGE_PATH
+            - name: STORAGE_TYPE
+              value: "local"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: TMPDIR
+              value: /tmp
+          volumeMounts:
+            - name: file-storage
+              mountPath: /storage
+            # Keep the root filesystem immutable while giving libvips and the Go runtime an explicit,
+            # bounded scratch location if they need one.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # Header-only decode (no pixel pass), with an explicit bounded ceiling.
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: file-storage
+          persistentVolumeClaim:
+            # FAIL-CLOSED PLACEHOLDER — set to the TARGET env's file-service PVC before applying
+            # (dev: file-storage-pvc2, test/prod: file-storage-pvc; see header). Left as-is the pod
+            # stays Pending on an unbound claim rather than mounting the wrong env's volume.
+            claimName: set-me-to-env-file-storage-pvc

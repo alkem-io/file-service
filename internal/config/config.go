@@ -124,12 +124,28 @@ type NATSConfig struct {
 // transport is auto-detected: AUTH_SERVICE_URL selects h2c and wins over
 // NATS_URL; one of the two must be set.
 func Load() (*Config, error) {
+	return load(true)
+}
+
+// LoadForSweep loads the storage, database, imaging, and ingest settings used by one-shot
+// maintenance commands without requiring an authentication transport. Sweeps never serve requests
+// or authorize callers, so requiring AUTH_SERVICE_URL or NATS_URL would add an unused deployment
+// dependency.
+func LoadForSweep() (*Config, error) {
+	return load(false)
+}
+
+func load(requireAuthTransport bool) (*Config, error) {
 	natsURL := getenv("NATS_URL", "")
 	authServiceURL := getenv("AUTH_SERVICE_URL", "")
 
-	authTransport, err := resolveAuthTransport(authServiceURL, natsURL)
-	if err != nil {
-		return nil, err
+	var authTransport string
+	if requireAuthTransport {
+		var err error
+		authTransport, err = resolveAuthTransport(authServiceURL, natsURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	dbCfg, err := loadDatabaseConfig()

@@ -38,9 +38,10 @@ digests). `Commit` performs the backend's publish step; `Abort` is safe to
 call after failed `Commit` and is deferred on every path.
 
 **Rationale**: backend-neutral per the spec's no-atomic-rename assumption —
-FS implements Commit as stat-dedup + rename (reusing today's temp+rename
-code, which already exists in `local.Save`); a future S3 adapter implements
-it as complete-multipart + server-side copy, with Abort = abort-multipart.
+FS implements Commit as a no-overwrite hard link (with O_EXCL create+copy
+fallback), so concurrent identical commits cannot overwrite each other; a
+future S3 adapter implements it as complete-multipart + server-side copy,
+with Abort = abort-multipart.
 Putting the hash inside the stage keeps the identity computation in one
 place per backend pipeline and lets Commit dedup without re-reading.
 
@@ -104,27 +105,31 @@ sequential) reader load, so the composition probes the buffered head
 (≤64 KiB — added to the fixed budget) for dims/orientation, picks
 sequential vs materialized access, and reads dims post-AutoRotate from the
 ImageRef; (2) BMP and AVIF have no streaming saver in the library — they
-join GIF/SVG as byte-identical pass-through, dims via the existing lazy
-backfill (rotated BMP/AVIF lose eager canonicalization; vanishingly rare,
-self-heals on first read); (3) HEIC→JPEG is now a single encode at Q82
+join GIF/SVG as byte-identical pass-through, with dims measured by a
+header-only read of the completed stage before commit (rotated BMP/AVIF lose
+eager canonicalization; vanishingly rare); (3) HEIC→JPEG is now a single encode at Q82
 baseline (the buffered path double-encoded Q100→Q82 — transcoded-class
 output re-baselined per amended SC-002).
 
 ## R6 — Timeout architecture
 
-**Decision**: Replace the server-wide `ReadTimeout: 30s` with
-`ReadHeaderTimeout: 10s`; introduce `progressReader` in the HTTP adapter
-that wraps upload bodies and calls
+**Decision**: Set `ReadHeaderTimeout: 10s` while retaining the server-wide
+`ReadTimeout: 30s` for ordinary request bodies; introduce `progressReader` in
+the HTTP adapter that wraps upload bodies and calls
 `http.NewResponseController(w).SetReadDeadline(now+idle)` after every
-successful `Read` (idle = `UPLOAD_IDLE_TIMEOUT_MS`, default 30 000). A read
-that trips the deadline surfaces as the `stalled` ingest outcome. Non-upload
-handlers receive a fixed whole-request deadline via the same controller,
-preserving today's effective behavior.
+successful `Read` (idle = `UPLOAD_IDLE_TIMEOUT_MS`, default 30 000), extending
+the deadline while upload bytes keep arriving. A read that trips the deadline
+surfaces as the `stalled` ingest outcome.
 
 **Rationale**: progress-based semantics per the clarified FR-009; per-route
 deadline control is exactly what `ResponseController` exists for (Go ≥1.20),
-no middleware framework needed. The global `WriteTimeout: 60s` stays (uploads
-write small responses).
+no middleware framework needed. The server keeps a 30 s `ReadTimeout` for
+ordinary request bodies; upload reads continually extend it. Global
+`WriteTimeout` is disabled because it is absolute from request headers and
+would kill a healthy transfer based on total duration. The HTTP router instead
+arms a 30 s write-idle deadline lazily when a response begins and extends it on
+every write, bounding ordinary JSON responses without penalizing long uploads;
+streamed blob responses additionally refresh it immediately before each chunk.
 
 **Alternatives**: raising the global ReadTimeout — rejected in
 clarification (slowloris exposure scales with the cap).

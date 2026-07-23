@@ -31,3 +31,4 @@ vendor/
 
 # Local Claude Code state
 .claude/
+/server

@@ -56,10 +56,11 @@ func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, cont
 
 // UpdateFileWithOutbox rewrites a document's content fields AND enqueues a backup-outbox row for
 // the NEW externalID in ONE transaction (a replace = a new content hash = a new object to back
-// up). model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateFile does.
+// up). The update compare-and-sets expectedExternalID, and
+// model.ErrDuplicateKey / model.ErrDocumentNotFound are surfaced exactly as UpdateFile does.
 // The outbox breadcrumb: createdBy is null (unknown on a replace) and createdDate is enqueue time
 // (now) — the RPO-lag semantics the consumer's backlog gauge expects.
-func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error {
+func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, externalID, mimeType string, size int, contentMetadata model.ContentMetadata, priority int16) error {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
 		return err
@@ -71,7 +72,7 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := a.queries.WithTx(tx)
 
-	rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, externalID, mimeType, size, raw))
+	rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
@@ -98,10 +99,61 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, extern
 	return nil
 }
 
+// PromoteWithOutbox makes an already-stored temporary document permanent and enqueues its current
+// content in the same transaction. UpdateDocumentMetadata's version guard serializes promotion
+// with content replacement; content replacement also bumps version, so whichever commits first
+// forces the stale operation to retry with fresh temporary/content state.
+func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document, storageBucketID uuid.UUID, displayName string, priority int16) error {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := a.queries.WithTx(tx)
+
+	rows, err := q.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
+		ID:                uuidToPgx(current.ID),
+		StorageBucketId:   uuidToPgx(storageBucketID),
+		TemporaryLocation: false,
+		DisplayName:       displayName,
+		UpdatedDate:       timeToPgxNow(),
+		Version:           safeInt32(current.Version),
+	})
+	if err != nil {
+		if isUniqueViolation(err) {
+			return model.ErrDuplicateKey
+		}
+		return err
+	}
+	if rows == 0 {
+		return model.ErrDocumentNotFound
+	}
+	if err := q.EnqueueBackupOutbox(ctx, queries.EnqueueBackupOutboxParams{
+		FileId:      uuidToPgx(current.ID),
+		ExternalID:  current.ExternalID,
+		Priority:    priority,
+		CreatedBy:   uuidToPgxNullable(current.CreatedBy),
+		CreatedDate: timeToPgxNow(),
+		Size:        int64(current.Size),
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	a.notifyBackup(ctx)
+	return nil
+}
+
 // PruneBackupOutbox deletes `done` outbox rows older than the cutoff, keeping the shared outbox
 // bounded (SC-008). file-service owns the outbox DML; the durable record lives in the ledger.
 func (a *Adapter) PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error) {
 	return a.queries.PruneBackupOutboxDone(ctx, timeToPgx(olderThan))
+}
+
+// DeletePendingByHash implements port.BackupOutboxRepo (orphan hygiene — see the query doc).
+func (a *Adapter) DeletePendingByHash(ctx context.Context, externalID string) (int64, error) {
+	return a.queries.DeleteBackupOutboxPendingByHash(ctx, externalID)
 }
 
 // notifyBackup emits NOTIFY on the backup channel after a committed enqueue. Best-effort — it

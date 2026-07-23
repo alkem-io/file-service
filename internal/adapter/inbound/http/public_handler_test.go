@@ -29,6 +29,7 @@ type mockDocRepo struct {
 	deleteResult model.DeletedDocument
 	deleteErr    error
 	count        int
+	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
 	// Captured args from the most recent UpdateMetadata call.
 	updateMetadataCalls   int
@@ -41,7 +42,7 @@ type mockDocRepo struct {
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
-	// Lazy-backfill capture (US1).
+	// Dimension-backfill capture.
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
 	lastBackfillExternalID string
@@ -50,6 +51,7 @@ type mockDocRepo struct {
 }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+	m.getByIDCalls++
 	return m.doc, m.err
 }
 func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
@@ -66,16 +68,19 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetad
 	m.lastCreateContentMetadata = contentMetadata
 	return doc.ID, m.createErr
 }
-func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
+func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
 }
-func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) error {
+func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expectedExternalID string, metadata model.ContentMetadata) (bool, error) {
 	m.backfillCalls++
 	m.lastBackfillID = id
 	m.lastBackfillExternalID = expectedExternalID
 	m.lastBackfillPayload = metadata
-	return m.backfillErr
+	if m.backfillErr != nil {
+		return false, m.backfillErr
+	}
+	return true, nil
 }
 func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
 	m.updateMetadataCalls++
@@ -122,12 +127,43 @@ func (m *mockAuth) CheckPrivilege(_ context.Context, actorID, privilege, authPol
 }
 
 type mockStorage struct {
-	data    []byte
-	err     error
-	saveErr error
-	saved   []byte // captures the last Save/stage payload (replace-path rejection tests)
-	stages  []*httpMockStage
+	data       []byte
+	err        error
+	saveErr    error
+	saved      []byte // captures the last Save/stage payload (replace-path rejection tests)
+	stages     []*httpMockStage
+	streamBody io.ReadCloser // if set, ReadStream returns this (to inject a mid-stream read failure)
+	streamSize int64         // Content-Length ReadStream reports when streamBody is set
 }
+
+// failingReadCloser yields `head` then fails — a mid-stream backend read fault (NFS EIO/ESTALE).
+type failingReadCloser struct {
+	head []byte
+	pos  int
+}
+
+func (f *failingReadCloser) Read(p []byte) (int, error) {
+	if f.pos < len(f.head) {
+		n := copy(p, f.head[f.pos:])
+		f.pos += n
+		return n, nil
+	}
+	return 0, errors.New("backend read fault mid-stream")
+}
+func (f *failingReadCloser) Close() error { return nil }
+
+// failingResponseWriter accepts headers/status but fails every body Write — the client/worker
+// hung up mid-stream. (httptest.ResponseRecorder can't model this; its Write never fails.)
+type failingResponseWriter struct{ h http.Header }
+
+func (f *failingResponseWriter) Header() http.Header {
+	if f.h == nil {
+		f.h = http.Header{}
+	}
+	return f.h
+}
+func (f *failingResponseWriter) Write([]byte) (int, error) { return 0, errors.New("client went away") }
+func (f *failingResponseWriter) WriteHeader(int)           {}
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	m.saved = content
@@ -137,6 +173,20 @@ func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
 	return model.StoredFile{ExternalID: "hash", Size: len(content), Created: true}, nil
 }
 func (m *mockStorage) Read(_ string) ([]byte, error) { return m.data, m.err }
+
+// ReadStream mirrors Read's error contract for the streaming path: m.err (if set)
+// is returned as-is (tests set it to port.ErrInvalidKey / os.ErrNotExist / a generic
+// error to drive the handler's 400/404/500 mapping), else m.data is served over a
+// bytes reader.
+func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
+	if m.err != nil {
+		return nil, 0, m.err
+	}
+	if m.streamBody != nil {
+		return m.streamBody, m.streamSize, nil
+	}
+	return io.NopCloser(bytes.NewReader(m.data)), int64(len(m.data)), nil
+}
 func (m *mockStorage) Delete(_ string) error         { return nil }
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
@@ -184,6 +234,10 @@ func TestPublicHandler_Authorized(t *testing.T) {
 	}
 	if rr.Body.String() != "file-content" {
 		t.Errorf("body = %q, want %q", rr.Body.String(), "file-content")
+	}
+	// The streamed serve path must declare the size explicitly ("file-content" = 12 bytes).
+	if cl := rr.Header().Get("Content-Length"); cl != "12" {
+		t.Errorf("Content-Length = %q, want 12", cl)
 	}
 }
 
@@ -290,6 +344,9 @@ func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 }
 
 func (m *mockDocRepo) ListByMimeTypes(_ context.Context, _ []string) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockDocRepo) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
 	return nil, nil
 }
 func (m *mockDocRepo) UpdateMimeType(_ context.Context, _ uuid.UUID, _, _ string) (bool, error) {

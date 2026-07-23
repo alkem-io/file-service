@@ -1,7 +1,7 @@
 // Package service is the domain core of the file-service: document upload
 // (buffered and streaming), content replacement with MIME guarding, copy,
 // metadata update, delete with blob refcounting, authorization checks, and
-// the lazy content-metadata backfill. It orchestrates everything through the
+// the offline content-metadata sweep. It orchestrates everything through the
 // port interfaces and knows nothing about HTTP, Postgres, or libvips.
 package service
 
@@ -26,10 +26,9 @@ import (
 // processResultToContentMetadata translates the processor's output into the
 // typed ContentMetadata persisted on the row. Decision tree:
 //
-//   - non-image MIME → Populated=true, no dims (writes "{}" via the adapter,
-//     but Populated=true so the lazy-backfill skips this row)
+//   - non-image MIME → empty metadata (the image-only sweep excludes it)
 //   - image MIME, Measured=false → Populated=false (no decoder available;
-//     lazy-backfill or a future vips run can retry)
+//     a future vips-capable sweep can retry)
 //   - image MIME, dims present → Populated=true with dims
 //   - image MIME, Measured=true, no dims → Populated=true with DecodeFailed
 func processResultToContentMetadata(r port.ProcessResult, mimeType string) model.ContentMetadata {
@@ -39,7 +38,7 @@ func processResultToContentMetadata(r port.ProcessResult, mimeType string) model
 		return model.ContentMetadata{Populated: false}
 	}
 	if !r.Measured {
-		return model.ContentMetadata{} // Populated=false; lazy-backfill may retry
+		return model.ContentMetadata{} // Populated=false; the dimension sweep may retry
 	}
 	if r.ImageWidth != nil && r.ImageHeight != nil {
 		return model.ContentMetadata{
@@ -89,6 +88,10 @@ func (s *FileService) priorityForMime(mimeType string) int16 {
 var (
 	backupOutboxEnqueued = expvar.NewInt("file_backup_outbox_enqueued_total")
 	backupOutboxPruned   = expvar.NewInt("file_backup_outbox_pruned_total")
+	// Orphan-hygiene deletions are a third producer-side mutation of the outbox depth; count them
+	// like the other two so an operator reconciling backlog from /internal/debug/vars (enqueued −
+	// pruned − orphaned) stays accurate and a hygiene-firing spike is visible, not silent.
+	backupOutboxOrphaned = expvar.NewInt("file_backup_outbox_orphaned_total")
 )
 
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
@@ -111,13 +114,13 @@ func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta 
 // else the original Repo.UpdateFile. Same error semantics either way.
 func (s *FileService) writeReplace(ctx context.Context, doc model.Document, documentID uuid.UUID, externalID, mimeType string, size int, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
-		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
+		err := s.Outbox.UpdateFileWithOutbox(ctx, documentID, doc.ExternalID, doc.Version, externalID, mimeType, size, meta, s.priorityForMime(mimeType))
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
 		return err
 	}
-	return s.Repo.UpdateFile(ctx, documentID, externalID, mimeType, size, meta)
+	return s.Repo.UpdateFile(ctx, documentID, doc.ExternalID, doc.Version, externalID, mimeType, size, meta)
 }
 
 // PruneBackupOutbox drops consumer-finished outbox rows older than `retention`, keeping the
@@ -131,40 +134,6 @@ func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Dura
 		backupOutboxPruned.Add(n)
 	}
 	return n, err
-}
-
-// ServeResult contains file content and metadata for serving.
-type ServeResult struct {
-	Content  []byte
-	MimeType string
-	Document model.Document
-}
-
-// ServeFile looks up a document, checks authorization, and reads the file.
-func (s *FileService) ServeFile(ctx context.Context, documentID uuid.UUID, actorID string) (*ServeResult, error) {
-	doc, err := s.Repo.GetByID(ctx, documentID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := s.Auth.CheckPrivilege(ctx, actorID, "read", doc.AuthorizationID.String())
-	if err != nil {
-		return nil, fmt.Errorf("authorization check: %w", err)
-	}
-	if !result.Allowed {
-		return nil, ErrForbidden
-	}
-
-	content, err := s.Storage.Read(doc.ExternalID)
-	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
-	}
-
-	return &ServeResult{
-		Content:  content,
-		MimeType: doc.MimeType,
-		Document: doc,
-	}, nil
 }
 
 // CreateDocument ingests a complete buffer through the streaming pipeline
@@ -218,11 +187,9 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		return nil, err
 	}
 
-	// Lazy-backfill the source row when it's a legacy image with empty
-	// content_metadata so the copy carries dims to the destination row
-	// (FR-014, FR-018, SC-007 + SC-009).
-	s.backfillIfNeeded(ctx, &source)
-
+	// A legacy image source (or dedup destination) may have empty content_metadata; the copy simply
+	// inherits that, and the sweep-dims job (RunDimsBackfill) populates dims for both rows off-path
+	// (no libvips decode on a copy request — spec 019/020). Response omits dims until the sweep runs.
 	if !input.SkipDedup {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
 		if err != nil {
@@ -230,9 +197,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		}
 		if found {
 			existing.Reused = true
-			// The destination row may itself be legacy; backfill so the
-			// response carries dims for it too.
-			return s.backfillIfNeeded(ctx, existing), nil
+			return existing, nil
 		}
 	}
 
@@ -256,8 +221,8 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// Propagate the source's content_metadata verbatim — copy doesn't
 	// re-run Process, so dims, the {_decodeFailed:true} sentinel, and any
 	// forward-fit per-content-type fields must ride along from the source
-	// row. Source has been backfilled above when it was a legacy image row
-	// (FR-014).
+	// row. A legacy source with empty content_metadata copies that emptiness
+	// verbatim; the sweep-dims job populates both rows off the request path.
 	contentMetadata := source.ContentMetadata
 	return s.insertDocument(ctx, createInput, stored, source.MimeType, contentMetadata, source.ImageWidth, source.ImageHeight)
 }
@@ -407,12 +372,38 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		if delErr := s.Storage.Delete(deleted.ExternalID); delErr != nil {
-			s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", deleted.ExternalID), zap.Error(delErr))
-		}
+		s.cleanupOrphanedBlob(ctx, deleted.ExternalID)
 	}
 
 	return &deleted, nil
+}
+
+// cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), then
+// drops every pending backup hint for that hash: after the bytes are gone, all of those hints could
+// only 404. DeletePendingByHash guards the hash-wide deletion against the live file table, so a
+// concurrent re-upload committed before the statement blocks cleanup, while one committed after
+// its snapshot is invisible to (and untouched by) the DELETE. The pre-existing
+// count→Storage.Delete blob-GC race itself is unchanged; its proper fix is atomic GC.
+//
+// Both steps are best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending
+// row is caught by the consumer's 404→skip backstop. Outbox cleanup runs only after a successful
+// blob delete — while the blob exists, pending rows are still backable.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) {
+	if err := s.Storage.Delete(externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
+		return
+	}
+	if s.Outbox == nil {
+		return
+	}
+	if n, err := s.Outbox.DeletePendingByHash(ctx, externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to drop pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Error(err))
+	} else if n > 0 {
+		backupOutboxOrphaned.Add(n)
+		s.Logger.Info("cleanup: dropped pending outbox rows for deleted blob",
+			zap.String("externalID", externalID), zap.Int64("rows", n))
+	}
 }
 
 // StoreAndLink replaces file content for an existing document atomically.
@@ -444,7 +435,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 	br := bufio.NewReaderSize(r, sniffPrefixSize)
 	prefix, perr := br.Peek(sniffPrefixSize)
 	if perr != nil && !errors.Is(perr, io.EOF) && !errors.Is(perr, bufio.ErrBufferFull) {
-		s.logIngest("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
+		s.logIngestTransport("replace prefix read failed", normalizeMIME(doc.MimeType), int64(len(prefix)), perr)
 		return nil, fmt.Errorf("read replacement prefix: %w", perr)
 	}
 
@@ -506,6 +497,12 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 		if errors.Is(err, model.ErrDuplicateKey) {
 			return nil, ErrConflict
 		}
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			// The row existed before streaming. A zero-row compare-and-set
+			// therefore means it was deleted or its content changed while the
+			// request was in flight; neither permits a stale overwrite.
+			return nil, ErrConflict
+		}
 		return nil, fmt.Errorf("update document record: %w", err)
 	}
 
@@ -516,9 +513,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			s.Logger.Warn("cleanup: failed to count references for old file",
 				zap.String("externalID", oldExternalID), zap.Error(countErr))
 		} else if count == 0 {
-			if delErr := s.Storage.Delete(oldExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete old file", zap.String("externalID", oldExternalID), zap.Error(delErr))
-			}
+			s.cleanupOrphanedBlob(ctx, oldExternalID)
 		}
 	}
 
@@ -543,8 +538,16 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 // document are responsible for keeping displayName's extension consistent
 // with the (immutable) mimeType; this service does not enforce extension
 // matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) (*model.Document, error) {
-	err := s.Repo.UpdateMetadata(ctx, documentID, storageBucketID, temporaryLocation, displayName, version)
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, storageBucketID uuid.UUID, temporaryLocation bool, displayName string) (*model.Document, error) {
+	var err error
+	if s.Outbox != nil && current.TemporaryLocation && !temporaryLocation {
+		err = s.Outbox.PromoteWithOutbox(ctx, current, storageBucketID, displayName, s.priorityForMime(current.MimeType))
+		if err == nil {
+			backupOutboxEnqueued.Add(1)
+		}
+	} else {
+		err = s.Repo.UpdateMetadata(ctx, current.ID, storageBucketID, temporaryLocation, displayName, current.Version)
+	}
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -552,7 +555,7 @@ func (s *FileService) UpdateDocumentMetadata(ctx context.Context, documentID uui
 		}
 		return nil, err
 	}
-	doc, err := s.Repo.GetByID(ctx, documentID)
+	doc, err := s.Repo.GetByID(ctx, current.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -590,84 +593,4 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
-}
-
-// BackfillIfNeeded is the public entry point for handlers that read a
-// document and want lazy-backfill applied before rendering. Wraps the
-// internal helper so the PATCH handler doesn't have to duplicate the
-// decision tree. Best-effort, never returns an error (FR-020).
-func (s *FileService) BackfillIfNeeded(ctx context.Context, doc *model.Document) *model.Document {
-	return s.backfillIfNeeded(ctx, doc)
-}
-
-// backfillIfNeeded is the lazy-backfill helper for legacy image rows whose
-// content_metadata is empty. Called from the Create dedup-hit branch (and
-// from Copy + PATCH paths). Best-effort: never returns an error — backfill
-// failures don't fail the underlying request.
-//
-// Decision tree:
-//   - non-image MIME → return doc unchanged (no metadata work for non-images)
-//   - ContentMetadata.Populated=true → already decided (measured OR
-//     {_decodeFailed:true} sentinel); return unchanged so persisted decode-
-//     failure rows short-circuit instead of looping decode attempts
-//   - Storage.Read fails → log warn, return unchanged (transient retry next read)
-//   - MeasureDims returns dims → persist via BackfillContentMetadata
-//     (compare-and-set on externalID), populate doc.ImageWidth/Height; on
-//     persist error or race-lost log debug AND still populate doc so the
-//     response carries the just-measured dims (FR-020 case c)
-//   - MeasureDims returns err → persist {_decodeFailed:true} best-effort;
-//     leave doc unchanged (response omits dims, FR-019)
-//   - MeasureDims returns (nil, nil, nil) (no decoder available, !vips stub) →
-//     skip persist, leave doc unchanged so a future vips run retries
-func (s *FileService) backfillIfNeeded(ctx context.Context, doc *model.Document) *model.Document {
-	if doc == nil {
-		return doc
-	}
-	if !strings.HasPrefix(doc.MimeType, "image/") {
-		return doc
-	}
-	if doc.ContentMetadata.Populated {
-		// Either dims already measured or {_decodeFailed:true} persisted —
-		// nothing to do. Persisted sentinels short-circuit here instead of
-		// re-running the decoder on every metadata-returning request.
-		return doc
-	}
-
-	content, err := s.Storage.Read(doc.ExternalID)
-	if err != nil {
-		s.Logger.Warn("backfill: storage read failed; leaving content_metadata empty",
-			zap.String("externalID", doc.ExternalID), zap.Error(err))
-		return doc
-	}
-
-	w, h, measureErr := s.Processor.MeasureDims(content, doc.MimeType)
-	switch {
-	case measureErr != nil:
-		// Decoder ran and failed → write the {_decodeFailed: true} sentinel.
-		// Persist best-effort. Doc stays without dims; the response simply
-		// omits imageWidth/imageHeight.
-		sentinel := model.ContentMetadata{Populated: true, DecodeFailed: true}
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, sentinel); persistErr != nil {
-			s.Logger.Warn("backfill: persist of _decodeFailed sentinel failed",
-				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
-		}
-		return doc
-	case w != nil && h != nil:
-		measured := model.ContentMetadata{Populated: true, ImageWidth: w, ImageHeight: h}
-		// Always populate the doc with the just-computed dims, even if
-		// persistence fails or the compare-and-set lost a race (FR-020
-		// case c). The dims are accurate for the bytes the request decoded.
-		doc.ImageWidth = w
-		doc.ImageHeight = h
-		doc.ContentMetadata = measured
-		if persistErr := s.Repo.BackfillContentMetadata(ctx, doc.ID, doc.ExternalID, measured); persistErr != nil {
-			s.Logger.Warn("backfill: persist of measured dims failed; response still carries dims",
-				zap.String("documentID", doc.ID.String()), zap.Error(persistErr))
-		}
-		return doc
-	default:
-		// (nil, nil, nil) — no decoder available (no-vips stub). Skip persist
-		// so a future vips run retries. Doc stays without dims.
-		return doc
-	}
 }

@@ -61,6 +61,21 @@ func TestLoad_MissingRequired(t *testing.T) {
 	}
 }
 
+func TestLoadForSweep_DoesNotRequireAuthTransport(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("AUTH_SERVICE_URL", "")
+	t.Setenv("NATS_URL", "")
+
+	cfg, err := LoadForSweep()
+	if err != nil {
+		t.Fatalf("LoadForSweep: %v", err)
+	}
+	if cfg.AuthTransport != "" || cfg.AuthServiceURL != "" || cfg.NATS.URL != "" {
+		t.Fatalf("sweep loaded unused auth config: transport=%q authURL=%q natsURL=%q",
+			cfg.AuthTransport, cfg.AuthServiceURL, cfg.NATS.URL)
+	}
+}
+
 func TestLoad_MinimalValid(t *testing.T) {
 	setBaseEnv(t)
 
