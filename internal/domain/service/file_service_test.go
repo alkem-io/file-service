@@ -170,13 +170,14 @@ type mockStorage struct {
 	streamSize int64
 
 	// Streaming-stage controls (spec 020).
-	openStageErr   error
-	stageWriteErr  error
-	stageCommitErr error
-	stageReaderErr error // StagedReaderAt failure (infra read error, e.g. FS sync / S3 ranged read)
-	stageDedupHit  bool
-	stageDiscard   bool // count writes without buffering (allocation tests)
-	stages         []*mockStage
+	openStageErr    error
+	stageWriteErr   error
+	stageCommitErr  error
+	stageReaderErr  error // StagedReaderAt failure (infra read error, e.g. FS sync / S3 ranged read)
+	stageReaderSize int64 // when >0, overrides the buffered size (short-read fault tests)
+	stageDedupHit   bool
+	stageDiscard    bool // count writes without buffering (allocation tests)
+	stages          []*mockStage
 }
 
 func (m *mockStorage) Save(content []byte) (model.StoredFile, error) {
@@ -222,12 +223,13 @@ type mockProcessor struct {
 	// MeasureDims override — used by the dims-backfill sweep tests. Defaults:
 	// returns (nil, nil, nil), the no-decoder-available signal, so the sweep
 	// skips the persist and leaves the row for a future run.
-	measureDimsW    *int
-	measureDimsH    *int
-	measureDimsErr  error
-	measurePanic    bool   // MeasureDims panics for every row
-	panicOnContent  []byte // MeasureDims panics only for the row whose bytes match (poison-row tests)
-	measureDimsHook func()
+	measureDimsW     *int
+	measureDimsH     *int
+	measureDimsErr   error
+	measurePanic     bool   // MeasureDims panics for every row
+	panicOnContent   []byte // MeasureDims panics only for the row whose bytes match (poison-row tests)
+	measureDimsHook  func()
+	measureDimsCalls int
 
 	// detectMIME override — when non-empty, replaces the default
 	// application/octet-stream (replace-path reconciliation tests).
@@ -258,6 +260,7 @@ func (m *mockProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 	}, nil
 }
 func (m *mockProcessor) MeasureDims(r io.Reader, _ string) (*int, *int, error) {
+	m.measureDimsCalls++
 	// Drain the reader as a real decoder does — the sweep wraps it to tell a storage read fault
 	// apart from a decode failure, and that wrapper only sees a fault if the bytes are pulled.
 	b, _ := io.ReadAll(r)
@@ -1419,7 +1422,11 @@ func (s *mockStage) StagedReaderAt() (io.ReaderAt, int64, error) {
 		return nil, 0, s.parent.stageReaderErr
 	}
 	b := s.buf.Bytes()
-	return bytes.NewReader(b), int64(len(b)), nil
+	size := int64(len(b))
+	if s.parent.stageReaderSize > 0 {
+		size = s.parent.stageReaderSize
+	}
+	return bytes.NewReader(b), size, nil
 }
 
 func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {

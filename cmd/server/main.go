@@ -69,7 +69,8 @@ func runServe() int {
 
 	// The image-dimension backfill (spec 019/020) is NOT run here — it is a one-shot `sweep-dims`
 	// subcommand (a k8s Job), so a converging legacy migration isn't a per-boot full-table scan on
-	// every serving pod. New writes measure dims inline; a dedup re-upload heals its row on the spot.
+	// every serving pod. New writes measure dims in the write pipeline; a dedup re-upload heals its
+	// row on the spot.
 
 	// Periodic backup-outbox prune (008 SC-008), only when the producer is on.
 	// Cancelled on shutdown so the goroutine exits cleanly.

@@ -103,8 +103,9 @@ output copies.
 2. **Given** an image format the service does not re-encode through the
    streaming saver (GIF, SVG — and BMP/AVIF, which the image library cannot
    stream-encode; implementation delta, see research R5), **When** uploaded,
-   **Then** it follows the pass-through streaming path (US1) without a
-   decode, with dimensions arriving via the existing lazy backfill.
+   **Then** its bytes follow the pass-through streaming path (US1), while a
+   header-only read of the completed stage records dimensions before commit
+   (no request-read backfill and no pixel decode).
    JPEG/PNG/WebP/HEIC always stream through the encoder (clarified
    2026-06-12: the recompress size guard is dropped; recompressed output may
    occasionally exceed the original — accepted).

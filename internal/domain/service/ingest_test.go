@@ -336,27 +336,111 @@ func TestStoreAndLinkStream_OverLimitAborts(t *testing.T) {
 	}
 }
 
-// GIF/SVG (and non-images) never route through the transcoder — passthrough
-// with lazily backfilled dims (US2 scenario 2 as clarified).
+// GIF/SVG/BMP/AVIF remain byte-identical pass-through, but their headers are measured from the
+// completed stage so new rows do not depend on a later read or one-shot legacy sweep. Non-images
+// skip both the transcoder and dimension measurement.
 func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
-	for _, mime := range []string{"image/gif", "image/svg+xml", "application/pdf", "image/bmp", "image/avif"} {
-		proc := &mockProcessor{detectMIME: mime}
+	w, h := 80, 60
+	for _, tc := range []struct {
+		mime          string
+		wantMeasured  bool
+		wantDimsCalls int
+	}{
+		{"image/gif", true, 1},
+		{"image/svg+xml", true, 1},
+		{"application/pdf", false, 0},
+		{"image/bmp", true, 1},
+		{"image/avif", true, 1},
+	} {
+		proc := &mockProcessor{detectMIME: tc.mime, measureDimsW: &w, measureDimsH: &h}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
 		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "")
 		if err != nil {
-			t.Fatalf("%s: %v", mime, err)
+			t.Fatalf("%s: %v", tc.mime, err)
 		}
 		su.Discard()
 		if proc.transcodeCalls != 0 {
-			t.Errorf("%s routed through the transcoder; want passthrough", mime)
+			t.Errorf("%s routed through the transcoder; want passthrough", tc.mime)
+		}
+		if su.Measured != tc.wantMeasured || proc.measureDimsCalls != tc.wantDimsCalls {
+			t.Errorf("%s: measured=%v dimsCalls=%d, want measured=%v dimsCalls=%d",
+				tc.mime, su.Measured, proc.measureDimsCalls, tc.wantMeasured, tc.wantDimsCalls)
 		}
 	}
 	// control: a transcodable type does route
 	proc := &mockProcessor{detectMIME: "image/jpeg"}
 	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-	su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	su.Discard()
 	if proc.transcodeCalls != 1 {
 		t.Errorf("jpeg transcodeCalls = %d, want 1", proc.transcodeCalls)
 	}
+}
+
+func TestStageUpload_PassthroughMeasurementOutcomes(t *testing.T) {
+	t.Run("decoder-failure-records-verdict", func(t *testing.T) {
+		proc := &mockProcessor{detectMIME: "image/gif", measureDimsErr: errors.New("corrupt")}
+		repo := &mockRepo{}
+		svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: proc}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := model.CreateDocumentInput{
+			DisplayName: "bad.gif", StorageBucketID: uuid.New(), AuthorizationID: uuid.New(),
+		}
+		if _, err := svc.CompleteUpload(context.Background(), su, input, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		if !repo.lastCreateContentMetadata.Populated || !repo.lastCreateContentMetadata.DecodeFailed {
+			t.Fatalf("metadata = %+v, want persisted decode-failed verdict", repo.lastCreateContentMetadata)
+		}
+	})
+
+	t.Run("no-decoder-leaves-for-sweep", func(t *testing.T) {
+		proc := &mockProcessor{detectMIME: "image/gif"}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer su.Discard()
+		if su.Measured || proc.measureDimsCalls != 1 {
+			t.Fatalf("measured=%v dimsCalls=%d, want unresolved after one no-decoder attempt",
+				su.Measured, proc.measureDimsCalls)
+		}
+	})
+
+	t.Run("stage-read-failure-does-not-fail-upload", func(t *testing.T) {
+		proc := &mockProcessor{detectMIME: "image/gif"}
+		storage := &mockStorage{stageReaderErr: errors.New("staging read unavailable")}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer su.Discard()
+		if su.Measured || proc.measureDimsCalls != 0 {
+			t.Fatalf("measured=%v dimsCalls=%d, want unresolved without decoder call",
+				su.Measured, proc.measureDimsCalls)
+		}
+	})
+
+	t.Run("stage-short-read-is-not-a-decode-verdict", func(t *testing.T) {
+		proc := &mockProcessor{detectMIME: "image/gif", measureDimsErr: errors.New("unexpected EOF")}
+		storage := &mockStorage{stageReaderSize: 999}
+		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("short gif")), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer su.Discard()
+		if su.Measured || proc.measureDimsCalls != 1 {
+			t.Fatalf("measured=%v dimsCalls=%d, want retryable short-read after one decoder call",
+				su.Measured, proc.measureDimsCalls)
+		}
+	})
 }

@@ -45,9 +45,10 @@ func (c *readFaultCapture) Read(p []byte) (int, error) {
 }
 
 // RunDimsBackfill populates image dimensions for LEGACY image rows whose content_metadata is still
-// empty (spec 019/020 FR-018/FR-020). New writes already measure dims at write time (Process); this
-// heals the finite pre-existing set the same way RunMimeRepair heals legacy MIME labels — off any
-// request path, so a libvips decode NEVER runs on a read / PATCH / copy. It converges: each pass
+// empty (spec 019/020 FR-018/FR-020). New writes already measure dims in the write pipeline
+// (transcoded images inline; byte-identical images from their completed stage); this heals the
+// finite pre-existing set the same way RunMimeRepair heals legacy MIME labels — off any request
+// read path, so a libvips decode NEVER runs on a read / PATCH / copy. It converges: each pass
 // stamps every row it visits (dims, or a decode-failed sentinel), so later passes scan a near-empty
 // tail. Best-effort: never returns an error — a failed pass leaves its rows for the next run of
 // the sweep-dims job (they stay unpopulated and keep matching the scan).

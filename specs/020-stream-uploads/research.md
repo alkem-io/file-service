@@ -104,9 +104,9 @@ sequential) reader load, so the composition probes the buffered head
 (≤64 KiB — added to the fixed budget) for dims/orientation, picks
 sequential vs materialized access, and reads dims post-AutoRotate from the
 ImageRef; (2) BMP and AVIF have no streaming saver in the library — they
-join GIF/SVG as byte-identical pass-through, dims via the existing lazy
-backfill (rotated BMP/AVIF lose eager canonicalization; vanishingly rare,
-self-heals on first read); (3) HEIC→JPEG is now a single encode at Q82
+join GIF/SVG as byte-identical pass-through, with dims measured by a
+header-only read of the completed stage before commit (rotated BMP/AVIF lose
+eager canonicalization; vanishingly rare); (3) HEIC→JPEG is now a single encode at Q82
 baseline (the buffered path double-encoded Q100→Q82 — transcoded-class
 output re-baselined per amended SC-002).
 

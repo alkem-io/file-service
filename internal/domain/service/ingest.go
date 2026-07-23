@@ -52,8 +52,8 @@ func transcodableMIME(mime string) bool {
 		return true
 	}
 	// BMP/AVIF have no streaming saver in the image library; like GIF/SVG
-	// they pass through byte-identical. Their dims are populated by the
-	// explicit sweep-dims job (research R5 addendum), never by a read path.
+	// they pass through byte-identical. Their headers are measured from the
+	// completed stage before commit, without routing bytes through an encoder.
 	return false
 }
 
@@ -178,7 +178,47 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	}
 
 	su.Size = cw.n
+	if hasContent && strings.HasPrefix(mimeType, "image/") && !transcodableMIME(mimeType) {
+		s.measureStagedImageDims(su)
+	}
 	return su, nil
+}
+
+// measureStagedImageDims fills metadata for byte-identical pass-through image formats
+// (GIF/SVG/BMP/AVIF). The upload has already streamed into its bounded storage stage, so a
+// SectionReader gives the header-only decoder a constant-memory read without buffering the object
+// or changing its bytes. This keeps new writes complete after retiring lazy read-path backfill.
+//
+// Best-effort by design: an infrastructure read failure or no-vips build leaves Measured=false so
+// the explicit sweep can retry. A decoder verdict is recorded as Measured=true even on error, which
+// makes processResultToContentMetadata persist the same _decodeFailed sentinel as the sweep.
+func (s *FileService) measureStagedImageDims(su *StagedUpload) {
+	ra, size, err := su.stage.StagedReaderAt()
+	if err != nil {
+		s.logIngest("pass-through image header unavailable; leaving dims for sweep", su.MimeType, su.Size, err)
+		return
+	}
+	src := &readFaultCapture{r: io.NewSectionReader(ra, 0, size)}
+	w, h, measureErr := s.Processor.MeasureDims(src, su.MimeType)
+	switch {
+	case measureErr != nil && src.err != nil:
+		s.logIngest("pass-through image stage read faulted; leaving dims for sweep",
+			su.MimeType, su.Size, src.err)
+	case measureErr != nil && src.sawEOF && src.read < size:
+		s.logIngest("pass-through image stage short-read; leaving dims for sweep",
+			su.MimeType, su.Size, measureErr)
+	case measureErr != nil:
+		su.Measured = true
+	case w != nil && h != nil:
+		su.ImageWidth = w
+		su.ImageHeight = h
+		su.Measured = true
+	case w != nil || h != nil:
+		// Contract violation from a processor implementation: do not bake a permanent sentinel into
+		// the row. Leave it eligible for a later sweep and make the inconsistency diagnosable.
+		s.logIngest("pass-through image measurement returned incomplete dimensions; leaving dims for sweep",
+			su.MimeType, su.Size, nil)
+	}
 }
 
 // isTransportError reports whether err originates from the request stream
