@@ -209,3 +209,30 @@ func TestMock_PruneBackupOutbox(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestMock_DeletePendingForFile_ScopedAndGuarded: the orphan-hygiene delete must carry BOTH the
+// outer scope (fileId + externalID + status='pending') AND the NOT EXISTS guard — either half
+// dropped is a real regression (drop the scope → a whole-table mass over-delete; drop the guard →
+// reopen the same-doc A→B→A live-hint deletion). pgxmock does unanchored substring matching, so
+// the regex asserts the FULL statement structure (both halves) — a subtly-wrong query fails, not
+// only a total removal of the clause.
+func TestMock_DeletePendingForFile_ScopedAndGuarded(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	fileID := uuid.New()
+
+	mock.ExpectExec(`(?s)DELETE FROM file_backup_outbox o\s+WHERE o\."fileId" = \$1 AND o\."externalID" = \$2 AND o\.status = 'pending'\s+AND NOT EXISTS \(SELECT 1 FROM file f WHERE f\.id = \$1 AND f\."externalID" = \$2\)`).
+		WithArgs(pgtype.UUID{Bytes: fileID, Valid: true}, "somehash").
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	n, err := New(mock).DeletePendingForFile(context.Background(), fileID, "somehash")
+	if err != nil || n != 1 {
+		t.Fatalf("DeletePendingForFile = %d, %v (want 1, nil)", n, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}

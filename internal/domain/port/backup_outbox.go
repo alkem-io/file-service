@@ -26,4 +26,14 @@ type BackupOutboxRepo interface {
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)
+	// DeletePendingForFile drops THIS file's still-pending outbox row(s) for a content hash
+	// whose blob file-service has just deleted (refcount→0) — orphan hygiene at the owner: the
+	// row points at bytes that no longer exist, so the consumer's fetch could only 404. The delete
+	// MUST NOT remove a live hint: it is scoped to (fileID, externalID) — never the hash alone, or
+	// a concurrent re-upload by ANOTHER document (same externalID, different fileID) would be wiped
+	// — AND guarded so it fires only when this document no longer references this content, sparing
+	// a same-document A→B→A replace that re-enqueued the same hash. Both are load-bearing: an
+	// implementation that drops either scope silently reintroduces a live-hint deletion (a DR gap).
+	// Returns the number removed.
+	DeletePendingForFile(ctx context.Context, fileID uuid.UUID, externalID string) (int64, error)
 }

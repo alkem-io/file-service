@@ -88,6 +88,10 @@ func (s *FileService) priorityForMime(mimeType string) int16 {
 var (
 	backupOutboxEnqueued = expvar.NewInt("file_backup_outbox_enqueued_total")
 	backupOutboxPruned   = expvar.NewInt("file_backup_outbox_pruned_total")
+	// Orphan-hygiene deletions are a third producer-side mutation of the outbox depth; count them
+	// like the other two so an operator reconciling backlog from /internal/debug/vars (enqueued −
+	// pruned − orphaned) stays accurate and a hygiene-firing spike is visible, not silent.
+	backupOutboxOrphaned = expvar.NewInt("file_backup_outbox_orphaned_total")
 )
 
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
@@ -368,12 +372,42 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 
 	// Only delete file if no remaining documents reference it
 	if count == 0 {
-		if delErr := s.Storage.Delete(deleted.ExternalID); delErr != nil {
-			s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", deleted.ExternalID), zap.Error(delErr))
-		}
+		s.cleanupOrphanedBlob(ctx, documentID, deleted.ExternalID)
 	}
 
 	return &deleted, nil
+}
+
+// cleanupOrphanedBlob removes a blob whose last referencing file row is gone (refcount→0), and —
+// when the backup producer is on — drops fileID's own still-pending backup-outbox hint for that
+// hash: it points at bytes that no longer exist, so the consumer's fetch could only ever 404
+// (file-service is the master of orphans; it deleted the blob, so it removes the dead hint too).
+// The outbox delete is scoped and guarded so it can only ever remove a genuinely-dead hint —
+// never another document's, nor a live re-enqueued one from a same-document A→B→A replace (the
+// exact (fileID, externalID) + NOT EXISTS predicate and its reasoning live in the query,
+// DeleteBackupOutboxPendingForFile). Two residuals remain, both benign: a sibling document that
+// shared the hash and was deleted earlier leaves a stale pending row until the consumer's 404→skip
+// backstop retires it; and the pre-existing count→Storage.Delete blob-GC race (a concurrent create
+// re-referencing the blob) is unchanged by this PR — its proper fix is atomic GC. Both steps are
+// best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending row is caught
+// by the consumer's own 404→skip backstop. The outbox cleanup runs only after a successful blob
+// delete — while the blob exists, pending rows are still backable.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, fileID uuid.UUID, externalID string) {
+	if err := s.Storage.Delete(externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
+		return
+	}
+	if s.Outbox == nil {
+		return
+	}
+	if n, err := s.Outbox.DeletePendingForFile(ctx, fileID, externalID); err != nil {
+		s.Logger.Warn("cleanup: failed to drop pending outbox row for deleted blob",
+			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Error(err))
+	} else if n > 0 {
+		backupOutboxOrphaned.Add(n)
+		s.Logger.Info("cleanup: dropped pending outbox row for deleted blob",
+			zap.String("fileID", fileID.String()), zap.String("externalID", externalID), zap.Int64("rows", n))
+	}
 }
 
 // StoreAndLink replaces file content for an existing document atomically.
@@ -477,9 +511,7 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			s.Logger.Warn("cleanup: failed to count references for old file",
 				zap.String("externalID", oldExternalID), zap.Error(countErr))
 		} else if count == 0 {
-			if delErr := s.Storage.Delete(oldExternalID); delErr != nil {
-				s.Logger.Warn("cleanup: failed to delete old file", zap.String("externalID", oldExternalID), zap.Error(delErr))
-			}
+			s.cleanupOrphanedBlob(ctx, documentID, oldExternalID)
 		}
 	}
 
