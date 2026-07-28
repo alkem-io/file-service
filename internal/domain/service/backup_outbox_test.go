@@ -19,6 +19,7 @@ type recordingOutbox struct {
 	updateCalls      int
 	promoteCalls     int
 	lastPriority     int16
+	lastPromoteMeta  model.DocumentMetadataUpdate
 	deletePendingFor []string
 	deletePendingN   int64
 }
@@ -37,9 +38,10 @@ func (o *recordingOutbox) UpdateFileWithOutbox(_ context.Context, _ uuid.UUID, _
 	return nil
 }
 
-func (o *recordingOutbox) PromoteWithOutbox(_ context.Context, _ model.Document, _ uuid.UUID, _ string, priority int16) error {
+func (o *recordingOutbox) PromoteWithOutbox(_ context.Context, _ model.Document, meta model.DocumentMetadataUpdate, priority int16) error {
 	o.promoteCalls++
 	o.lastPriority = priority
+	o.lastPromoteMeta = meta
 	return nil
 }
 
@@ -203,7 +205,8 @@ func TestMetadataPromotionRouting(t *testing.T) {
 			Repo: repo, Outbox: ob, HotMimePrefixes: []string{"application/x-yjs"}, Logger: nopLogger,
 		}
 		before := backupOutboxEnqueued.Value()
-		if _, err := s.UpdateDocumentMetadata(context.Background(), current, bucket, false, "final.yjs"); err != nil {
+		meta := model.DocumentMetadataUpdate{StorageBucketID: bucket, TemporaryLocation: false, DisplayName: "final.yjs"}
+		if _, err := s.UpdateDocumentMetadata(context.Background(), current, meta); err != nil {
 			t.Fatalf("UpdateDocumentMetadata: %v", err)
 		}
 		if ob.promoteCalls != 1 {
@@ -222,7 +225,8 @@ func TestMetadataPromotionRouting(t *testing.T) {
 		permanent.TemporaryLocation = false
 		repo, ob := &mockRepo{doc: permanent}, &recordingOutbox{}
 		s := &FileService{Repo: repo, Outbox: ob, Logger: nopLogger}
-		if _, err := s.UpdateDocumentMetadata(context.Background(), permanent, bucket, false, "renamed.yjs"); err != nil {
+		meta := model.DocumentMetadataUpdate{StorageBucketID: bucket, TemporaryLocation: false, DisplayName: "renamed.yjs"}
+		if _, err := s.UpdateDocumentMetadata(context.Background(), permanent, meta); err != nil {
 			t.Fatalf("UpdateDocumentMetadata: %v", err)
 		}
 		if ob.promoteCalls != 0 {

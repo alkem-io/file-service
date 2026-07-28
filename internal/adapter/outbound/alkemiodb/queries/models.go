@@ -18,6 +18,7 @@ type File struct {
 	MimeType          string             `json:"mimeType"`
 	Size              int32              `json:"size"`
 	ExternalID        string             `json:"externalID"`
+	ExternalReference pgtype.Text        `json:"externalReference"`
 	TemporaryLocation bool               `json:"temporaryLocation"`
 	AuthorizationId   pgtype.UUID        `json:"authorizationId"`
 	StorageBucketId   pgtype.UUID        `json:"storageBucketId"`

@@ -99,11 +99,15 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expect
 	return nil
 }
 
-// PromoteWithOutbox makes an already-stored temporary document permanent and enqueues its current
-// content in the same transaction. UpdateDocumentMetadata's version guard serializes promotion
-// with content replacement; content replacement also bumps version, so whichever commits first
-// forces the stale operation to retry with fresh temporary/content state.
-func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document, storageBucketID uuid.UUID, displayName string, priority int16) error {
+// PromoteWithOutbox applies the "move + re-attribute" metadata update that flips a temporary
+// document durable AND enqueues its current content in the same transaction. UpdateDocumentMetadata's
+// version guard serializes promotion with content replacement; content replacement also bumps version,
+// so whichever commits first forces the stale operation to retry with fresh temporary/content state.
+// Because the version guard holds, current.ExternalID/current.Size are still the row's authoritative
+// content at commit (a replace that beat us bumped version → this UPDATE hits 0 rows → ErrConflict,
+// no stale enqueue). meta carries the full re-attribute field set; the outbox breadcrumb's createdBy
+// is the RE-ATTRIBUTED owner (meta.CreatedBy) the same commit sets on the row.
+func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document, meta model.DocumentMetadataUpdate, priority int16) error {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -111,14 +115,7 @@ func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document,
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := a.queries.WithTx(tx)
 
-	rows, err := q.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
-		ID:                uuidToPgx(current.ID),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: false,
-		DisplayName:       displayName,
-		UpdatedDate:       timeToPgxNow(),
-		Version:           safeInt32(current.Version),
-	})
+	rows, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(current.ID, meta, current.Version))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
@@ -132,7 +129,7 @@ func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document,
 		FileId:      uuidToPgx(current.ID),
 		ExternalID:  current.ExternalID,
 		Priority:    priority,
-		CreatedBy:   uuidToPgxNullable(current.CreatedBy),
+		CreatedBy:   uuidToPgxNullable(meta.CreatedBy),
 		CreatedDate: timeToPgxNow(),
 		Size:        int64(current.Size),
 	}); err != nil {

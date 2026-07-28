@@ -7,6 +7,7 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,20 @@ type DocumentHandler struct {
 	IdleTimeout   time.Duration
 }
 
+// writeLookupError maps a document-lookup failure to its HTTP response: a
+// model.ErrDocumentNotFound is a 404 with the "document not found" body; any
+// other error is logged (with logMsg) and surfaces as a 500 "internal error".
+// Shared by every read path that starts with a repo lookup (GetMeta,
+// ByReference, Update) so the mapping can't drift between them.
+func (h *DocumentHandler) writeLookupError(w http.ResponseWriter, err error, logMsg string) {
+	if errors.Is(err, model.ErrDocumentNotFound) {
+		writeJSONError(w, http.StatusNotFound, "document not found")
+		return
+	}
+	h.Logger.Error(logMsg, zap.Error(err))
+	writeJSONError(w, http.StatusInternalServerError, "internal error")
+}
+
 // GetMeta handles GET /internal/file/{id}/meta
 func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
@@ -48,12 +63,41 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
+		h.writeLookupError(w, err, "failed to lookup document")
+		return
+	}
+
+	documentMetaResponse(doc).Render(w)
+}
+
+// ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
+// ref is required. bucketId omitted → GLOBAL resolution (the provider's fetch:
+// any document carrying the reference, all sharing one blob). bucketId present
+// → bucket-SCOPED resolution (read resolution: the document in that bucket).
+// 200 → document meta (incl. externalReference + image dims); 404 → no match.
+func (h *DocumentHandler) ByReference(w http.ResponseWriter, r *http.Request) {
+	ref := r.URL.Query().Get("ref")
+	if ref == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: ref")
+		return
+	}
+
+	var (
+		doc model.Document
+		err error
+	)
+	if bucketParam := r.URL.Query().Get("bucketId"); bucketParam == "" {
+		doc, err = h.Service.Repo.GetByReference(r.Context(), ref)
+	} else {
+		bucketID, perr := uuid.Parse(bucketParam)
+		if perr != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid bucketId")
 			return
 		}
-		h.Logger.Error("failed to lookup document", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		doc, err = h.Service.Repo.GetByReferenceInBucket(r.Context(), ref, bucketID)
+	}
+	if err != nil {
+		h.writeLookupError(w, err, "failed to lookup document by reference")
 		return
 	}
 
@@ -154,15 +198,17 @@ func (c *readErrCapture) Read(p []byte) (int, error) {
 // map: direct field reads keep generated API docs clean (map-index string
 // literals are misinferred as path parameters by the spec generator).
 type createFields struct {
-	displayName       string
-	storageBucketID   string
-	authorizationID   string
-	tagsetID          string
-	createdBy         string
-	temporaryLocation string
-	skipDedup         string
-	allowedMimeTypes  string
-	maxFileSize       string
+	displayName         string
+	storageBucketID     string
+	authorizationID     string
+	tagsetID            string
+	createdBy           string
+	temporaryLocation   string
+	skipDedup           string
+	allowedMimeTypes    string
+	maxFileSize         string
+	externalReference   string
+	skipImageProcessing string
 }
 
 func (f *createFields) set(name, value string) {
@@ -185,6 +231,10 @@ func (f *createFields) set(name, value string) {
 		f.allowedMimeTypes = value
 	case "maxFileSize":
 		f.maxFileSize = value
+	case "externalReference":
+		f.externalReference = value
+	case "skipImageProcessing":
+		f.skipImageProcessing = value
 	}
 }
 
@@ -227,9 +277,18 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(fields.authorizationID)
-	if err != nil {
-		return input, nil, 0, fmt.Errorf("invalid authorizationId")
+	// authorizationId is OPTIONAL. The Synapse media storage provider stores
+	// staging docs in the reserved matrix_media bucket with NO server-minted
+	// authorization — the server mints one on inbound re-home (MOVE into the
+	// conversation bucket). Absent → the zero UUID, which the adapter maps to a
+	// NULL column (the column is nullable UNIQUE; a zero UUID for every provider
+	// store would collide). When present it must parse.
+	var authorizationID uuid.UUID
+	if strings.TrimSpace(fields.authorizationID) != "" {
+		authorizationID, err = uuid.Parse(fields.authorizationID)
+		if err != nil {
+			return input, nil, 0, fmt.Errorf("invalid authorizationId")
+		}
 	}
 
 	tagsetID, err := parseOptionalUUID(fields.tagsetID, "tagsetId")
@@ -252,33 +311,127 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, err
 	}
 
-	if v := fields.allowedMimeTypes; v != "" {
-		parts := strings.Split(v, ",")
-		for _, p := range parts {
-			if trimmed := strings.TrimSpace(p); trimmed != "" {
-				allowedMimeTypes = append(allowedMimeTypes, trimmed)
-			}
-		}
+	skipImageProcessing, err := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if err != nil {
+		return input, nil, 0, err
 	}
 
-	if v := fields.maxFileSize; v != "" {
-		parsed, err := strconv.Atoi(v)
-		if err != nil || parsed < 0 {
-			return input, nil, 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
-		}
-		maxFileSize = parsed
+	allowedMimeTypes = parseAllowedMimeTypes(fields.allowedMimeTypes)
+
+	maxFileSize, err = parseMaxFileSize(fields.maxFileSize)
+	if err != nil {
+		return input, nil, 0, err
+	}
+
+	externalReference := optionalString(fields.externalReference)
+	if err := validateExternalReference(externalReference); err != nil {
+		return input, nil, 0, err
 	}
 
 	input = model.CreateDocumentInput{
-		DisplayName:       fields.displayName,
-		CreatedBy:         createdBy,
-		TemporaryLocation: temporaryLocation,
-		StorageBucketID:   storageBucketID,
-		AuthorizationID:   authorizationID,
-		TagsetID:          tagsetID,
-		SkipDedup:         skipDedup,
+		DisplayName:         fields.displayName,
+		CreatedBy:           createdBy,
+		TemporaryLocation:   temporaryLocation,
+		StorageBucketID:     storageBucketID,
+		AuthorizationID:     authorizationID,
+		TagsetID:            tagsetID,
+		ExternalReference:   externalReference,
+		SkipImageProcessing: skipImageProcessing,
+		SkipDedup:           skipDedup,
 	}
 	return input, allowedMimeTypes, maxFileSize, nil
+}
+
+// parseAllowedMimeTypes splits a comma-separated allow-list into trimmed,
+// non-empty entries. An empty input yields a nil slice (no per-request policy
+// override).
+func parseAllowedMimeTypes(v string) []string {
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// parseMaxFileSize parses the optional per-request maxFileSize override. An
+// empty input means "no override" (0). A malformed or negative value is a
+// 400-safe error.
+func parseMaxFileSize(v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid maxFileSize: must be a non-negative integer")
+	}
+	return parsed, nil
+}
+
+// optionalString maps an empty multipart field to nil and any non-empty value
+// to a pointer — the wire representation of an absent optional string field.
+func optionalString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+// derefString returns the pointed-to string, or "" when the pointer is nil —
+// the inverse of optionalString, for JSON bodies where an absent optional
+// string field decodes to a nil *string.
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// maxExternalReferenceLen bounds externalReference to the file."externalReference"
+// VARCHAR(256) column. Validated on every path that accepts a reference
+// (create, copy, patch), so an over-length value is a clean 400 rather than a
+// Postgres "value too long" 500. Byte length is used deliberately: capping at
+// bytes guarantees the value fits the character-based column regardless of
+// UTF-8 expansion.
+const maxExternalReferenceLen = 256
+
+// validateExternalReference rejects a reference longer than the column allows.
+// ref is the already-normalized optional value (nil = no reference).
+func validateExternalReference(ref *string) error {
+	if ref != nil && len(*ref) > maxExternalReferenceLen {
+		return fmt.Errorf("externalReference exceeds maximum length of %d bytes", maxExternalReferenceLen)
+	}
+	return nil
+}
+
+// nonNilUUID maps the zero UUID — how a NULL authorizationId column reads back
+// on the Document — to nil, so a PATCH that doesn't touch authorizationId seeds
+// the nullable update with NULL rather than rewriting the row to the zero UUID
+// (which would collide on UNIQUE("authorizationId")). Symmetric with the
+// CreatedBy seed, which is already *uuid.UUID.
+func nonNilUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
+
+// newCreateDocumentResponse builds the shared create/copy success body from a
+// materialized document row.
+func newCreateDocumentResponse(doc *model.Document) CreateDocumentResponse {
+	return CreateDocumentResponse{
+		ID:          doc.ID.String(),
+		ExternalID:  doc.ExternalID,
+		MimeType:    doc.MimeType,
+		Size:        doc.Size,
+		Reused:      doc.Reused,
+		ImageWidth:  doc.ImageWidth,
+		ImageHeight: doc.ImageHeight,
+	}
 }
 
 // writeIngestTransportError maps a streaming transport failure to its HTTP
@@ -302,13 +455,61 @@ func (h *DocumentHandler) writeIngestTransportError(w http.ResponseWriter, err e
 	}
 }
 
+// stageFilePart parses the skipImageProcessing flag currently in effect and
+// stages the file part's bytes. The verbatim (raw-store) decision is taken at
+// stage time, so skipImageProcessing MUST precede the file part in the
+// multipart body (the provider sends metadata first); a skipImageProcessing=true
+// arriving AFTER the file is rejected by validateSkipAfterFile rather than
+// silently transcoded. Returns the staged upload and the skip value that was in
+// effect, or ok=false (after writing the error response) on failure.
+func (h *DocumentHandler) stageFilePart(w http.ResponseWriter, r *http.Request, part *multipart.Part, fields createFields) (staged *service.StagedUpload, skip, ok bool) {
+	skipImageProcessing, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if perr != nil {
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return nil, false, false
+	}
+	declaredMIME := part.Header.Get("Content-Type")
+	staged, err := h.Service.StageUpload(r.Context(), part, declaredMIME, skipImageProcessing)
+	if err != nil {
+		h.writeStageError(w, err)
+		return nil, false, false
+	}
+	return staged, skipImageProcessing, true
+}
+
+// validateSkipAfterFile enforces the verbatim-store contract guard (spec 013):
+// reject only when skipImageProcessing=true is FIRST established after the file
+// part has already been staged — the bytes may already have been
+// transcoded/rotated, so the byte-exact contract cannot be honored. A duplicate
+// part consistent with the value staged before the file (stagedSkip) is honored,
+// so it must not 400. Returns false after writing the error response.
+func (h *DocumentHandler) validateSkipAfterFile(w http.ResponseWriter, fields createFields, staged *service.StagedUpload, stagedSkip bool, part *multipart.Part) bool {
+	if staged == nil || part.FormName() != "skipImageProcessing" {
+		return true
+	}
+	skip, perr := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
+	if perr != nil {
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return false
+	}
+	if skip && !stagedSkip {
+		writeJSONError(w, http.StatusBadRequest, "skipImageProcessing must be sent before the file part")
+		return false
+	}
+	return true
+}
+
 // Create handles POST /internal/file — streaming ingest (spec 020): the
 // file part flows request → sniff → (transcode) → staged storage without
 // whole-file buffering. Parts are processed in whatever order they arrive;
 // metadata validation always happens after the loop, before the stage is
 // published. (The known caller sends the file part first — research R4 —
-// which is why bucket-level limits cannot gate the stream early; the
-// handler itself does not depend on any ordering.)
+// which is why bucket-level limits cannot gate the stream early.)
+//
+// One ordering dependency exists (spec 013): skipImageProcessing is consumed
+// when the file part is staged, so the verbatim/byte-exact contract can only
+// be honored if it precedes the file. A skipImageProcessing=true that arrives
+// AFTER the file part is rejected with 400 rather than silently transcoded.
 func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	capBytes := h.MaxUploadSize
 	if capBytes <= 0 {
@@ -330,6 +531,12 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	var fields createFields
 	var staged *service.StagedUpload
+	// stagedSkip records the skipImageProcessing value that was in effect when
+	// the file part was staged. A later duplicate skipImageProcessing part
+	// consistent with this value is harmless; only a skipImageProcessing=true
+	// that is FIRST established after the file part violates the byte-exact
+	// contract (see validateSkipAfterFile).
+	var stagedSkip bool
 	defer func() {
 		// Any non-success exit path discards the stage (FR-006); Discard
 		// after CompleteUpload is a no-op.
@@ -351,14 +558,18 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, http.StatusBadRequest, "duplicate file part")
 				return
 			}
-			declaredMIME := part.Header.Get("Content-Type")
-			staged, err = h.Service.StageUpload(r.Context(), part, declaredMIME)
-			if err != nil {
-				h.writeStageError(w, err)
+			newStaged, skip, ok := h.stageFilePart(w, r, part, fields)
+			if !ok {
 				return
 			}
-		} else if !h.readMetadataField(w, &fields, part) {
-			return
+			staged, stagedSkip = newStaged, skip
+		} else {
+			if !h.readMetadataField(w, &fields, part) {
+				return
+			}
+			if !h.validateSkipAfterFile(w, fields, staged, stagedSkip, part) {
+				return
+			}
 		}
 		_ = part.Close()
 	}
@@ -381,15 +592,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	IngestOutcomes.Add("accepted", 1)
-	CreateDocumentResponse{
-		ID:          doc.ID.String(),
-		ExternalID:  doc.ExternalID,
-		MimeType:    doc.MimeType,
-		Size:        doc.Size,
-		Reused:      doc.Reused,
-		ImageWidth:  doc.ImageWidth,
-		ImageHeight: doc.ImageHeight,
-	}.Render(w)
+	newCreateDocumentResponse(doc).Render(w)
 }
 
 // readMetadataField reads one trailing (non-file) multipart part into
@@ -498,24 +701,26 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tagsetID *uuid.UUID
-	if body.TagsetID != nil && *body.TagsetID != "" {
-		parsed, err := uuid.Parse(*body.TagsetID)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid tagsetId")
-			return
-		}
-		tagsetID = &parsed
+	tagsetID, err := parseOptionalUUID(derefString(body.TagsetID), "tagsetId")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	var createdBy *uuid.UUID
-	if body.CreatedBy != nil && *body.CreatedBy != "" {
-		parsed, err := uuid.Parse(*body.CreatedBy)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid createdBy")
-			return
-		}
-		createdBy = &parsed
+	createdBy, err := parseOptionalUUID(derefString(body.CreatedBy), "createdBy")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Normalize an empty externalReference to "no reference" (NULL), exactly
+	// like Create, so a Copy never persists a literal '' that would orphan the
+	// row from both identity systems (content-dedup filters IS NULL, by-reference
+	// rejects empty).
+	externalReference := optionalString(derefString(body.ExternalReference))
+	if err := validateExternalReference(externalReference); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	input := model.CopyDocumentInput{
@@ -523,6 +728,7 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		AuthorizationID:     authID,
 		TagsetID:            tagsetID,
 		CreatedBy:           createdBy,
+		ExternalReference:   externalReference,
 		SkipDedup:           body.SkipDedup,
 	}
 
@@ -532,9 +738,10 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "source document not found")
 		case errors.Is(err, service.ErrConflict):
-			// Reachable only when SkipDedup=true and the destination bucket
-			// already has a row with this content under the unique index.
-			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the destination bucket")
+			// A unique-constraint collision in the destination bucket: a
+			// SkipDedup=true content collision, or a reference-bearing copy that
+			// collides on the partial UNIQUE(externalReference, storageBucketId).
+			writeJSONError(w, http.StatusConflict, "a conflicting document already exists (unique constraint)")
 		default:
 			h.Logger.Error("failed to copy document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -542,15 +749,7 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	CreateDocumentResponse{
-		ID:          doc.ID.String(),
-		ExternalID:  doc.ExternalID,
-		MimeType:    doc.MimeType,
-		Size:        doc.Size,
-		Reused:      doc.Reused,
-		ImageWidth:  doc.ImageWidth,
-		ImageHeight: doc.ImageHeight,
-	}.Render(w)
+	newCreateDocumentResponse(doc).Render(w)
 }
 
 // Delete handles DELETE /internal/file/{id}
@@ -583,9 +782,12 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // Update handles PATCH /internal/file/{id}.
-// Mutates storageBucketId, temporaryLocation, and/or displayName. Each
-// field is optional; at least one must be present. Omitted fields retain
-// their current value.
+// Mutates the "move + re-attribute" fields: storageBucketId, temporaryLocation,
+// displayName, authorizationId, createdBy, and externalReference. Each field is
+// optional; at least one must produce an effective change. Omitted fields retain
+// their current value; createdBy and externalReference accept an explicit JSON
+// null to clear (authorizationId is NOT clearable — clearing it orphans the
+// document from its policy).
 //
 // displayName notes:
 //   - Validation rejects empty/whitespace-only, length > 512 (matches
@@ -603,49 +805,51 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body UpdateDocumentRequest
-	if !decodeStrictJSON(w, r, &body) {
+	body, present, ok := h.decodeAndValidateUpdate(w, r)
+	if !ok {
 		return
-	}
-
-	if body.StorageBucketID == nil && body.TemporaryLocation == nil && body.DisplayName == nil {
-		writeJSONError(w, http.StatusBadRequest, "no fields to update")
-		return
-	}
-
-	if body.DisplayName != nil {
-		if err := validateDisplayName(*body.DisplayName); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 	}
 
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
-		if errors.Is(err, model.ErrDocumentNotFound) {
-			writeJSONError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		h.Logger.Error("failed to lookup document", zap.Error(err))
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		h.writeLookupError(w, err, "failed to lookup document")
 		return
 	}
 
-	bucketID, err := resolveBucketID(doc, body)
+	meta, applied, err := buildMetadataUpdate(doc, body, present)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tempLoc, displayName := mergeUpdateFallbacks(doc, body)
+	// No field carries an effective change — either every key is a no-op
+	// explicit-null (e.g. {"temporaryLocation":null}) or sets a field to its
+	// current value (e.g. {"displayName":"<current name>"}). This is an
+	// IDEMPOTENT SUCCESS, not an error: a PATCH that produces no effective
+	// change returns 200 with the CURRENT document and writes NOTHING. That
+	// avoids bumping version+updatedDate on an unchanged row (so a concurrent
+	// actor is never spuriously 409'd) while still giving idempotent/desired-
+	// state callers a 200 rather than a 400. A structurally empty body ({} with
+	// no keys) is still a 400 above (len(present) == 0); only keys-present-but-
+	// no-change lands here. Dims come straight off the loaded row's
+	// content_metadata (populated by the sweep-dims job, not lazily here).
+	if applied == 0 {
+		newUpdateDocumentResponse(&doc).Render(w)
+		return
+	}
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), doc, bucketID, tempLoc, displayName)
+	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), doc, meta)
 	if err != nil {
 		if errors.Is(err, service.ErrConflict) {
 			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
 			return
 		}
 		if errors.Is(err, model.ErrDuplicateKey) {
-			writeJSONError(w, http.StatusConflict, "destination bucket already contains a document with this content")
+			// PATCH never changes externalID, so the collision is not "same
+			// content": with the (externalReference, storageBucketId) index a
+			// move can collide on reference, and the authorizationId unique
+			// constraint can collide on re-attribution. Keep the message
+			// generic rather than naming the wrong cause.
+			writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference or authorization)")
 			return
 		}
 		h.Logger.Error("failed to update document", zap.Error(err))
@@ -653,17 +857,61 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A legacy image row may still have empty content_metadata; its dims are populated by the
-	// sweep-dims job (RunDimsBackfill), not lazily here (a libvips decode has no place on a request
-	// path — spec 019/020). Until the sweep reaches that row the response simply omits dims (FR-020).
-	UpdateDocumentResponse{
-		ID:                updated.ID.String(),
-		StorageBucketID:   updated.StorageBucketID.String(),
-		TemporaryLocation: updated.TemporaryLocation,
-		DisplayName:       updated.DisplayName,
-		ImageWidth:        updated.ImageWidth,
-		ImageHeight:       updated.ImageHeight,
-	}.Render(w)
+	newUpdateDocumentResponse(updated).Render(w)
+}
+
+// decodeAndValidateUpdate decodes the PATCH body, rejects a structurally empty
+// patch, and validates the fields that can be checked without loading the row
+// (displayName, and the tri-state externalReference: absent = keep, explicit
+// null = clear, empty string = rejected). Returns false after writing the error
+// response.
+func (h *DocumentHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http.Request) (UpdateDocumentRequest, map[string]struct{}, bool) {
+	var body UpdateDocumentRequest
+	present, ok := decodeUpdateRequest(w, r, &body)
+	if !ok {
+		return body, nil, false
+	}
+
+	if len(present) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "no fields to update")
+		return body, nil, false
+	}
+
+	if body.DisplayName != nil {
+		if err := validateDisplayName(*body.DisplayName); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return body, nil, false
+		}
+	}
+
+	// externalReference is tri-state: absent = keep, explicit null = clear. An
+	// empty *string value* is neither, so it is rejected rather than silently
+	// mapped to NULL (clearing is done with an explicit null). This also keeps
+	// PATCH from ever persisting a non-NULL empty reference.
+	if _, ok := present["externalReference"]; ok && body.ExternalReference != nil && *body.ExternalReference == "" {
+		writeJSONError(w, http.StatusBadRequest, "externalReference must not be empty")
+		return body, nil, false
+	}
+	if err := validateExternalReference(body.ExternalReference); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return body, nil, false
+	}
+
+	return body, present, true
+}
+
+// newUpdateDocumentResponse single-sources the model.Document -> PATCH response
+// mapping shared by the no-op (200 idempotent) and effective-change paths, so
+// the two can't drift on the returned shape (incl. surfaced image dims).
+func newUpdateDocumentResponse(doc *model.Document) UpdateDocumentResponse {
+	return UpdateDocumentResponse{
+		ID:                doc.ID.String(),
+		StorageBucketID:   doc.StorageBucketID.String(),
+		TemporaryLocation: doc.TemporaryLocation,
+		DisplayName:       doc.DisplayName,
+		ImageWidth:        doc.ImageWidth,
+		ImageHeight:       doc.ImageHeight,
+	}
 }
 
 // validateDisplayName rejects renames that would corrupt the row or
@@ -789,35 +1037,193 @@ func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) boo
 	return true
 }
 
-// resolveBucketID resolves the effective storage bucket for a PATCH: the
-// validated UUID from body.storageBucketId when present, otherwise the
-// document's current bucket. A malformed storageBucketId yields an error
-// whose message is safe to return verbatim as a 400 body.
-func resolveBucketID(doc model.Document, body UpdateDocumentRequest) (uuid.UUID, error) {
-	if body.StorageBucketID == nil {
-		return doc.StorageBucketID, nil
-	}
-	parsed, err := uuid.Parse(*body.StorageBucketID)
+// decodeUpdateRequest strict-decodes the PATCH body into dst and returns the
+// set of top-level keys that were actually present, so the handler can tell
+// "field omitted" (keep) from "field explicitly null" (clear) for the
+// tri-state fields. On any malformed input it writes the 400 itself and
+// reports ok=false. Mirrors decodeStrictJSON's unknown-field / trailing-data
+// rejection.
+func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocumentRequest) (present map[string]struct{}, ok bool) {
+	// The PATCH body is a small JSON metadata patch; cap it so io.ReadAll can't
+	// buffer unbounded input. 1 MiB is far above any legitimate patch.
+	const maxPatchBodyBytes = 1 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxPatchBodyBytes)
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return uuid.UUID{}, fmt.Errorf("invalid storageBucketId")
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
+			return nil, false
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
 	}
-	return parsed, nil
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
+	}
+	if dec.More() {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+		return nil, false
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return nil, false
+	}
+	present = make(map[string]struct{}, len(keys))
+	for k := range keys {
+		present[canonicalPatchKey(k)] = struct{}{}
+	}
+	return present, true
 }
 
-// mergeUpdateFallbacks merges the validation-free PATCH fields over the
-// row's current values: fields present in the body win, omitted fields keep
-// what the document already has. storageBucketId is resolved separately by
-// resolveBucketID because it needs UUID validation first.
-func mergeUpdateFallbacks(doc model.Document, body UpdateDocumentRequest) (tempLoc bool, displayName string) {
-	tempLoc = doc.TemporaryLocation
-	if body.TemporaryLocation != nil {
-		tempLoc = *body.TemporaryLocation
+// patchFieldNames is the full set of canonical JSON keys of UpdateDocumentRequest.
+// json.Decode fills the struct fields CASE-INSENSITIVELY (so "AuthorizationId"
+// sets body.AuthorizationID), so the present-map — which the tri-state fields
+// consult to tell "omitted" (keep) from "explicit null" (clear) — must resolve
+// each raw key the SAME way. Recording presence under the raw casing instead
+// would let a case-variant key set the struct field yet read as ABSENT, silently
+// dropping the re-attribute/clear it requested (a half-applied, security-relevant
+// re-home).
+var patchFieldNames = []string{
+	"storageBucketId",
+	"temporaryLocation",
+	"displayName",
+	"authorizationId",
+	"createdBy",
+	"externalReference",
+}
+
+// canonicalPatchKey maps a raw PATCH JSON key to the canonical field name it
+// resolves to under json.Decode's case-insensitive struct matching, so
+// present-detection agrees with what the decode already applied to the struct.
+// A key matching no known field is returned unchanged: DisallowUnknownFields
+// has already rejected any genuinely unknown key, and the present-map is only
+// ever looked up by canonical name.
+func canonicalPatchKey(raw string) string {
+	for _, name := range patchFieldNames {
+		if strings.EqualFold(raw, name) {
+			return name
+		}
 	}
-	displayName = doc.DisplayName
-	if body.DisplayName != nil {
-		displayName = *body.DisplayName
+	return raw
+}
+
+// buildMetadataUpdate merges the PATCH fields over the row's current values to
+// produce the full DocumentMetadataUpdate the move primitive persists. Fields
+// present in the body win; omitted fields keep what the document already has.
+// authorizationId/createdBy/externalReference are the re-attribute fields;
+// createdBy/externalReference honor explicit JSON null as "clear". A malformed
+// UUID yields an error whose message is safe as a 400 body.
+//
+// applied reports how many fields carry an EFFECTIVE change — a new value that
+// differs from the row's current value — so the handler can treat a no-op PATCH
+// as an idempotent 200 no-write instead of bumping version+updatedDate on an
+// unchanged row. doc is the freshly loaded row, so the comparison needs no
+// extra DB round-trip.
+func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present map[string]struct{}) (meta model.DocumentMetadataUpdate, applied int, err error) {
+	meta = model.DocumentMetadataUpdate{
+		StorageBucketID:   doc.StorageBucketID,
+		TemporaryLocation: doc.TemporaryLocation,
+		DisplayName:       doc.DisplayName,
+		AuthorizationID:   nonNilUUID(doc.AuthorizationID),
+		CreatedBy:         doc.CreatedBy,
+		ExternalReference: doc.ExternalReference,
 	}
-	return tempLoc, displayName
+
+	if body.StorageBucketID != nil {
+		parsed, perr := uuid.Parse(*body.StorageBucketID)
+		if perr != nil {
+			return meta, applied, fmt.Errorf("invalid storageBucketId")
+		}
+		if parsed != meta.StorageBucketID {
+			meta.StorageBucketID = parsed
+			applied++
+		}
+	}
+	if body.TemporaryLocation != nil && *body.TemporaryLocation != meta.TemporaryLocation {
+		meta.TemporaryLocation = *body.TemporaryLocation
+		applied++
+	}
+	if body.DisplayName != nil && *body.DisplayName != meta.DisplayName {
+		meta.DisplayName = *body.DisplayName
+		applied++
+	}
+	// authorizationId may be RE-ATTRIBUTED to a new policy (part of re-home) but
+	// never CLEARED: a NULL/nil authorizationId reads back as the nil UUID,
+	// matches no policy, and permanently orphans the document (403 on every
+	// read). clearable=false rejects an explicit null or the nil UUID, preserving
+	// the invariant that a metadata update can't break authorization.
+	_, hasAuth := present["authorizationId"]
+	authVal, authChanged, err := applyReattributeUUID(hasAuth, body.AuthorizationID, meta.AuthorizationID, false, "authorizationId")
+	if err != nil {
+		return meta, applied, err
+	}
+	if authChanged {
+		meta.AuthorizationID = authVal
+		applied++
+	}
+	// createdBy is clearable (explicit null → NULL).
+	_, hasCreatedBy := present["createdBy"]
+	createdByVal, createdByChanged, err := applyReattributeUUID(hasCreatedBy, body.CreatedBy, meta.CreatedBy, true, "createdBy")
+	if err != nil {
+		return meta, applied, err
+	}
+	if createdByChanged {
+		meta.CreatedBy = createdByVal
+		applied++
+	}
+	if _, ok := present["externalReference"]; ok {
+		if !equalPtr(body.ExternalReference, meta.ExternalReference) {
+			meta.ExternalReference = body.ExternalReference // value, or nil for explicit null → clear
+			applied++
+		}
+	}
+
+	return meta, applied, nil
+}
+
+// applyReattributeUUID resolves a tri-state optional-UUID PATCH field against
+// the row's current value, factoring the shared shape of the authorizationId
+// and createdBy re-attribute blocks. present is whether the JSON key was sent;
+// raw is the decoded pointer (nil = explicit JSON null); current is the row's
+// current value. clearable governs whether an explicit null is allowed:
+// authorizationId is NOT clearable (a null/nil UUID orphans the document), so
+// clearable=false rejects both an explicit null and the nil UUID. Returns the
+// resolved value, whether it is an EFFECTIVE change vs current, and a 400-safe
+// error whose message names the field.
+func applyReattributeUUID(present bool, raw *string, current *uuid.UUID, clearable bool, field string) (val *uuid.UUID, changed bool, err error) {
+	if !present {
+		return current, false, nil
+	}
+	if raw == nil {
+		if !clearable {
+			return current, false, fmt.Errorf("%s cannot be cleared", field)
+		}
+		return nil, !equalPtr[uuid.UUID](nil, current), nil
+	}
+	parsed, err := uuid.Parse(*raw)
+	if err != nil {
+		return current, false, fmt.Errorf("invalid %s", field)
+	}
+	if !clearable && parsed == uuid.Nil {
+		return current, false, fmt.Errorf("%s cannot be the nil UUID", field)
+	}
+	return &parsed, !equalPtr(&parsed, current), nil
+}
+
+// equalPtr reports whether two optional values are equal, treating nil
+// (absent/cleared) as distinct from any set value. Used for the tri-state PATCH
+// fields (uuid.UUID and string), so nil-vs-set and set-vs-set both compare
+// correctly.
+func equalPtr[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {
@@ -830,8 +1236,11 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketID:   doc.StorageBucketID.String(),
 		AuthorizationID:   doc.AuthorizationID.String(),
+		ExternalReference: doc.ExternalReference,
 		CreatedDate:       doc.CreatedDate,
 		UpdatedDate:       doc.UpdatedDate,
+		ImageWidth:        doc.ImageWidth,
+		ImageHeight:       doc.ImageHeight,
 	}
 	if doc.CreatedBy != nil {
 		s := doc.CreatedBy.String()

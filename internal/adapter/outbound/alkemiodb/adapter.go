@@ -86,6 +86,35 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
+// GetByReference resolves the opaque externalReference across all buckets.
+// pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReference(ctx context.Context, reference string) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReference(ctx, stringToPgxText(&reference))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refRowToDocument(row), nil
+}
+
+// GetByReferenceInBucket resolves the opaque externalReference within one
+// bucket. pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, storageBucketID uuid.UUID) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReferenceInBucket(ctx, queries.GetDocumentByReferenceInBucketParams{
+		ExternalReference: stringToPgxText(&reference),
+		StorageBucketId:   uuidToPgx(storageBucketID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refInBucketRowToDocument(row), nil
+}
+
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
 // rules). A unique violation — another row already holds this content in the
@@ -119,11 +148,15 @@ func createDocumentParams(doc model.Document, raw []byte) queries.CreateDocument
 		CreatedBy:         uuidToPgxNullable(doc.CreatedBy),
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketId:   uuidToPgx(doc.StorageBucketID),
-		AuthorizationId:   uuidToPgx(doc.AuthorizationID),
+		// authorizationId is nullable: a provider staging store (matrix_media
+		// bucket) has no server-minted authorization, so a zero UUID must map to
+		// SQL NULL rather than colliding on UNIQUE("authorizationId").
+		AuthorizationId:   uuidValueToPgxNullable(doc.AuthorizationID),
 		TagsetId:          uuidToPgxNullable(doc.TagsetID),
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
 		ContentMetadata:   raw,
+		ExternalReference: stringToPgxText(doc.ExternalReference),
 	}
 }
 
@@ -173,27 +206,17 @@ func updateFileParams(id uuid.UUID, expectedExternalID string, expectedVersion i
 	}
 }
 
-// UpdateMetadata mutates bucket/temporaryLocation/displayName under
-// optimistic locking (WHERE version = $given, SET version = version + 1).
-// 0 rows affected — row missing or version stale — returns
-// model.ErrDocumentNotFound; the service maps that to its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
-	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
-		ID:                uuidToPgx(id),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: temporaryLocation,
-		DisplayName:       displayName,
-		UpdatedDate:       timeToPgxNow(),
-		Version:           safeInt32(version),
-	})
+// UpdateMetadata applies the "move + re-attribute" primitive under optimistic
+// locking (WHERE version = $given, SET version = version + 1): besides bucket/
+// temporaryLocation/displayName it also re-points authorizationId, createdBy,
+// and the opaque externalReference. 0 rows affected — row missing or version
+// stale — returns model.ErrDocumentNotFound; the service maps that to its
+// conflict error. A unique violation (the partial externalReference index, or
+// the authorizationId unique) surfaces as model.ErrDuplicateKey.
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
+	rows, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
-		// Defensive: keeps PATCH consistent with Create/UpdateFile if a
-		// uniqueness constraint is added later (e.g. (externalID,
-		// storageBucketId)). No such constraint exists in this repo's
-		// db/schema/document.sql today, but the production schema can
-		// diverge, and a 409 beats a 500 if it fires.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+		if isUniqueViolation(err) {
 			return model.ErrDuplicateKey
 		}
 		return err
@@ -202,6 +225,25 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 		return model.ErrDocumentNotFound
 	}
 	return nil
+}
+
+// updateMetadataParams maps the "move + re-attribute" field set to the sqlc
+// update params — the ONE owner, shared by UpdateMetadata and the transactional
+// PromoteWithOutbox so the two can't drift on which columns move. authorizationId
+// and createdBy are nullable (nil → SQL NULL); externalReference is the opaque
+// nullable text.
+func updateMetadataParams(id uuid.UUID, meta model.DocumentMetadataUpdate, version int) queries.UpdateDocumentMetadataParams {
+	return queries.UpdateDocumentMetadataParams{
+		ID:                uuidToPgx(id),
+		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
+		TemporaryLocation: meta.TemporaryLocation,
+		DisplayName:       meta.DisplayName,
+		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
+		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
+		ExternalReference: stringToPgxText(meta.ExternalReference),
+		UpdatedDate:       timeToPgxNow(),
+		Version:           safeInt32(version),
+	}
 }
 
 // BackfillContentMetadata persists computed content_metadata on a row without

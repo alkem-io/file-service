@@ -78,7 +78,7 @@ func TestStageUpload_PassThroughEquivalence(t *testing.T) {
 	repo := &mockRepo{}
 	svc := newIngestService(storage, repo)
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader(content), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestStageUpload_OverLimitAborts(t *testing.T) {
 	storage := &mockStorage{}
 	svc := newIngestService(storage, &mockRepo{})
 
-	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "")
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "", false)
 	if !errors.Is(err, ErrOverLimit) {
 		t.Fatalf("err = %v, want ErrOverLimit", err)
 	}
@@ -119,7 +119,7 @@ func TestStageUpload_ClientAbortAborts(t *testing.T) {
 	storage := &mockStorage{}
 	svc := newIngestService(storage, &mockRepo{})
 
-	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "", false)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want ErrUnexpectedEOF", err)
 	}
@@ -131,7 +131,7 @@ func TestStageUpload_TranscodeClientAbortIsTransportFailure(t *testing.T) {
 	svc := newIngestService(storage, &mockRepo{})
 	svc.Processor = &mockProcessor{detectMIME: "image/jpeg"}
 
-	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+	_, err := svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "", false)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want source io.ErrUnexpectedEOF (not image-processing failure)", err)
 	}
@@ -147,7 +147,7 @@ func TestStageUpload_TranscodeStageWriteFailureIsInfrastructureFailure(t *testin
 	svc := newIngestService(storage, &mockRepo{})
 	svc.Processor = &mockProcessor{detectMIME: "image/jpeg"}
 
-	_, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	_, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "", false)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("err = %v, want stage write error", err)
 	}
@@ -168,7 +168,7 @@ func TestStageUpload_PassThroughMeasurementPanicAborts(t *testing.T) {
 		}
 		assertSingleAbortedStage(t, storage)
 	}()
-	_, _ = svc.StageUpload(context.Background(), bytes.NewReader([]byte("gifish")), "")
+	_, _ = svc.StageUpload(context.Background(), bytes.NewReader([]byte("gifish")), "", false)
 }
 
 // (d) Trailing bucket-policy violation (fields after the file part,
@@ -178,7 +178,7 @@ func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
 	svc := newIngestService(storage, &mockRepo{})
 	input := model.CreateDocumentInput{DisplayName: "f.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("plain text body")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("plain text body")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestCompleteUpload_TrailingPolicyViolationAborts(t *testing.T) {
 	}
 	assertSingleAbortedStage(t, storage)
 
-	su2, err := svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("z"), 2048)), "")
+	su2, err := svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("z"), 2048)), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestCompleteUpload_DedupAtEnd(t *testing.T) {
 	svc := newIngestService(storage, repo)
 	input := model.CreateDocumentInput{DisplayName: "dup.bin", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("dup content")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("dup content")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestStageUpload_AllocationBound(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	su, err := svc.StageUpload(context.Background(), &patternReader{size: 64 << 20}, "")
+	su, err := svc.StageUpload(context.Background(), &patternReader{size: 64 << 20}, "", false)
 	runtime.ReadMemStats(&after)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestStageUpload_ConcurrentAllocationBound(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			su, err := services[i].StageUpload(context.Background(), &patternReader{size: 32 << 20}, "")
+			su, err := services[i].StageUpload(context.Background(), &patternReader{size: 32 << 20}, "", false)
 			if err == nil {
 				su.Discard()
 			}
@@ -297,7 +297,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "accepted",
 			run: func(svc *FileService) {
-				su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("ok")), "")
+				su, _ := svc.StageUpload(context.Background(), bytes.NewReader([]byte("ok")), "", false)
 				input := model.CreateDocumentInput{DisplayName: "a", StorageBucketID: uuid.New(), AuthorizationID: uuid.New()}
 				_, _ = svc.CompleteUpload(context.Background(), su, input, nil, 0)
 			},
@@ -306,7 +306,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "over-limit is transport",
 			run: func(svc *FileService) {
-				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "")
+				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: ErrOverLimit}, "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(true),
@@ -314,7 +314,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 		{
 			name: "client abort is service-distinguishable",
 			run: func(svc *FileService) {
-				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "")
+				_, _ = svc.StageUpload(context.Background(), &failAfterReader{n: 8192, err: io.ErrUnexpectedEOF}, "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(true),
@@ -323,7 +323,7 @@ func TestIngest_OutcomeLogging(t *testing.T) {
 			name: "stage write failure is service-side",
 			run: func(svc *FileService) {
 				svc.Storage.(*mockStorage).stageWriteErr = errors.New("disk gone")
-				_, _ = svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("y"), 8192)), "")
+				_, _ = svc.StageUpload(context.Background(), bytes.NewReader(bytes.Repeat([]byte("y"), 8192)), "", false)
 			},
 			wantMsg:       "ingest: stream copy failed",
 			wantTransport: boolp(false),
@@ -399,7 +399,7 @@ func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
 	} {
 		proc := &mockProcessor{detectMIME: tc.mime, measureDimsW: &w, measureDimsH: &h}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("some bytes")), "", false)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.mime, err)
 		}
@@ -415,7 +415,7 @@ func TestStageUpload_PassthroughFormatsSkipTranscoder(t *testing.T) {
 	// control: a transcodable type does route
 	proc := &mockProcessor{detectMIME: "image/jpeg"}
 	svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "")
+	su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("jpegish")), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func TestStageUpload_PassthroughMeasurementOutcomes(t *testing.T) {
 		proc := &mockProcessor{detectMIME: "image/gif", measureDimsErr: errors.New("corrupt")}
 		repo := &mockRepo{}
 		svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -448,7 +448,7 @@ func TestStageUpload_PassthroughMeasurementOutcomes(t *testing.T) {
 	t.Run("no-decoder-leaves-for-sweep", func(t *testing.T) {
 		proc := &mockProcessor{detectMIME: "image/gif"}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: &mockStorage{}, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -463,7 +463,7 @@ func TestStageUpload_PassthroughMeasurementOutcomes(t *testing.T) {
 		proc := &mockProcessor{detectMIME: "image/gif"}
 		storage := &mockStorage{stageReaderErr: errors.New("staging read unavailable")}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("gif bytes")), "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -478,7 +478,7 @@ func TestStageUpload_PassthroughMeasurementOutcomes(t *testing.T) {
 		proc := &mockProcessor{detectMIME: "image/gif", measureDimsErr: errors.New("unexpected EOF")}
 		storage := &mockStorage{stageReaderSize: 999}
 		svc := &FileService{Logger: nopLogger, Repo: &mockRepo{}, Storage: storage, Processor: proc}
-		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("short gif")), "")
+		su, err := svc.StageUpload(context.Background(), bytes.NewReader([]byte("short gif")), "", false)
 		if err != nil {
 			t.Fatal(err)
 		}

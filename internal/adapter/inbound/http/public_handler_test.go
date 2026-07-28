@@ -31,12 +31,22 @@ type mockDocRepo struct {
 	count        int
 	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
+	// By-reference lookup scripting (013 externalReference).
+	refDoc     *model.Document // non-nil → GetByReference[InBucket] returns this
+	refErr     error
+	refCalls   int
+	lastRefKey string
+
 	// Captured args from the most recent UpdateMetadata call.
 	updateMetadataCalls   int
 	lastUpdateBucketID    uuid.UUID
 	lastUpdateTemporary   bool
 	lastUpdateDisplayName string
 	lastUpdateVersion     int
+	lastUpdateMeta        model.DocumentMetadataUpdate
+
+	// Captured Create input (013: optional authorizationId, externalReference).
+	lastCreateDoc model.Document
 
 	// Captured args from Create / UpdateFile content_metadata params (US1+).
 	lastCreateContentMetadata     model.ContentMetadata
@@ -66,7 +76,30 @@ func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ u
 }
 func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.lastCreateContentMetadata = contentMetadata
+	m.lastCreateDoc = doc
 	return doc.ID, m.createErr
+}
+func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
+	m.refCalls++
+	m.lastRefKey = reference
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, _ uuid.UUID) (model.Document, error) {
+	m.refCalls++
+	m.lastRefKey = reference
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
 }
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
 	m.lastUpdateFileContentMetadata = contentMetadata
@@ -82,21 +115,30 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	}
 	return true, nil
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
 	m.updateMetadataCalls++
-	m.lastUpdateBucketID = bucketID
-	m.lastUpdateTemporary = temporary
-	m.lastUpdateDisplayName = displayName
+	m.lastUpdateBucketID = meta.StorageBucketID
+	m.lastUpdateTemporary = meta.TemporaryLocation
+	m.lastUpdateDisplayName = meta.DisplayName
 	m.lastUpdateVersion = version
+	m.lastUpdateMeta = meta
 	if m.updateErr != nil {
 		return m.updateErr
 	}
 	// Mirror real adapter behavior so the subsequent service GetByID
 	// reflects the update — otherwise tests can't tell whether the
-	// handler propagated the new values or returned stale ones.
-	m.doc.StorageBucketID = bucketID
-	m.doc.TemporaryLocation = temporary
-	m.doc.DisplayName = displayName
+	// handler propagated the new values or returned stale ones. This is the
+	// full "move + re-attribute" field set.
+	m.doc.StorageBucketID = meta.StorageBucketID
+	m.doc.TemporaryLocation = meta.TemporaryLocation
+	m.doc.DisplayName = meta.DisplayName
+	if meta.AuthorizationID != nil {
+		m.doc.AuthorizationID = *meta.AuthorizationID
+	} else {
+		m.doc.AuthorizationID = uuid.Nil
+	}
+	m.doc.CreatedBy = meta.CreatedBy
+	m.doc.ExternalReference = meta.ExternalReference
 	m.doc.Version = version + 1
 	return nil
 }

@@ -146,7 +146,7 @@ func (s *FileService) PruneBackupOutbox(ctx context.Context, retention time.Dura
 // (validation order is a documented consequence of the multipart field
 // order, research R4). Observable outcomes are identical.
 func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
-	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME)
+	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME, input.SkipImageProcessing)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,12 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// A legacy image source (or dedup destination) may have empty content_metadata; the copy simply
 	// inherits that, and the sweep-dims job (RunDimsBackfill) populates dims for both rows off-path
 	// (no libvips decode on a copy request — spec 019/020). Response omits dims until the sweep runs.
-	if !input.SkipDedup {
+	// Content-dedup applies only to non-reference copies. A reference-bearing
+	// copy (a re-share fork carrying its own externalReference) is identity'd by
+	// that reference, so it always materializes a fresh row even when the
+	// destination bucket already holds the same bytes — they share the
+	// content-addressed blob, but the DB row is per-reference.
+	if !input.SkipDedup && !hasReference(input.ExternalReference) {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
 		if err != nil {
 			return nil, err
@@ -211,6 +216,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		StorageBucketID:   input.DestinationBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		SkipDedup:         input.SkipDedup,
 	}
 	stored := model.StoredFile{
@@ -316,6 +322,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		StorageBucketID:   input.StorageBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		CreatedDate:       now,
 		UpdatedDate:       now,
 		ContentMetadata:   contentMetadata,
@@ -336,10 +343,21 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Default path: another concurrent creator won the race on the
-		// unique(externalID, storageBucketID) index. Re-query and return
-		// the winner with Reused=true.
-		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		// Best-effort race re-query. ErrDuplicateKey only arises from a DB unique
+		// violation. A reference-bearing row can collide on the partial
+		// UNIQUE(externalReference, storageBucketId) — re-resolve the winner by
+		// reference. For plain (non-reference) rows this branch is effectively
+		// inert in prod: there is no externalID content-unique index there, so
+		// content-dedup is an app-level, best-effort, racey lookup — the
+		// by-content re-query only fires on the off chance such a content
+		// constraint exists and raised a duplicate.
+		var raced model.Document
+		var findErr error
+		if hasReference(input.ExternalReference) {
+			raced, findErr = s.Repo.GetByReferenceInBucket(ctx, *input.ExternalReference, input.StorageBucketID)
+		} else {
+			raced, findErr = s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+		}
 		if findErr == nil {
 			raced.Reused = true
 			return &raced, nil
@@ -461,7 +479,9 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			zap.String("outcome", outcome))
 	}
 
-	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0)
+	// Replace never stores verbatim — content edits always run the normal
+	// transcode/measure pipeline (the raw-store path is create-only).
+	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0, false)
 	if err != nil {
 		return nil, err
 	}
@@ -527,26 +547,37 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 	}, nil
 }
 
-// UpdateDocumentMetadata updates the mutable metadata fields (storage bucket,
-// temporary-location flag, display name) atomically. The handler reads the
-// current row first and fills any fields the caller didn't supply, so this
-// method always overwrites all three columns. Uses optimistic locking via
-// the version column.
+// UpdateDocumentMetadata applies the "move + re-attribute" metadata update
+// atomically — besides storage bucket, temporary-location flag, and display
+// name it also re-points authorizationId, createdBy, and the opaque
+// externalReference (server-driven inbound re-home). The handler reads the
+// current row first and fills any field the caller didn't supply, so meta
+// always carries every column's intended final value. Uses optimistic locking
+// via the version column.
+//
+// A temporary→durable transition (the row WAS temporary and meta targets a
+// durable state) routes through the transactional PromoteWithOutbox when the
+// backup producer is on, so the now-durable object's backup hint is enqueued in
+// the SAME commit as the UPDATE (008-continuous-file-backup FR-001) — this is
+// how 013 conversation media (re-home MOVE / re-share pin / outbound flip)
+// reaches the backup outbox instead of escaping it. Every other update (and the
+// producer-off path) uses the plain versioned Repo.UpdateMetadata. Because the
+// replace path is version-guarded and version-bumping, the current.ExternalID/
+// Size the promote enqueues can't be stale (a racing replace forces this update
+// to 0 rows → ErrConflict), so develop's snapshot-enqueue design needs no
+// in-transaction RETURNING.
 //
 // mimeType, externalID, and size are not mutable through this method — they
-// change only via StoreAndLink (replace content). Callers that rename a
-// document are responsible for keeping displayName's extension consistent
-// with the (immutable) mimeType; this service does not enforce extension
-// matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, storageBucketID uuid.UUID, temporaryLocation bool, displayName string) (*model.Document, error) {
+// change only via StoreAndLink (replace content).
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, meta model.DocumentMetadataUpdate) (*model.Document, error) {
 	var err error
-	if s.Outbox != nil && current.TemporaryLocation && !temporaryLocation {
-		err = s.Outbox.PromoteWithOutbox(ctx, current, storageBucketID, displayName, s.priorityForMime(current.MimeType))
+	if s.Outbox != nil && current.TemporaryLocation && !meta.TemporaryLocation {
+		err = s.Outbox.PromoteWithOutbox(ctx, current, meta, s.priorityForMime(current.MimeType))
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
 	} else {
-		err = s.Repo.UpdateMetadata(ctx, current.ID, storageBucketID, temporaryLocation, displayName, current.Version)
+		err = s.Repo.UpdateMetadata(ctx, current.ID, meta, current.Version)
 	}
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
@@ -593,4 +624,13 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
+}
+
+// hasReference reports whether a create/copy carries a usable externalReference
+// (non-nil, non-empty). Reference-bearing rows are identity'd by their
+// reference, not by content, so they bypass per-bucket content-dedup: two
+// distinct references with identical bytes must yield two rows (each
+// by-reference-resolvable), sharing only the content-addressed blob.
+func hasReference(ref *string) bool {
+	return ref != nil && *ref != ""
 }

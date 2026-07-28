@@ -16,7 +16,7 @@ import (
 func columns() []string {
 	return []string{"id", "externalID", "mimeType", "size", "displayName", "createdBy",
 		"temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
-		"createdDate", "updatedDate", "version", "content_metadata"}
+		"createdDate", "updatedDate", "version", "content_metadata", "externalReference"}
 }
 
 func TestMock_GetByID_Found(t *testing.T) {
@@ -48,6 +48,7 @@ func TestMock_GetByID_Found(t *testing.T) {
 			pgtype.Timestamptz{Time: now, Valid: true},
 			int32(1),
 			[]byte("{}"),
+			pgtype.Text{Valid: false}, // externalReference
 		))
 
 	a := New(mock)
@@ -114,6 +115,7 @@ func TestMock_Create_Success(t *testing.T) {
 			pgxmock.AnyArg(), // createdDate
 			pgxmock.AnyArg(), // updatedDate
 			[]byte(`{}`),     // content_metadata: empty Populated=false → "{}"
+			pgxmock.AnyArg(), // externalReference
 		).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 
@@ -257,17 +259,28 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 	}
 	defer mock.Close()
 
-	// Param order in UpdateDocumentMetadata: $1=id, $2=storageBucketId,
-	// $3=temporaryLocation, $4=displayName, $5=updatedDate, $6=version.
-	// Pin everything except updatedDate (timestamp computed in adapter).
+	// Param order in UpdateDocumentMetadata (move + re-attribute): $1=id,
+	// $2=storageBucketId, $3=temporaryLocation, $4=displayName, $5=authorizationId,
+	// $6=createdBy, $7=externalReference, $8=updatedDate, $9=version. Pin
+	// everything except updatedDate (timestamp computed in adapter).
 	docID := uuid.New()
 	bucketID := uuid.New()
+	authID := uuid.New()
+	ref := "media_id_abc"
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt", pgxmock.AnyArg(), int32(1)).
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt",
+			uuidToPgxNullable(&authID), pgtype.UUID{Valid: false}, stringToPgxText(&ref),
+			pgxmock.AnyArg(), int32(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), docID, bucketID, false, "name.txt", 1)
+	err = a.UpdateMetadata(context.Background(), docID, model.DocumentMetadataUpdate{
+		StorageBucketID:   bucketID,
+		TemporaryLocation: false,
+		DisplayName:       "name.txt",
+		AuthorizationID:   &authID,
+		ExternalReference: &ref,
+	}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,11 +294,15 @@ func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(),
+		DisplayName:     "name.txt",
+	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
@@ -338,11 +355,15 @@ func TestMock_UpdateMetadata_DBError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectExec("UPDATE file SET").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
-	err = a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	err = a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(),
+		DisplayName:     "name.txt",
+	}, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
