@@ -106,9 +106,6 @@ func TestBuildFileService(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 	svc := buildFileService(pool, nil, cfg, logger)
-	if svc == nil {
-		t.Fatal("nil service")
-	}
 	if svc.Repo == nil {
 		t.Error("nil repo")
 	}
@@ -126,9 +123,6 @@ func TestNewHTTPServer(t *testing.T) {
 	})
 
 	srv := newHTTPServer(0, handler)
-	if srv == nil {
-		t.Fatal("nil server")
-	}
 	// Ordinary bodies keep the fixed cap; upload handlers replace it with
 	// a rolling per-read deadline.
 	if srv.ReadTimeout != 30*time.Second {
@@ -209,6 +203,47 @@ func TestDimsJobExitCode(t *testing.T) {
 	for _, c := range cases {
 		if got := dimsJobExitCode(c.sum); got != c.want {
 			t.Errorf("%s: exit = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// The verdict rule the sweep-cids Job's retry behaviour hangs on (FR-017,
+// SC-010). The load-bearing case is a pass whose only untouched records are the
+// permanently-absent cohort: it MUST exit 0, or the operator's rerun loop has no
+// terminating condition — nothing this system can do will ever restore those
+// bytes, so they will skip on every future run.
+func TestCIDsJobExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		sum  service.CIDNormalizeSummary
+		want int
+	}{
+		{"clean converged pass", service.CIDNormalizeSummary{Normalized: 1053, Reclaimed: 1053}, 0},
+		{"nothing left to do", service.CIDNormalizeSummary{}, 0},
+		{"normalized plus permanently-absent content", service.CIDNormalizeSummary{Normalized: 900, Skipped: 153}, 0},
+		{"only absent content left", service.CIDNormalizeSummary{Skipped: 153}, 0},
+		{"lost races only", service.CIDNormalizeSummary{Normalized: 10, Skipped: 3}, 0},
+		{"a genuine failure", service.CIDNormalizeSummary{Normalized: 900, Failed: 1}, 1},
+		{"ended early after progress", service.CIDNormalizeSummary{Normalized: 500, Aborted: true}, 1},
+		// A total outage fails the FIRST page scan: Aborted with zero of everything.
+		// Aborted alone must gate exit 1, or that silently exits 0.
+		{"ended early on page one", service.CIDNormalizeSummary{Aborted: true}, 1},
+		{"dry run is subject to the same rule", service.CIDNormalizeSummary{DryRun: true, WouldNormalize: 1053}, 0},
+	}
+	for _, c := range cases {
+		if got := cidsJobExitCode(c.sum); got != c.want {
+			t.Errorf("%s: exit = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// `--rate` bounds load on shared production infrastructure, so a non-positive
+// value is rejected rather than read as "unlimited". This is checked before any
+// database connection, which is what makes it testable here.
+func TestSweepCIDsRejectsNonPositiveRate(t *testing.T) {
+	for _, arg := range []string{"0", "-1", "-0.5"} {
+		if got := runSweepCIDs([]string{"--rate", arg}); got != 2 {
+			t.Errorf("--rate %s: exit = %d, want 2", arg, got)
 		}
 	}
 }

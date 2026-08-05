@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -275,6 +276,88 @@ func runSweepDims() int {
 // all-skipped ruling from file-backup-service's backfillVerdict.)
 func dimsJobExitCode(sum service.DimsBackfillSummary) int {
 	if sum.Aborted {
+		return 1
+	}
+	return 0
+}
+
+// runSweepCIDs runs the legacy-name normalization ONCE and exits — the one-shot `sweep-cids`
+// subcommand (018-legacy-cid-normalization), invoked as a manually-triggered k8s Job. Like
+// `sweep-dims` it never authorizes, so it builds the service with a nil auth port and no NATS.
+//
+// This migration is IRREVERSIBLE (the legacy blob is reclaimed in the same pass), which is why
+// --dry-run exists and why the run report is written to the mounted store rather than only logged.
+// SIGINT/SIGTERM cancels the pass for a clean Job termination; the pass is resumable, so an
+// interrupted run is simply re-run.
+func runSweepCIDs(args []string) int {
+	fs := flag.NewFlagSet("sweep-cids", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false,
+		"enumerate and report the affected count, changing nothing at all")
+	rate := fs.Float64("rate", 0,
+		"objects/second ceiling (default: the conservative built-in rate)")
+	if err := fs.Parse(args); err != nil {
+		return 2 // invalid flags — same class as an unknown subcommand
+	}
+
+	// A rate of zero or below is rejected rather than read as "unlimited": each object costs a blob
+	// read, a blob write and a DB round-trip against shared production infrastructure, so an
+	// unbounded pass is a self-inflicted load test (FR-015). `--rate` left unset is a different
+	// thing from `--rate 0`, so the two are told apart by whether the flag was actually given.
+	rateSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "rate" {
+			rateSet = true
+		}
+	})
+	if rateSet && *rate <= 0 {
+		fmt.Fprintf(os.Stderr, "file-service: --rate must be greater than 0 (got %v); it bounds load on shared production infrastructure and has no 'unlimited' setting\n", *rate)
+		return 2
+	}
+
+	base, cleanup, code := setupSweepBase()
+	if base == nil {
+		return code
+	}
+	defer cleanup()
+	logger := base.logger
+
+	effectiveRate := base.cfg.SweepCIDs.DefaultRate
+	if rateSet {
+		effectiveRate = *rate
+	}
+
+	fileSvc := buildFileService(base.pool, nil, base.cfg, logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("sweep-cids job starting",
+		zap.Bool("dry_run", *dryRun),
+		zap.Float64("rate", effectiveRate))
+	sum := fileSvc.RunCIDNormalize(ctx, service.CIDNormalizeOptions{
+		DryRun: *dryRun,
+		Rate:   effectiveRate,
+		// The service, not this caller, enforces that a dry run writes nothing —
+		// keeping the FR-007 rule in one place instead of two.
+		Report: local.NewReportSink(base.cfg.StoragePath, base.cfg.SweepCIDs.ReportDir),
+	})
+	return cidsJobExitCode(sum)
+}
+
+// cidsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is
+// unit-testable, mirroring dimsJobExitCode and file-backup-service's backfillVerdict.
+//
+// Exit 1 when the pass ENDED EARLY (page-scan error or a shutdown signal), or when an in-scope
+// object GENUINELY FAILED — both are cases where a rerun can make progress.
+//
+// Skips never gate the exit code, and here that is a hard requirement rather than a judgement call
+// (FR-017). The dominant skip is a record whose blob is absent — the 2026-06-30 NFS data-loss
+// cohort owned by alkemio#1995. Nothing this sweep can do restores those bytes, so they will skip
+// on EVERY future run: counting them as failure would mean the migration can never report success
+// and the operator never reaches a terminating condition. The logged normalized/skipped/failed
+// summary and the retained run report are where the detail lives.
+func cidsJobExitCode(sum service.CIDNormalizeSummary) int {
+	if sum.Aborted || sum.Failed > 0 {
 		return 1
 	}
 	return 0

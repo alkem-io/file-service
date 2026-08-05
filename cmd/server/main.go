@@ -30,8 +30,10 @@ func run(args []string) int {
 		return runServe()
 	case "sweep-dims":
 		return runSweepDims()
+	case "sweep-cids":
+		return runSweepCIDs(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims)\n", cmd)
+		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims | sweep-cids)\n", cmd)
 		return 2
 	}
 }

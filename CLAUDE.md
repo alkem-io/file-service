@@ -107,6 +107,27 @@ Continuous-backup outbox producer (008-continuous-file-backup, **off by default*
 - `FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS` — retention for consumer-finished (`done`)
   rows before the hourly prune drops them (default 24).
 
+Legacy blob-name normalization (018-legacy-cid-normalization) — the `sweep-cids` subcommand,
+third beside `serve` and `sweep-dims`, run as a manually-triggered one-shot Job:
+- Objects predating content addressing are named by an IPFS CID, so their bytes can never
+  hash to their name and file-backup-service refuses them — unbackable, hence data-at-risk
+  (`alkem-io/file-service#63` bucket A). The sweep re-addresses them under the digest of the
+  bytes as found, repoints every referencing record, and reclaims the legacy blob at
+  refcount zero.
+- The legacy name is **never decoded or verified** against the bytes: these objects have
+  unknown write history, so the bytes are the only truth and the new address is correct by
+  construction. No multihash decoder, no new dependency.
+- Order is **publish → repoint → reclaim** so no record ever names an absent blob; every
+  record write is a compare-and-set on `(id, externalID, version)`, so a concurrent Replace
+  or promote wins and the sweep skips.
+- **Irreversible** (the legacy blob goes in the same pass) — `--dry-run` first. `--rate`
+  bounds objects/second; non-positive is rejected, never "unlimited". Absent content is a
+  skip, never a failure, so the migration has a terminating condition.
+- **Never run concurrently with `sweep-dims`** — that sweep's write is guarded on the
+  record's current name, so renamed rows are skipped and its pass under-completes.
+- Each real pass writes a run report to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
+  surviving record of the old→new mapping.
+
 The `file_backup_outbox` **table DDL is a server-owned migration** — file-service does
 only the transactional DML (enqueue) and the prune; `db/schema/outbox.sql` is a sqlc
 codegen mirror. Producer activity is counted on `/internal/debug/vars`:

@@ -111,6 +111,47 @@ Producer activity is counted on the expvar endpoint (`/internal/debug/vars`):
 `file_backup_outbox_enqueued_total`, `file_backup_outbox_pruned_total`, and
 `file_backup_outbox_orphaned_total`.
 
+## Maintenance subcommands (one-shot Jobs)
+
+The binary dispatches on its first argument. The default is `serve` (the long-running
+HTTP server); the rest are finite, converging migrations run as **manually-triggered
+k8s Jobs**, never on a schedule and never at service start-up.
+
+```bash
+file-service serve                              # default
+file-service sweep-dims                         # backfill image dimensions (spec 019/020)
+file-service sweep-cids [--dry-run] [--rate N]  # normalize legacy blob names (spec 018)
+```
+
+### `sweep-cids` — legacy IPFS-CID → SHA3-256 blob names
+
+Objects written before content addressing are named by an IPFS CID, so SHA3-256 of
+their bytes can never equal their name and file-backup-service refuses them — they are
+**unbackable, therefore data-at-risk** (see `alkem-io/file-service#63`, bucket A). This
+sweep re-addresses them under the digest of whatever bytes are on the store, repoints
+every referencing record, and reclaims the legacy blob once nothing names it.
+
+Per object the order is **publish → repoint → reclaim**, which is what makes it safe
+against live traffic: at no instant does a record name a blob that is absent. Every
+record write is a compare-and-set on `(id, externalID, version)`, so a concurrent
+content Replace or a temporary→permanent promotion wins and the sweep skips.
+
+- **Irreversible.** The legacy blob is reclaimed in the same pass. Run `--dry-run`
+  first — it enumerates through the same predicate and changes nothing at all.
+- **Do not run it concurrently with `sweep-dims`.** Not unsafe, but that sweep's write
+  is guarded on the record's current name, so records renamed underneath it are skipped
+  and its pass silently under-completes. Run them sequentially.
+- `--rate` bounds objects/second (default: a conservative built-in). A non-positive
+  value is rejected rather than read as "unlimited".
+- Exit `1` means the pass ended early **or** a record genuinely failed; a record whose
+  content is absent is a legitimate skip and never fails the run.
+- Each real pass writes a JSON **run report** to `<LOCAL_STORAGE_PATH>/_sweep-reports/`,
+  recording the previous and new name of every record it changed. Since the legacy blob
+  is gone afterwards, this is the only way to reconstruct the mapping. The reserved
+  directory name is one the store's key rules can never produce, so no enumeration of
+  the store can mistake a report for content. The absolute path is the last line the
+  Job logs.
+
 ## Development
 
 ```bash
