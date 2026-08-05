@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -58,6 +59,77 @@ var activeContentMIME = map[string]bool{
 	"application/x-mimearchive": true,
 }
 
+// rfc8187AttrChars is the non-alphanumeric part of RFC 8187's attr-char set —
+// the bytes an ext-value may carry unencoded. Note what it excludes: quote,
+// backslash, semicolon, CR, LF and every other header-significant byte, so a
+// value reduced to this set cannot influence header framing.
+const rfc8187AttrChars = "!#$&+-.^_`|~"
+
+const upperhex = "0123456789ABCDEF"
+
+// attachmentDisposition builds the Content-Disposition header for a forced
+// download, naming the file so it saves under its displayName instead of the
+// bare document UUID (with no extension).
+//
+// displayName is caller-controlled data going into a response HEADER, so it is
+// SANITIZED, not merely escaped:
+//
+//   - filename= (the ASCII fallback) keeps printable ASCII only, minus the
+//     quoted-string metacharacters (" and \), the parameter separator (;) and
+//     the path separators (/ and \). Every other byte — CR, LF, NUL, any
+//     control or non-ASCII byte — becomes '_'. No input can close the quoted
+//     string, append a parameter, or start a new header line.
+//   - filename* (the RFC 5987/8187 UTF-8 ext-value) carries the exact name for
+//     UAs that implement it, percent-encoded down to attr-char, which likewise
+//     contains no header-significant byte.
+//
+// Legacy rows predate validateDisplayName, so the sanitizing is real defence
+// rather than belt-and-braces. A blank name yields a bare `attachment`.
+func attachmentDisposition(displayName string) string {
+	if strings.TrimSpace(displayName) == "" {
+		return "attachment"
+	}
+	return `attachment; filename="` + asciiFilename(displayName) +
+		`"; filename*=UTF-8''` + rfc8187Encode(displayName)
+}
+
+// asciiFilename reduces a name to bytes that are safe inside a quoted-string
+// header parameter, substituting '_' for everything else (see
+// attachmentDisposition for the threat model).
+func asciiFilename(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := range len(name) {
+		c := name[i]
+		switch {
+		case c < 0x20 || c >= 0x7f, c == '"', c == '\\', c == ';', c == '/':
+			b.WriteByte('_')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// rfc8187Encode percent-encodes a UTF-8 string down to RFC 8187's attr-char
+// set, for the filename* parameter value.
+func rfc8187Encode(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := range len(s) {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			strings.IndexByte(rfc8187AttrChars, c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(upperhex[c>>4])
+		b.WriteByte(upperhex[c&0x0f])
+	}
+	return b.String()
+}
+
 // PublicHandler handles the authenticated public file serving endpoint.
 type PublicHandler struct {
 	Repo    port.DocumentRepo
@@ -89,6 +161,21 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Logger.Error("failed to lookup document", zap.Error(err))
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// A document with NO authorization policy is DENIED here, at the
+	// file-service boundary. Its authorizationId column is NULL, which reads
+	// back as the zero UUID; handing that to CheckPrivilege would delegate the
+	// readability of a policy-less document to whatever the auth-evaluation
+	// service does with a policy id that does not exist. Staging documents (the
+	// Synapse media provider's matrix_media store) are not publicly servable —
+	// the server mints the real policy on inbound re-home, and only then does a
+	// privilege evaluation mean anything. Answered with the same 403 as any
+	// other denial so the response does not distinguish "policy-less" from
+	// "not permitted".
+	if doc.AuthorizationID == uuid.Nil {
+		writeJSONError(w, http.StatusForbidden, "insufficient privileges")
 		return
 	}
 
@@ -130,7 +217,7 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	// serves inline for TS-parity in-browser preview.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if activeContentMIME[model.NormalizeMIME(doc.MimeType)] {
-		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("Content-Disposition", attachmentDisposition(doc.DisplayName))
 	} else {
 		w.Header().Set("Content-Disposition", "inline")
 	}
