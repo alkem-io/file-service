@@ -56,10 +56,10 @@ func TestPgxToUUIDNullable_Valid(t *testing.T) {
 	id := uuid.New()
 	pgxID := pgtype.UUID{Bytes: id, Valid: true}
 	got := pgxToUUIDNullable(pgxID)
-	if got == nil {
+	switch {
+	case got == nil:
 		t.Fatal("expected non-nil")
-	}
-	if *got != id {
+	case *got != id:
 		t.Errorf("got %v, want %v", *got, id)
 	}
 }

@@ -108,3 +108,40 @@ func TestReportSink_CreatesDirectoryLazily(t *testing.T) {
 		t.Errorf("reserved directory missing after a write: %v", err)
 	}
 }
+
+// The journal is the crash-safety net for the report: each mapping must be on
+// disk before the blob it names is deleted, so lines accumulate rather than
+// replacing one another.
+func TestReportSink_JournalAppendsAndSurvivesReopen(t *testing.T) {
+	base := t.TempDir()
+	sink := NewReportSink(base, reservedDir)
+
+	for _, line := range []string{"{\"a\":1}\n", "{\"b\":2}\n", "{\"c\":3}\n"} {
+		path, err := sink.AppendJournal("run.ndjson", []byte(line))
+		if err != nil {
+			t.Fatalf("AppendJournal(%q): %v", line, err)
+		}
+		if !filepath.IsAbs(path) {
+			t.Errorf("returned %q, want an absolute path", path)
+		}
+	}
+
+	got, err := os.ReadFile(filepath.Join(base, reservedDir, "run.ndjson")) // #nosec G304 -- test-controlled path
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n"
+	if string(got) != want {
+		t.Errorf("journal = %q, want %q — each append must add a line, not replace the file", got, want)
+	}
+}
+
+// The journal shares the reserved directory's boundary rules with the report.
+func TestReportSink_JournalRejectsNamesThatEscapeTheDirectory(t *testing.T) {
+	sink := NewReportSink(t.TempDir(), reservedDir)
+	for _, name := range []string{"", "..", "../out.ndjson", "nested/run.ndjson"} {
+		if _, err := sink.AppendJournal(name, []byte("x\n")); !errors.Is(err, port.ErrInvalidKey) {
+			t.Errorf("AppendJournal(%q) err = %v, want ErrInvalidKey", name, err)
+		}
+	}
+}

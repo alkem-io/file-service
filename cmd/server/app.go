@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -298,19 +300,33 @@ func runSweepCIDs(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2 // invalid flags — same class as an unknown subcommand
 	}
+	// Go's flag parser STOPS at the first non-flag operand, so `sweep-cids prod --dry-run`
+	// parses cleanly with dry-run FALSE and runs the irreversible pass. A stray word in a Job's
+	// args:, or one `--` too many in `kubectl create job ... -- sweep-cids -- --dry-run`, would
+	// silently turn a requested preview into a full corpus rewrite. Nothing here takes a
+	// positional argument, so any is a mistake.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr,
+			"file-service: sweep-cids takes no positional arguments, got %q — flags after one are IGNORED by the parser, which would silently drop --dry-run\n",
+			fs.Args())
+		return 2
+	}
 
-	// A rate of zero or below is rejected rather than read as "unlimited": each object costs a blob
-	// read, a blob write and a DB round-trip against shared production infrastructure, so an
-	// unbounded pass is a self-inflicted load test (FR-015). `--rate` left unset is a different
-	// thing from `--rate 0`, so the two are told apart by whether the flag was actually given.
+	// `--rate` left unset is a different thing from `--rate 0`, so the two are told apart by
+	// whether the flag was actually given.
 	rateSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "rate" {
 			rateSet = true
 		}
 	})
-	if rateSet && *rate <= 0 {
-		fmt.Fprintf(os.Stderr, "file-service: --rate must be greater than 0 (got %v); it bounds load on shared production infrastructure and has no 'unlimited' setting\n", *rate)
+	// Rejected rather than read as "unlimited": each object costs a blob read, a blob write and a
+	// DB round-trip against shared production infrastructure, so an unbounded pass is a
+	// self-inflicted load test (FR-015). Written as !(v > 0) so NaN — for which every comparison
+	// is false — is rejected too; ParseFloat accepts "NaN" and "Inf", and either would collapse
+	// the pacing interval to zero AND make the run report unencodable.
+	if rateSet && (!(*rate > 0) || math.IsInf(*rate, 0)) {
+		fmt.Fprintf(os.Stderr, "file-service: --rate must be a positive, finite number (got %v); it bounds load on shared production infrastructure and has no 'unlimited' setting\n", *rate)
 		return 2
 	}
 
@@ -320,6 +336,18 @@ func runSweepCIDs(args []string) int {
 	}
 	defer cleanup()
 	logger := base.logger
+
+	// An unmounted PVC, or LOCAL_STORAGE_PATH left at its relative dev default, makes EVERY read
+	// return ENOENT — which the sweep correctly classifies as "content permanently absent". The
+	// pass would then report zero failures, exit 0, and brand the whole corpus unrecoverable in
+	// the one durable record of the migration. The storage adapter deliberately does not tell an
+	// absent blob from an absent store ("that judgement belongs to the caller that knows what
+	// SHOULD exist"); this is that caller making it, once, before touching anything.
+	if err := verifySweepStorage(base.cfg.StoragePath); err != nil {
+		logger.Error("sweep-cids: refusing to run — the content store is not usable",
+			zap.String("path", base.cfg.StoragePath), zap.Error(err))
+		return 1
+	}
 
 	effectiveRate := base.cfg.SweepCIDs.DefaultRate
 	if rateSet {
@@ -331,17 +359,45 @@ func runSweepCIDs(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	sink := local.NewReportSink(base.cfg.StoragePath, base.cfg.SweepCIDs.ReportDir).
+		WithLogf(func(format string, args ...any) { logger.Warn(fmt.Sprintf(format, args...)) })
+
 	logger.Info("sweep-cids job starting",
 		zap.Bool("dry_run", *dryRun),
-		zap.Float64("rate", effectiveRate))
+		zap.Float64("rate", effectiveRate),
+		zap.String("reports", sink.Dir()))
 	sum := fileSvc.RunCIDNormalize(ctx, service.CIDNormalizeOptions{
 		DryRun: *dryRun,
 		Rate:   effectiveRate,
 		// The service, not this caller, enforces that a dry run writes nothing —
 		// keeping the FR-007 rule in one place instead of two.
-		Report: local.NewReportSink(base.cfg.StoragePath, base.cfg.SweepCIDs.ReportDir),
+		Report: sink,
 	})
 	return cidsJobExitCode(sum)
+}
+
+// verifySweepStorage checks the content store is actually there before an irreversible pass reads
+// "absent" as a fact about the data. A non-empty directory is the bar: an empty one is either an
+// unmounted volume or a store with nothing to sweep, and the sweep has no business guessing which.
+func verifySweepStorage(path string) error {
+	if path == "" {
+		return errors.New("LOCAL_STORAGE_PATH is empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("%s is empty — an unmounted volume looks exactly like a corpus whose content is all gone", path)
+	}
+	return nil
 }
 
 // cidsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is
@@ -356,8 +412,13 @@ func runSweepCIDs(args []string) int {
 // on EVERY future run: counting them as failure would mean the migration can never report success
 // and the operator never reaches a terminating condition. The logged normalized/skipped/failed
 // summary and the retained run report are where the detail lives.
+//
+// A failed report ALSO gates the exit code. The pass reclaims each legacy blob in the same run
+// that renames it, so the report and its per-record journal are the only surviving record of what
+// was destroyed; a pass that migrated cleanly and then lost that record has left the operator with
+// an irreversible change and no audit trail, which must not read as success.
 func cidsJobExitCode(sum service.CIDNormalizeSummary) int {
-	if sum.Aborted || sum.Failed > 0 {
+	if sum.Aborted || sum.Failed > 0 || sum.ReportFailed {
 		return 1
 	}
 	return 0

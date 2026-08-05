@@ -90,6 +90,14 @@ func (a *Adapter) ListLegacyNamed(ctx context.Context, after uuid.UUID, limit in
 // NormalizeExternalID implements port.DocumentRepo's compare-and-set rename (018).
 // Zero rows affected is NOT an error: it means a concurrent Replace or promotion
 // won the race, which the sweep treats as a skip.
+//
+// A unique violation maps to model.ErrDuplicateKey, exactly as Create and UpdateFile
+// do. It is reachable here: the legacy row's bytes may dedup onto a digest another row
+// in the SAME bucket already carries (the same asset uploaded before and after the
+// addressing migration), and the production schema can carry a
+// (externalID, storageBucketId) uniqueness constraint this repo's DDL does not show.
+// Letting the raw driver error through would classify a permanent, rerun-proof
+// collision as a transient write failure.
 func (a *Adapter) NormalizeExternalID(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
 	rows, err := a.queries.NormalizeDocumentExternalID(ctx, queries.NormalizeDocumentExternalIDParams{
 		ID:           uuidToPgx(id),
@@ -98,6 +106,9 @@ func (a *Adapter) NormalizeExternalID(ctx context.Context, id uuid.UUID, expecte
 		ExternalID_2: newExternalID,
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			return false, model.ErrDuplicateKey
+		}
 		return false, err
 	}
 	return rows > 0, nil

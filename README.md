@@ -138,9 +138,14 @@ content Replace or a temporary→permanent promotion wins and the sweep skips.
 
 - **Irreversible.** The legacy blob is reclaimed in the same pass. Run `--dry-run`
   first — it enumerates through the same predicate and changes nothing at all.
-- **Do not run it concurrently with `sweep-dims`.** Not unsafe, but that sweep's write
-  is guarded on the record's current name, so records renamed underneath it are skipped
-  and its pass silently under-completes. Run them sequentially.
+- **It interacts with the other externalID-guarded writers, harmlessly.** `sweep-dims`
+  and the boot-time MIME repair both compare-and-set on a record's *current* name, so any
+  row this sweep renames underneath them fails that guard and is skipped. Nothing
+  corrupts, and nothing is lost: both re-derive their work-lists from self-clearing
+  predicates, so a skipped row is simply picked up on their next run (MIME repair runs on
+  every serve-pod boot; `sweep-dims` on its next Job). Sequencing them is therefore an
+  efficiency choice, not a correctness requirement — which matters, because MIME repair
+  starts whenever a pod boots and no operator controls that.
 - `--rate` bounds objects/second (default: a conservative built-in). A non-positive
   value is rejected rather than read as "unlimited".
 - Exit `1` means the pass ended early **or** a record genuinely failed; a record whose

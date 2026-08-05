@@ -293,9 +293,15 @@ type ListDocumentsWithLegacyExternalIDRow struct {
 // everything needing repair by construction. It is also the exact predicate an
 // operator runs to confirm convergence, so detection and verification cannot drift.
 //
-// Scope is permanent rows only. A row still flagged temporary in a cohort this old is
-// orphaned residue, not an upload in flight — nothing in it will be promoted back into
-// the permanent corpus, so it cannot reintroduce the defect after the sweep converges.
+// Scope is permanent rows only: a row still flagged temporary in a cohort this old is
+// orphaned residue, not an upload in flight.
+//
+// Known residual: the promote path (UpdateDocumentMetadata) flips temporaryLocation
+// without touching "externalID", so a legacy-named TEMPORARY row promoted after a
+// converged sweep re-enters this predicate — and PromoteWithOutbox would enqueue a
+// backup hint carrying the CID, re-creating the unbackable condition of #63 for that one
+// row. Re-running the sweep clears it. The convergence check is therefore a check of the
+// corpus at a point in time, not a permanent guarantee.
 //
 // Keyset-paged by id ($1 = cursor, $2 = page size): releases the pool connection between
 // pages so a multi-hour pass cannot pin a connection or hold back xmin on the shared

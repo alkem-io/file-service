@@ -123,8 +123,11 @@ third beside `serve` and `sweep-dims`, run as a manually-triggered one-shot Job:
 - **Irreversible** (the legacy blob goes in the same pass) — `--dry-run` first. `--rate`
   bounds objects/second; non-positive is rejected, never "unlimited". Absent content is a
   skip, never a failure, so the migration has a terminating condition.
-- **Never run concurrently with `sweep-dims`** — that sweep's write is guarded on the
-  record's current name, so renamed rows are skipped and its pass under-completes.
+- Renames make the other externalID-guarded writers (`sweep-dims`, and the boot-time MIME
+  repair launched on EVERY serve-pod boot) skip the affected rows. Harmless: both
+  re-derive their work-lists from self-clearing predicates, so those rows are picked up on
+  their next run. Sequencing is an efficiency choice, not a correctness requirement — no
+  operator controls when a pod boots.
 - Each real pass writes a run report to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
   surviving record of the old→new mapping.
 

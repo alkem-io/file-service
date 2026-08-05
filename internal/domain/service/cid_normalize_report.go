@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
 // cidReportSchemaVersion pins the shape defined by
@@ -27,6 +25,16 @@ const (
 // is what keeps two passes started in the same second from colliding — the sink
 // creates reports exclusively and would otherwise fail the second one.
 const cidReportTimeLayout = "20060102T150405.000000000Z"
+
+func cidReportName(startedAt time.Time) string {
+	return fmt.Sprintf("sweep-cids-%s.json", startedAt.UTC().Format(cidReportTimeLayout))
+}
+
+// The journal shares the report's stem so the two halves of one pass sort
+// together, and carries .ndjson because it is written one fsynced line at a time.
+func cidJournalName(startedAt time.Time) string {
+	return fmt.Sprintf("sweep-cids-%s.ndjson", startedAt.UTC().Format(cidReportTimeLayout))
+}
 
 type cidRunReport struct {
 	SchemaVersion int                `json:"schemaVersion"`
@@ -51,6 +59,9 @@ type cidReportChange struct {
 	PreviousExternalID string `json:"previousExternalID"`
 	NewExternalID      string `json:"newExternalID"`
 	SharedWith         int    `json:"sharedWith"`
+	// LegacyBlob is omitted from a journal line, which is written before
+	// reclamation is attempted and therefore cannot know the answer.
+	LegacyBlob string `json:"legacyBlob,omitempty"`
 }
 
 type cidReportSkipped struct {
@@ -60,15 +71,30 @@ type cidReportSkipped struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
+// cidJournalLine encodes one mapping as a single NDJSON line, written and
+// fsynced before the legacy blob it names is reclaimed.
+func cidJournalLine(c CIDNormalizeChange) ([]byte, error) {
+	data, err := json.Marshal(cidReportChange{
+		FileID:             c.FileID.String(),
+		PreviousExternalID: c.PreviousExternalID,
+		NewExternalID:      c.NewExternalID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
 // writeCIDNormalizeReport persists the durable record of what the pass did
 // (FR-016, FR-018) and logs where it landed (FR-019).
 //
 // This is load-bearing rather than nice-to-have: the pass reclaims each legacy
 // blob in the same run that renames it, so once the process exits this file is
-// the only thing that still knows the old name. Best-effort — a report that
-// cannot be written must not undo a migration that already succeeded, so the
-// failure is logged loudly and the run's verdict is unchanged.
-func (s *FileService) writeCIDNormalizeReport(sum CIDNormalizeSummary, sink port.ReportSink) {
+// the only thing that still knows the old name. A failure here therefore sets
+// ReportFailed, which gates the exit code — a pass that destroyed blobs and then
+// lost the mapping must not read as clean success. The per-record journal is the
+// backstop: it is already on disk, line by line, before each reclamation.
+func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cidRun) {
 	rep := cidRunReport{
 		SchemaVersion: cidReportSchemaVersion,
 		StartedAt:     sum.StartedAt,
@@ -95,6 +121,7 @@ func (s *FileService) writeCIDNormalizeReport(sum CIDNormalizeSummary, sink port
 			PreviousExternalID: c.PreviousExternalID,
 			NewExternalID:      c.NewExternalID,
 			SharedWith:         c.SharedWith,
+			LegacyBlob:         c.LegacyBlob,
 		})
 	}
 	for _, n := range sum.NotChanged {
@@ -106,21 +133,33 @@ func (s *FileService) writeCIDNormalizeReport(sum CIDNormalizeSummary, sink port
 		})
 	}
 
+	// A journal line that never reached the disk is already a lost mapping, even
+	// if the report below writes cleanly.
+	if run.journalFailed {
+		sum.ReportFailed = true
+	}
+
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
-		s.Logger.Error("sweep-cids: could not encode the run report; the old→new mapping for this pass is NOT recorded",
+		sum.ReportFailed = true
+		s.Logger.Error("sweep-cids: could not encode the run report",
+			zap.String("journal", run.journalPath),
+			zap.String("recoverFrom", "the per-record journal, if it was written"),
 			zap.Error(err))
 		return
 	}
-	name := fmt.Sprintf("sweep-cids-%s.json", sum.StartedAt.UTC().Format(cidReportTimeLayout))
-	path, err := sink.WriteReport(name, data)
+	name := cidReportName(sum.StartedAt)
+	path, err := run.opts.Report.WriteReport(name, data)
 	if err != nil {
-		s.Logger.Error("sweep-cids: could not write the run report; the old→new mapping for this pass is NOT recorded",
-			zap.String("report", name), zap.Error(err))
+		sum.ReportFailed = true
+		s.Logger.Error("sweep-cids: could not write the run report",
+			zap.String("report", name),
+			zap.String("journal", run.journalPath),
+			zap.String("recoverFrom", "the per-record journal, if it was written"),
+			zap.Error(err))
 		return
 	}
-	// Last line of the run, and deliberately the full path: an operator reading
-	// only the Job logs must be able to find the file without knowing the
-	// storage layout (FR-019).
+	// Deliberately the full path: an operator reading only the Job logs must be
+	// able to find the file without knowing the storage layout (FR-019).
 	s.Logger.Info("sweep-cids: run report written", zap.String("path", path))
 }

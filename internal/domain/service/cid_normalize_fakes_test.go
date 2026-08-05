@@ -153,6 +153,9 @@ type cidStore struct {
 	openStageErr error
 	commitErr    error
 	deleteErr    error
+	// shortRead makes ReadStream report the blob's true size but hand back only
+	// the first N bytes, ending in a clean EOF — the NFS fault io.Copy cannot see.
+	shortRead map[string]int
 
 	created []string // names published for the first time (dedup hits excluded)
 	deletes []string
@@ -167,7 +170,7 @@ type cidStore struct {
 var _ port.StoragePort = (*cidStore)(nil)
 
 func newCIDStore() *cidStore {
-	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}}
+	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, shortRead: map[string]int{}}
 }
 
 func (s *cidStore) put(name string, content []byte) { s.blobs[name] = content }
@@ -199,6 +202,11 @@ func (s *cidStore) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 	b, err := s.Read(externalID)
 	if err != nil {
 		return nil, 0, err
+	}
+	if n, ok := s.shortRead[externalID]; ok {
+		// Size from the open handle's Stat, body truncated: exactly what a
+		// blipping volume delivers, and exactly what io.Copy reports as success.
+		return io.NopCloser(bytes.NewReader(b[:n])), int64(len(b)), nil
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
@@ -255,12 +263,21 @@ func (st *cidStage) StagedReaderAt() (io.ReaderAt, int64, error) {
 	return bytes.NewReader(b), int64(len(b)), nil
 }
 
-// cidSink captures the run report instead of writing it anywhere.
+// cidSink captures the run report and the journal instead of writing them
+// anywhere, and records WHEN each landed relative to the store's deletes — the
+// journal's whole purpose is to precede reclamation.
 type cidSink struct {
 	writes int
 	name   string
 	data   []byte
 	err    error
+
+	journalName  string
+	journalLines [][]byte
+	journalErr   error
+	// onAppend fires after each journal line is accepted, so a test can assert
+	// what the store looked like at that instant.
+	onAppend func(line []byte)
 }
 
 var _ port.ReportSink = (*cidSink)(nil)
@@ -271,6 +288,18 @@ func (s *cidSink) WriteReport(name string, data []byte) (string, error) {
 	s.data = data
 	if s.err != nil {
 		return "", s.err
+	}
+	return "/mnt/storage/_sweep-reports/" + name, nil
+}
+
+func (s *cidSink) AppendJournal(name string, line []byte) (string, error) {
+	if s.journalErr != nil {
+		return "", s.journalErr
+	}
+	s.journalName = name
+	s.journalLines = append(s.journalLines, append([]byte(nil), line...))
+	if s.onAppend != nil {
+		s.onAppend(line)
 	}
 	return "/mnt/storage/_sweep-reports/" + name, nil
 }

@@ -388,13 +388,15 @@ func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) 
 // Both steps are best-effort warn-only cleanup: a leftover blob is GC-able, and a leftover pending
 // row is caught by the consumer's 404→skip backstop. Outbox cleanup runs only after a successful
 // blob delete — while the blob exists, pending rows are still backable.
-func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) {
+// Returns whether the blob was actually deleted, for callers that report a
+// reclamation count.
+func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string) bool {
 	if err := s.Storage.Delete(externalID); err != nil {
 		s.Logger.Warn("cleanup: failed to delete orphaned file", zap.String("externalID", externalID), zap.Error(err))
-		return
+		return false
 	}
 	if s.Outbox == nil {
-		return
+		return true
 	}
 	if n, err := s.Outbox.DeletePendingByHash(ctx, externalID); err != nil {
 		s.Logger.Warn("cleanup: failed to drop pending outbox rows for deleted blob",
@@ -404,6 +406,7 @@ func (s *FileService) cleanupOrphanedBlob(ctx context.Context, externalID string
 		s.Logger.Info("cleanup: dropped pending outbox rows for deleted blob",
 			zap.String("externalID", externalID), zap.Int64("rows", n))
 	}
+	return true
 }
 
 // StoreAndLink replaces file content for an existing document atomically.

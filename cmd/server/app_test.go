@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -244,6 +246,68 @@ func TestSweepCIDsRejectsNonPositiveRate(t *testing.T) {
 	for _, arg := range []string{"0", "-1", "-0.5"} {
 		if got := runSweepCIDs([]string{"--rate", arg}); got != 2 {
 			t.Errorf("--rate %s: exit = %d, want 2", arg, got)
+		}
+	}
+}
+
+// Go's flag parser STOPS at the first non-flag operand, so a stray word makes
+// every flag after it a positional argument that is silently ignored — turning a
+// requested preview into the real, irreversible pass.
+func TestSweepCIDsRejectsPositionalArguments(t *testing.T) {
+	cases := [][]string{
+		{"prod", "--dry-run"},  // a stray word in a Job's args:
+		{"--", "--dry-run"},    // one separator too many in `kubectl create job ... --`
+		{"--dry-run", "extra"}, // trailing junk
+	}
+	for _, args := range cases {
+		if got := runSweepCIDs(args); got != 2 {
+			t.Errorf("runSweepCIDs(%q) = %d, want 2 — these parse cleanly with --dry-run DROPPED", args, got)
+		}
+	}
+}
+
+// strconv.ParseFloat accepts "NaN" and "Inf". Both slip past a `<= 0` test — NaN
+// because every comparison against it is false — and both collapse the pacing
+// interval to zero AND make the run report unencodable, so the load ceiling is
+// defeated and the only durable record of an irreversible pass is lost.
+func TestSweepCIDsRejectsNonFiniteRate(t *testing.T) {
+	for _, arg := range []string{"NaN", "Inf", "+Inf", "-Inf", "inf"} {
+		if got := runSweepCIDs([]string{"--rate", arg}); got != 2 {
+			t.Errorf("--rate %s: exit = %d, want 2", arg, got)
+		}
+	}
+}
+
+// An unmounted PVC or a misconfigured LOCAL_STORAGE_PATH makes every read ENOENT,
+// which the sweep correctly classifies as "content permanently absent". Without
+// this check the pass would exit 0 and write a report branding the entire corpus
+// unrecoverable — the operator's documented terminating condition, reached by a
+// pass that touched nothing.
+func TestVerifySweepStorage(t *testing.T) {
+	populated := t.TempDir()
+	if err := os.WriteFile(filepath.Join(populated, "blob"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"a populated content store", populated, false},
+		{"unset", "", true},
+		{"missing (unmounted volume, or the relative dev default)", filepath.Join(t.TempDir(), "nope"), true},
+		{"empty (indistinguishable from a corpus whose content is all gone)", t.TempDir(), true},
+		{"not a directory", notADir, true},
+	}
+	for _, c := range cases {
+		err := verifySweepStorage(c.path)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr = %v", c.name, err, c.wantErr)
 		}
 	}
 }

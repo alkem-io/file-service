@@ -23,5 +23,21 @@ type ReportSink interface {
 	// path separator rather than writing outside their reserved directory.
 	// The write must be durable before returning — a report that is still only
 	// in the page cache when a one-shot Job's node reboots records nothing.
+	//
+	// It MUST NOT overwrite an existing report: reports accumulate across runs,
+	// and clobbering one destroys the only record of an earlier pass.
 	WriteReport(name string, data []byte) (string, error)
+
+	// AppendJournal durably appends one line to name, creating it if needed, and
+	// returns the location.
+	//
+	// This exists because WriteReport happens once, at the end of a pass that may
+	// run for hours while irreversibly deleting blobs as it goes. A pass killed
+	// at record 900 of 1053 — OOM, node eviction, SIGKILL past the grace period —
+	// would take 900 old→new mappings with it, for blobs that are already gone
+	// and rows that no longer match the scan predicate, so no re-run could
+	// reconstruct them. The caller appends each mapping BEFORE destroying the
+	// bytes it describes, which bounds the loss at zero rather than at the whole
+	// pass. Each call must be durable on return, for the same reason.
+	AppendJournal(name string, line []byte) (string, error)
 }

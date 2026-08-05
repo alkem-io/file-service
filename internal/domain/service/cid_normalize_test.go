@@ -290,7 +290,7 @@ func readReportMapping(t *testing.T, rep map[string]any) map[string]string {
 		if !ok {
 			t.Fatalf("changed entry %v is not an object", raw)
 		}
-		assertExactKeys(t, "changed entry", e, "fileId", "previousExternalID", "newExternalID", "sharedWith")
+		assertExactKeys(t, "changed entry", e, "fileId", "previousExternalID", "newExternalID", "sharedWith", "legacyBlob")
 		prev, _ := e["previousExternalID"].(string)
 		next, _ := e["newExternalID"].(string)
 		if !sha3HexName.MatchString(next) {
