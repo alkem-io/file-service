@@ -35,8 +35,14 @@ func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
 }
 
 // DeleteDocumentResponse is returned by DELETE /internal/document/:id.
+//
+// AuthorizationID is OPTIONAL on the wire: a document stored without a
+// server-minted authorization (the matrix_media staging store) has a NULL
+// authorizationId column, which reads back as the zero UUID. Serializing that
+// as "00000000-0000-0000-0000-000000000000" would tell the caller to clean up
+// a policy that never existed, so the field is omitted instead.
 type DeleteDocumentResponse struct {
-	AuthorizationID string  `json:"authorizationId"`
+	AuthorizationID *string `json:"authorizationId,omitempty"`
 	TagsetID        *string `json:"tagsetId,omitempty"`
 }
 
@@ -109,7 +115,14 @@ func (r RejectedContentResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// DocumentMetaResponse is returned by GET /internal/document/:id/meta.
+// DocumentMetaResponse is returned by GET /internal/document/:id/meta and by
+// GET /internal/file/by-reference.
+//
+// AuthorizationID is OPTIONAL on the wire, for the same reason as on
+// DeleteDocumentResponse: a staging document has a NULL authorizationId column,
+// which reads back as the zero UUID. Emitting that as
+// "00000000-0000-0000-0000-000000000000" would report an UNAUTHORIZED document
+// as if it were authorized under a real (all-zero) policy, so it is omitted.
 type DocumentMetaResponse struct {
 	ID                string    `json:"id"`
 	ExternalID        string    `json:"externalID"`
@@ -119,7 +132,7 @@ type DocumentMetaResponse struct {
 	CreatedBy         *string   `json:"createdBy,omitempty"`
 	TemporaryLocation bool      `json:"temporaryLocation"`
 	StorageBucketID   string    `json:"storageBucketId"`
-	AuthorizationID   string    `json:"authorizationId"`
+	AuthorizationID   *string   `json:"authorizationId,omitempty"`
 	TagsetID          *string   `json:"tagsetId,omitempty"`
 	ExternalReference *string   `json:"externalReference,omitempty"`
 	CreatedDate       time.Time `json:"createdDate"`

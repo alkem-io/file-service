@@ -209,6 +209,15 @@ type createFields struct {
 	maxFileSize         string
 	externalReference   string
 	skipImageProcessing string
+
+	// authorizationIDPresent records whether an authorizationId PART APPEARED
+	// in the multipart body at all. authorizationId is the one optional field
+	// where absent and blank must not be conflated: an OMITTED part means "no
+	// server-minted authorization yet" (the Synapse provider's staging store →
+	// SQL NULL), while a part that is present but blank is malformed input and
+	// must stay the 400 it has always been. Emptiness alone cannot tell those
+	// apart, so the collector records presence directly.
+	authorizationIDPresent bool
 }
 
 func (f *createFields) set(name, value string) {
@@ -219,6 +228,7 @@ func (f *createFields) set(name, value string) {
 		f.storageBucketID = value
 	case "authorizationId":
 		f.authorizationID = value
+		f.authorizationIDPresent = true
 	case "tagsetId":
 		f.tagsetID = value
 	case "createdBy":
@@ -277,17 +287,25 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	// authorizationId is OPTIONAL. The Synapse media storage provider stores
-	// staging docs in the reserved matrix_media bucket with NO server-minted
-	// authorization — the server mints one on inbound re-home (MOVE into the
-	// conversation bucket). Absent → the zero UUID, which the adapter maps to a
-	// NULL column (the column is nullable UNIQUE; a zero UUID for every provider
-	// store would collide). When present it must parse.
+	// authorizationId is OPTIONAL by ABSENCE ONLY. The Synapse media storage
+	// provider stores staging docs in the reserved matrix_media bucket with NO
+	// server-minted authorization — the server mints one on inbound re-home
+	// (MOVE into the conversation bucket). An omitted part leaves the zero UUID,
+	// which the adapter maps to a NULL column (the column is nullable UNIQUE; a
+	// zero UUID for every provider store would collide).
+	//
+	// A part that IS present must carry a valid, non-nil UUID: a blank /
+	// whitespace-only value is malformed input, not "absent", and the literal
+	// zero UUID would silently become the same SQL NULL through a caller that
+	// clearly believes it is supplying a policy.
 	var authorizationID uuid.UUID
-	if strings.TrimSpace(fields.authorizationID) != "" {
+	if fields.authorizationIDPresent {
 		authorizationID, err = uuid.Parse(fields.authorizationID)
 		if err != nil {
 			return input, nil, 0, fmt.Errorf("invalid authorizationId")
+		}
+		if authorizationID == uuid.Nil {
+			return input, nil, 0, fmt.Errorf("authorizationId cannot be the nil UUID")
 		}
 	}
 
@@ -372,10 +390,17 @@ func parseMaxFileSize(v string) (int, error) {
 	return parsed, nil
 }
 
-// optionalString maps an empty multipart field to nil and any non-empty value
-// to a pointer — the wire representation of an absent optional string field.
+// optionalString maps a blank field to nil and any other value to a pointer —
+// the wire representation of an absent optional string field.
+//
+// "Blank" is empty OR whitespace-only. A whitespace-only externalReference is
+// no more a usable lookup key than an empty one: content-dedup filters IS NULL
+// and the by-reference endpoint rejects an empty ref, so persisting "   " would
+// orphan the row from both identity systems. The value itself is passed through
+// VERBATIM (never trimmed) — externalReference is opaque to file-service, so
+// rewriting a caller's key would break their read-back.
 func optionalString(v string) *string {
-	if v == "" {
+	if strings.TrimSpace(v) == "" {
 		return nil
 	}
 	return &v
@@ -418,6 +443,20 @@ func nonNilUUID(id uuid.UUID) *uuid.UUID {
 		return nil
 	}
 	return &id
+}
+
+// optionalUUIDString renders an optional UUID for the wire: nil stays nil, so
+// the JSON field is OMITTED rather than serialized. Composed with nonNilUUID it
+// is also how a NULL authorizationId — which reads back on the Document as the
+// zero UUID — is kept off the response: emitting
+// "00000000-0000-0000-0000-000000000000" would describe a policy-less staging
+// document as authorized under an all-zero policy.
+func optionalUUIDString(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
 }
 
 // newCreateDocumentResponse builds the shared create/copy success body from a
@@ -700,6 +739,15 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
 		return
 	}
+	// authorizationId is REQUIRED on copy — a re-share materializes a row the
+	// server has already minted a policy for. The zero UUID parses cleanly but
+	// is the adapter's SQL-NULL sentinel, so accepting it would silently
+	// materialize a policy-less row through an endpoint that has no staging
+	// semantics. Reject it explicitly rather than storing NULL.
+	if authID == uuid.Nil {
+		writeJSONError(w, http.StatusBadRequest, "authorizationId cannot be the nil UUID")
+		return
+	}
 
 	tagsetID, err := parseOptionalUUID(derefString(body.TagsetID), "tagsetId")
 	if err != nil {
@@ -771,14 +819,10 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := DeleteDocumentResponse{
-		AuthorizationID: deleted.AuthorizationID.String(),
-	}
-	if deleted.TagsetID != nil {
-		s := deleted.TagsetID.String()
-		resp.TagsetID = &s
-	}
-	resp.Render(w)
+	DeleteDocumentResponse{
+		AuthorizationID: optionalUUIDString(nonNilUUID(deleted.AuthorizationID)),
+		TagsetID:        optionalUUIDString(deleted.TagsetID),
+	}.Render(w)
 }
 
 // Update handles PATCH /internal/file/{id}.
@@ -872,7 +916,7 @@ func (h *DocumentHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http
 		return body, nil, false
 	}
 
-	if len(present) == 0 {
+	if !suppliesUpdatableField(body, present) {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return body, nil, false
 	}
@@ -884,11 +928,12 @@ func (h *DocumentHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http
 		}
 	}
 
-	// externalReference is tri-state: absent = keep, explicit null = clear. An
-	// empty *string value* is neither, so it is rejected rather than silently
-	// mapped to NULL (clearing is done with an explicit null). This also keeps
-	// PATCH from ever persisting a non-NULL empty reference.
-	if _, ok := present["externalReference"]; ok && body.ExternalReference != nil && *body.ExternalReference == "" {
+	// externalReference is tri-state: absent = keep, explicit null = clear. A
+	// BLANK *string value* (empty or whitespace-only) is neither, so it is
+	// rejected rather than silently mapped to NULL (clearing is done with an
+	// explicit null). This keeps PATCH from ever persisting a non-NULL blank
+	// reference, matching what optionalString normalizes away on create/copy.
+	if _, ok := present["externalReference"]; ok && body.ExternalReference != nil && strings.TrimSpace(*body.ExternalReference) == "" {
 		writeJSONError(w, http.StatusBadRequest, "externalReference must not be empty")
 		return body, nil, false
 	}
@@ -1097,6 +1142,40 @@ var patchFieldNames = []string{
 	"externalReference",
 }
 
+// triStatePatchFields are the PATCH fields where an explicit JSON null is
+// MEANINGFUL — a request to clear (createdBy, externalReference) or, for
+// authorizationId, a request that is answered with a 400 because clearing it
+// would orphan the document. On the remaining fields (storageBucketId,
+// temporaryLocation, displayName) a null carries no instruction at all.
+var triStatePatchFields = []string{
+	"authorizationId",
+	"createdBy",
+	"externalReference",
+}
+
+// suppliesUpdatableField reports whether the PATCH body actually SUPPLIES a
+// field to update: a value on any of the plain fields, or the presence of any
+// tri-state key (whose null is itself an instruction).
+//
+// A body that supplies nothing — `{}`, or one whose only keys are nulls on the
+// plain fields such as {"displayName":null} — is a 400, not a success. That is
+// deliberately distinct from the no-op 200 further down the handler, which is
+// for a PATCH that NAMES real values which happen to equal the row's current
+// ones (so concurrent re-homes don't spuriously 409 each other). Supplying no
+// updatable field is a malformed request; supplying one that is already
+// satisfied is idempotent success.
+func suppliesUpdatableField(body UpdateDocumentRequest, present map[string]struct{}) bool {
+	if body.StorageBucketID != nil || body.TemporaryLocation != nil || body.DisplayName != nil {
+		return true
+	}
+	for _, name := range triStatePatchFields {
+		if _, ok := present[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // canonicalPatchKey maps a raw PATCH JSON key to the canonical field name it
 // resolves to under json.Decode's case-insensitive struct matching, so
 // present-detection agrees with what the decode already applied to the struct.
@@ -1227,7 +1306,7 @@ func equalPtr[T comparable](a, b *T) bool {
 }
 
 func documentMetaResponse(doc model.Document) DocumentMetaResponse {
-	resp := DocumentMetaResponse{
+	return DocumentMetaResponse{
 		ID:                doc.ID.String(),
 		ExternalID:        doc.ExternalID,
 		MimeType:          doc.MimeType,
@@ -1235,20 +1314,13 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 		DisplayName:       doc.DisplayName,
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketID:   doc.StorageBucketID.String(),
-		AuthorizationID:   doc.AuthorizationID.String(),
+		AuthorizationID:   optionalUUIDString(nonNilUUID(doc.AuthorizationID)),
+		CreatedBy:         optionalUUIDString(doc.CreatedBy),
+		TagsetID:          optionalUUIDString(doc.TagsetID),
 		ExternalReference: doc.ExternalReference,
 		CreatedDate:       doc.CreatedDate,
 		UpdatedDate:       doc.UpdatedDate,
 		ImageWidth:        doc.ImageWidth,
 		ImageHeight:       doc.ImageHeight,
 	}
-	if doc.CreatedBy != nil {
-		s := doc.CreatedBy.String()
-		resp.CreatedBy = &s
-	}
-	if doc.TagsetID != nil {
-		s := doc.TagsetID.String()
-		resp.TagsetID = &s
-	}
-	return resp
 }

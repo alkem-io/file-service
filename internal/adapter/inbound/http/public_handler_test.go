@@ -31,11 +31,19 @@ type mockDocRepo struct {
 	count        int
 	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
-	// By-reference lookup scripting (013 externalReference).
-	refDoc     *model.Document // non-nil → GetByReference[InBucket] returns this
-	refErr     error
-	refCalls   int
-	lastRefKey string
+	// By-reference lookup scripting (013 externalReference). The GLOBAL and
+	// bucket-SCOPED variants are scripted and counted SEPARATELY and never fall
+	// back to one another: which one the handler dispatched to is the whole
+	// invariant of the by-reference endpoint (global = the provider's fetch,
+	// scoped = read resolution), so a shared doc/counter would make the two
+	// indistinguishable and the dispatch untestable.
+	refDoc           *model.Document // non-nil → GetByReference returns this
+	refInBucketDoc   *model.Document // non-nil → GetByReferenceInBucket returns this
+	refErr           error
+	refCalls         int // GetByReference (global)
+	refInBucketCalls int // GetByReferenceInBucket (scoped)
+	lastRefKey       string
+	lastRefBucket    uuid.UUID
 
 	// Captured args from the most recent UpdateMetadata call.
 	updateMetadataCalls   int
@@ -90,14 +98,15 @@ func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model
 	}
 	return model.Document{}, model.ErrDocumentNotFound
 }
-func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, _ uuid.UUID) (model.Document, error) {
-	m.refCalls++
+func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, bucketID uuid.UUID) (model.Document, error) {
+	m.refInBucketCalls++
 	m.lastRefKey = reference
+	m.lastRefBucket = bucketID
 	if m.refErr != nil {
 		return model.Document{}, m.refErr
 	}
-	if m.refDoc != nil {
-		return *m.refDoc, nil
+	if m.refInBucketDoc != nil {
+		return *m.refInBucketDoc, nil
 	}
 	return model.Document{}, model.ErrDocumentNotFound
 }

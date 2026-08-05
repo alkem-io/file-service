@@ -143,6 +143,84 @@ func TestMock_Create_Success(t *testing.T) {
 	}
 }
 
+// The zero-UUID → SQL NULL mapping for authorizationId is the SINGLE mechanism
+// that lets every provider staging store coexist under UNIQUE("authorizationId"):
+// a document created with no server-minted authorization must write NULL, not
+// the all-zero UUID, which would be a real value and collide across rows (and
+// FK-violate against a policy that does not exist).
+//
+// Pin the actual pgtype value at the insert boundary — Valid:false vs a
+// zero-bytes UUID with Valid:true — because that distinction is invisible
+// everywhere above the adapter (both read back as uuid.Nil).
+func TestMock_Create_AuthorizationIDNullMapping(t *testing.T) {
+	authID := uuid.New()
+	for _, tc := range []struct {
+		name string
+		auth uuid.UUID
+		want pgtype.UUID
+	}{
+		{"minted policy writes the value", authID, pgtype.UUID{Bytes: authID, Valid: true}},
+		{"no policy writes SQL NULL", uuid.Nil, pgtype.UUID{Valid: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, err := pgxmock.NewPool()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mock.Close()
+
+			docID := uuid.New()
+			// Two identical inserts: for the NULL case this is the coexistence
+			// property itself — two policy-less staging rows both write NULL, so
+			// neither can collide with the other on the nullable unique index.
+			// (pgxmock cannot enforce the index; what is asserted here is the
+			// value the adapter sends, which is what makes coexistence possible.)
+			for range 2 {
+				mock.ExpectQuery("INSERT INTO file").
+					WithArgs(
+						pgxmock.AnyArg(), // id
+						pgxmock.AnyArg(), // externalID
+						pgxmock.AnyArg(), // mimeType
+						pgxmock.AnyArg(), // size
+						pgxmock.AnyArg(), // displayName
+						pgxmock.AnyArg(), // createdBy
+						pgxmock.AnyArg(), // temporaryLocation
+						pgxmock.AnyArg(), // storageBucketId
+						tc.want,          // authorizationId — the assertion
+						pgxmock.AnyArg(), // tagsetId
+						pgxmock.AnyArg(), // createdDate
+						pgxmock.AnyArg(), // updatedDate
+						[]byte(`{}`),     // content_metadata
+						pgxmock.AnyArg(), // externalReference
+					).
+					WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
+			}
+
+			a := New(mock)
+			now := time.Now()
+			for i := range 2 {
+				ref := "media_id_" + string(rune('a'+i))
+				if _, err := a.Create(context.Background(), model.Document{
+					ID:                uuid.New(),
+					ExternalID:        "hash",
+					MimeType:          "image/png",
+					DisplayName:       "m.png",
+					StorageBucketID:   uuid.New(),
+					AuthorizationID:   tc.auth,
+					ExternalReference: &ref,
+					CreatedDate:       now,
+					UpdatedDate:       now,
+				}, model.ContentMetadata{}); err != nil {
+					t.Fatalf("Create #%d: %v", i, err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
 func TestMock_UpdateFile_Success(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {

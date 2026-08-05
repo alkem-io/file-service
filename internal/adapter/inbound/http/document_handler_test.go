@@ -68,6 +68,13 @@ type stubProcessor struct {
 	// application/octet-stream so image-MIME tests exercise the
 	// dims-on-response paths.
 	detectMIME string
+
+	// Arm counters. For a TRANSCODABLE image type these are mutually
+	// exclusive and are the only externally visible difference between the
+	// transcode arm and the verbatim (skipImageProcessing) arm, which is how
+	// an HTTP-level test can prove the flag reached StageUpload.
+	transcodeCalls   int
+	measureDimsCalls int
 }
 
 func (p *stubProcessor) DetectMIME(_ []byte) string {
@@ -92,6 +99,7 @@ func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 	}, nil
 }
 func (p *stubProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
+	p.measureDimsCalls++
 	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
@@ -2167,6 +2175,7 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 // TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
 // detectMIME override or the input type.
 func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	p.transcodeCalls++
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}
