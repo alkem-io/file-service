@@ -26,6 +26,15 @@ func (f *faultyReadCloser) Close() error             { return nil }
 // --- Mocks ---
 
 type mockRepo struct {
+	// 018 legacy-name sweep: scripted pages, and the captured compare-and-set.
+	legacyPages       [][]model.Document
+	listLegacyCalls   int
+	listLegacyErr     error
+	normalizeCalls    int
+	normalizeErr      error
+	normalizeLostRace bool
+	lastNormalize     normalizeCall
+
 	doc           model.Document
 	getErr        error
 	findDoc       *model.Document // nil means "not found"
@@ -72,8 +81,40 @@ type mockRepo struct {
 	backfillLostRace       bool
 }
 
+// normalizeCall captures what the sweep asked the repo to compare-and-set.
+type normalizeCall struct {
+	ID       uuid.UUID
+	Expected string
+	Version  int
+	New      string
+}
+
 // Ensure mockRepo implements the full interface at compile time.
 var _ port.DocumentRepo = (*mockRepo)(nil)
+
+// legacyPages scripts ListLegacyNamed page-by-page so a test can exercise the
+// keyset loop without a database; each call returns the next page and then nothing.
+func (m *mockRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	m.listLegacyCalls++
+	if m.listLegacyErr != nil {
+		return nil, m.listLegacyErr
+	}
+	if len(m.legacyPages) == 0 {
+		return nil, nil
+	}
+	page := m.legacyPages[0]
+	m.legacyPages = m.legacyPages[1:]
+	return page, nil
+}
+
+func (m *mockRepo) NormalizeExternalID(_ context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
+	m.normalizeCalls++
+	m.lastNormalize = normalizeCall{ID: id, Expected: expectedExternalID, Version: expectedVersion, New: newExternalID}
+	if m.normalizeErr != nil {
+		return false, m.normalizeErr
+	}
+	return !m.normalizeLostRace, nil
+}
 
 func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.doc, m.getErr
@@ -580,6 +621,13 @@ type mockRepoRace struct {
 
 var _ port.DocumentRepo = (*mockRepoRace)(nil)
 
+func (m *mockRepoRace) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockRepoRace) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, nil
 }
@@ -922,6 +970,13 @@ type copyRaceRepo struct {
 }
 
 var _ port.DocumentRepo = (*copyRaceRepo)(nil)
+
+func (m *copyRaceRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *copyRaceRepo) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
+	return false, nil
+}
 
 func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.source, nil

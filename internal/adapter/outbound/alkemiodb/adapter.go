@@ -70,6 +70,39 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 	return rowToDocument(row), nil
 }
 
+// ListLegacyNamed implements port.DocumentRepo's legacy-name scan (018). The
+// predicate and the keyset paging live in the query; this only maps the row.
+func (a *Adapter) ListLegacyNamed(ctx context.Context, after uuid.UUID, limit int32) ([]model.Document, error) {
+	rows, err := a.queries.ListDocumentsWithLegacyExternalID(ctx, queries.ListDocumentsWithLegacyExternalIDParams{
+		ID:    uuidToPgx(after),
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]model.Document, 0, len(rows))
+	for _, row := range rows {
+		docs = append(docs, legacyNamedRowToDocument(row))
+	}
+	return docs, nil
+}
+
+// NormalizeExternalID implements port.DocumentRepo's compare-and-set rename (018).
+// Zero rows affected is NOT an error: it means a concurrent Replace or promotion
+// won the race, which the sweep treats as a skip.
+func (a *Adapter) NormalizeExternalID(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
+	rows, err := a.queries.NormalizeDocumentExternalID(ctx, queries.NormalizeDocumentExternalIDParams{
+		ID:           uuidToPgx(id),
+		ExternalID:   expectedExternalID,
+		Version:      safeInt32(expectedVersion),
+		ExternalID_2: newExternalID,
+	})
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
 // FindByExternalIDAndBucket implements port.DocumentRepo's dedup lookup.
 // No row for the (externalID, storageBucketID) pair → model.ErrDocumentNotFound.
 func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {

@@ -28,6 +28,28 @@ type Config struct {
 	AuthTransport  string // "nats" or "h2c" — auto-detected from env vars
 	Ingest         IngestConfig
 	BackupOutbox   BackupOutboxConfig
+	SweepCIDs      SweepCIDsConfig
+}
+
+// SweepCIDsConfig governs the one-shot legacy-name normalization sweep
+// (018-legacy-cid-normalization). It is read only by the `sweep-cids`
+// subcommand; the serving path never consults it.
+type SweepCIDsConfig struct {
+	// DefaultRate bounds objects/second when the operator does not pass --rate.
+	// FR-015 requires a default low enough that a full pass satisfies SC-008 (no
+	// user-visible degradation, no maintenance window) — that criterion, not
+	// taste, is what "conservative" means here. 5/s matches the backup backfill
+	// job's starting rate, so operators meet one number rather than two.
+	DefaultRate float64
+	// ReportDir is the directory, relative to StoragePath, that run reports are
+	// written to (FR-018).
+	//
+	// The name is collision-proof BY CONSTRUCTION, not by convention: the store's
+	// key rule (isValidExternalID) accepts only 32-128 alphanumeric characters,
+	// so "_sweep-reports" is disqualified twice over — under the length minimum,
+	// and '_'/'-' are outside the alphabet. No blob can ever be named this, so no
+	// enumeration of the store can mistake a report for content.
+	ReportDir string
 }
 
 // BackupOutboxConfig governs the continuous-backup producer (008-continuous-file-backup):
@@ -45,6 +67,18 @@ type BackupOutboxConfig struct {
 	// record lives in the backup ledger; done rows are just a debugging window.
 	DoneRetention time.Duration
 }
+
+const (
+	// defaultSweepCIDsRate is the objects/second ceiling applied when the operator
+	// does not pass --rate. Deliberately not an env var: the sweep is a one-shot
+	// operator-triggered migration, so the knob belongs on the command line where
+	// the person running it can see and reason about it, not in ambient config.
+	defaultSweepCIDsRate = 5.0
+	// sweepCIDsReportDir is the reserved directory (under StoragePath) for run
+	// reports — see SweepCIDsConfig.ReportDir for why this name cannot collide
+	// with a blob.
+	sweepCIDsReportDir = "_sweep-reports"
+)
 
 // defaultHotMimePrefixes marks the user-authored, non-reconstructable document classes hot.
 var defaultHotMimePrefixes = []string{
@@ -199,6 +233,10 @@ func load(requireAuthTransport bool) (*Config, error) {
 			Enabled:         getenvBool("FILE_BACKUP_OUTBOX_ENABLED", false),
 			HotMimePrefixes: getenvCSV("FILE_BACKUP_HOT_MIME_PREFIXES", defaultHotMimePrefixes),
 			DoneRetention:   getenvHours("FILE_BACKUP_OUTBOX_DONE_RETENTION_HOURS", 24*time.Hour),
+		},
+		SweepCIDs: SweepCIDsConfig{
+			DefaultRate: defaultSweepCIDsRate,
+			ReportDir:   sweepCIDsReportDir,
 		},
 	}, nil
 }

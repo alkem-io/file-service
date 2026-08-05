@@ -260,6 +260,73 @@ func (q *Queries) ListDocumentsByMimeTypes(ctx context.Context, dollar_1 []strin
 	return items, nil
 }
 
+const listDocumentsWithLegacyExternalID = `-- name: ListDocumentsWithLegacyExternalID :many
+SELECT id, "externalID", "mimeType", size, version
+FROM file
+WHERE "temporaryLocation" IS NOT TRUE
+  AND "externalID" !~ '^[0-9a-f]{64}$'
+  AND id > $1
+ORDER BY id
+LIMIT $2
+`
+
+type ListDocumentsWithLegacyExternalIDParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Limit int32       `json:"limit"`
+}
+
+type ListDocumentsWithLegacyExternalIDRow struct {
+	ID         pgtype.UUID `json:"id"`
+	ExternalID string      `json:"externalID"`
+	MimeType   string      `json:"mimeType"`
+	Size       int32       `json:"size"`
+	Version    int32       `json:"version"`
+}
+
+// Paged scan for the legacy-name normalization sweep (the sweep-cids job,
+// 018-legacy-cid-normalization): permanent rows whose externalID is NOT the current
+// content-addressing scheme, i.e. not a lowercase SHA3-256 hex digest.
+//
+// The predicate is "not the CURRENT scheme" rather than "looks like an IPFS CID" on
+// purpose. The known cohort is CIDv0 (Qm..., base58), but a positive CID test would
+// silently miss any other historical form; "not a 64-char hex digest" catches
+// everything needing repair by construction. It is also the exact predicate an
+// operator runs to confirm convergence, so detection and verification cannot drift.
+//
+// Scope is permanent rows only. A row still flagged temporary in a cohort this old is
+// orphaned residue, not an upload in flight — nothing in it will be promoted back into
+// the permanent corpus, so it cannot reintroduce the defect after the sweep converges.
+//
+// Keyset-paged by id ($1 = cursor, $2 = page size): releases the pool connection between
+// pages so a multi-hour pass cannot pin a connection or hold back xmin on the shared
+// production database. Resumability is implicit — a re-run re-derives the work-list and
+// already-normalized rows no longer match.
+func (q *Queries) ListDocumentsWithLegacyExternalID(ctx context.Context, arg ListDocumentsWithLegacyExternalIDParams) ([]ListDocumentsWithLegacyExternalIDRow, error) {
+	rows, err := q.db.Query(ctx, listDocumentsWithLegacyExternalID, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDocumentsWithLegacyExternalIDRow{}
+	for rows.Next() {
+		var i ListDocumentsWithLegacyExternalIDRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ExternalID,
+			&i.MimeType,
+			&i.Size,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listImagesNeedingDims = `-- name: ListImagesNeedingDims :many
 SELECT id, "externalID", "mimeType"
 FROM file
@@ -306,6 +373,48 @@ func (q *Queries) ListImagesNeedingDims(ctx context.Context, arg ListImagesNeedi
 		return nil, err
 	}
 	return items, nil
+}
+
+const normalizeDocumentExternalID = `-- name: NormalizeDocumentExternalID :execrows
+UPDATE file
+SET "externalID" = $4,
+    version = version + 1
+WHERE id = $1
+  AND "externalID" = $2
+  AND version = $3
+`
+
+type NormalizeDocumentExternalIDParams struct {
+	ID           pgtype.UUID `json:"id"`
+	ExternalID   string      `json:"externalID"`
+	Version      int32       `json:"version"`
+	ExternalID_2 string      `json:"externalID_2"`
+}
+
+// Repoint one row from its legacy name to the digest of its bytes (018).
+//
+// Compare-and-set on (id, externalID, version): if a content Replace or a
+// temporary->permanent promotion landed between the sweep's read and this write, the
+// row has moved and ZERO rows are affected — the sweep counts that a skip and never
+// retries, so the concurrent writer's change survives untouched. Same guard the
+// Replace/promote race already uses (file-service#64), not a new concurrency scheme.
+//
+// Deliberately does NOT touch "mimeType", size, content_metadata or "updatedDate".
+// The bytes are unchanged: this is a rename, not a user edit. Moving "updatedDate"
+// across the whole cohort would corrupt the audit trail and any recently-modified
+// ordering. version IS bumped — identity changed, so any other holder of the old
+// version should lose its own compare-and-set.
+func (q *Queries) NormalizeDocumentExternalID(ctx context.Context, arg NormalizeDocumentExternalIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, normalizeDocumentExternalID,
+		arg.ID,
+		arg.ExternalID,
+		arg.Version,
+		arg.ExternalID_2,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateDocumentFile = `-- name: UpdateDocumentFile :execrows

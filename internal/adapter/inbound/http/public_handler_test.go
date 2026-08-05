@@ -50,6 +50,13 @@ type mockDocRepo struct {
 	backfillErr            error
 }
 
+func (m *mockDocRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
+	return nil, nil
+}
+func (m *mockDocRepo) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	m.getByIDCalls++
 	return m.doc, m.err
