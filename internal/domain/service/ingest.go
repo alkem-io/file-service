@@ -170,6 +170,23 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	// a transcodable image type: the provider's read-back must be byte-exact, so
 	// no transcode/rotate. Dimensions are still measured below (header-only,
 	// non-destructive).
+	//
+	// ACCEPTED CONSEQUENCES — deliberate, reviewed, and NOT defects (013 research
+	// D6, revised 2026-08-05). TranscodeStream is the only place three things
+	// happen, so a verbatim store skips all three:
+	//   1. img.RemoveMetadata() — inbound Matrix media therefore RETAINS its
+	//      EXIF/GPS/IPTC/XMP. Alkemio's own upload path still strips it; the
+	//      Synapse provider path does not, exactly as Element itself does not.
+	//   2. HEIC/HEIF/WebP -> JPEG canonicalization — an iOS Element upload stays
+	//      image/heic and may not render in every browser. Element renders its
+	//      own upload natively.
+	//   3. checkPixelBudget (IMAGE_PIXEL_BUDGET decode-bomb guard) — nothing here
+	//      fully decodes the image, so there is no decode to bomb; the size cap
+	//      and the bucket MIME allow-list still apply.
+	// This is the tiered-client boundary: the provider is a byte bridge for a
+	// Matrix client, not a media pipeline. Re-enabling any of the three on this
+	// arm would break Synapse's byte-exact read-back. If inbound canonicalization
+	// is ever wanted it belongs in its own spec, as a DERIVED web variant.
 	transcode := hasContent && !skipImageProcessing && transcodableMIME(mimeType)
 	if transcode {
 		// The image library can collapse a request-stream failure into an
