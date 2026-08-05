@@ -163,23 +163,33 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 // keep; a string → set; explicit JSON null → clear (authorizationId is NOT
 // clearable — clearing it would orphan the document). The presence map in the
 // handler distinguishes "omitted" from "null" (a plain *string cannot).
+//
+// The `apispec:"format=uuid"` tags pin the published `format: uuid` on the
+// UUID-valued fields. The generator otherwise infers it by following the
+// decoded body into a uuid.Parse call, and that flow analysis cannot see
+// through the shared parse helpers these fields go through — so the format is
+// declared at the source instead of depending on the shape of the handler.
 type UpdateDocumentRequest struct {
-	StorageBucketID   *string `json:"storageBucketId,omitempty"`
+	StorageBucketID   *string `json:"storageBucketId,omitempty" apispec:"format=uuid"`
 	TemporaryLocation *bool   `json:"temporaryLocation,omitempty"`
 	DisplayName       *string `json:"displayName,omitempty"`
-	AuthorizationID   *string `json:"authorizationId,omitempty"`
-	CreatedBy         *string `json:"createdBy,omitempty"`
+	AuthorizationID   *string `json:"authorizationId,omitempty" apispec:"format=uuid"`
+	CreatedBy         *string `json:"createdBy,omitempty" apispec:"format=uuid"`
 	ExternalReference *string `json:"externalReference,omitempty"`
 }
 
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.
 // Reuses CreateDocumentResponse for the response shape.
+// The `apispec:"format=uuid"` tags on tagsetId/createdBy pin the published
+// `format: uuid`: those two reach uuid.Parse through a shared helper the
+// generator's flow analysis cannot follow, unlike sourceId/destinationBucketId/
+// authorizationId, which it still infers from the handler's inline parses.
 type CopyDocumentRequest struct {
 	SourceID            string  `json:"sourceId"`
 	DestinationBucketID string  `json:"destinationBucketId"`
 	AuthorizationID     string  `json:"authorizationId"`
-	TagsetID            *string `json:"tagsetId,omitempty"`
-	CreatedBy           *string `json:"createdBy,omitempty"`
+	TagsetID            *string `json:"tagsetId,omitempty" apispec:"format=uuid"`
+	CreatedBy           *string `json:"createdBy,omitempty" apispec:"format=uuid"`
 	// ExternalReference is the opaque caller reference set on the copied row
 	// (the re-share fork carries the same media_id). Omitted leaves it unset.
 	ExternalReference *string `json:"externalReference,omitempty"`

@@ -6,6 +6,7 @@ components:
           format: uuid
           type: string
         createdBy:
+          format: uuid
           type: string
         destinationBucketId:
           format: uuid
@@ -18,6 +19,7 @@ components:
           format: uuid
           type: string
         tagsetId:
+          format: uuid
           type: string
       required:
         - sourceId
@@ -53,8 +55,6 @@ components:
           type: string
         tagsetId:
           type: string
-      required:
-        - authorizationId
       type: object
     http.DocumentMetaResponse:
       properties:
@@ -98,7 +98,6 @@ components:
         - displayName
         - temporaryLocation
         - storageBucketId
-        - authorizationId
         - createdDate
         - updatedDate
       type: object
@@ -151,14 +150,17 @@ components:
     http.UpdateDocumentRequest:
       properties:
         authorizationId:
+          format: uuid
           type: string
         createdBy:
+          format: uuid
           type: string
         displayName:
           type: string
         externalReference:
           type: string
         storageBucketId:
+          format: uuid
           type: string
         temporaryLocation:
           type: boolean
