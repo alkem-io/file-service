@@ -89,28 +89,47 @@ func TestCIDNormalize_UnreferencedLegacyBlobIsParkedAndLeavesNoNewOrphan(t *test
 	}
 }
 
-// Uppercase hex is in scope (the scan wants lowercase), and on a case-insensitive
-// volume the legacy name and the digest are the SAME file. Nothing to link, nothing
-// to park: only the rows were wrong.
-func TestCIDNormalize_NameDifferingOnlyByCaseIsNotParked(t *testing.T) {
-	content := []byte("case-folded")
-	digest := ComputeHash(content)
-	upper := upperHex(digest)
+// Uppercase-hex names are in scope (the scan wants LOWERCASE hex), and whether the
+// legacy name and its digest are one file or two depends on the VOLUME, which no
+// string comparison can tell you.
+//
+// The invariant is the same on both, and it is the one that matters: after the pass,
+// every row resolves to content. The previous version of this test asserted the
+// case-INSENSITIVE outcome against a map-backed fake — which is case-sensitive — so
+// it passed while the code left every repointed row naming a blob that was never
+// created.
+func TestCIDNormalize_CaseFoldedNameResolvesOnBothVolumeKinds(t *testing.T) {
+	for _, insensitive := range []bool{false, true} {
+		name := "case-sensitive volume"
+		if insensitive {
+			name = "case-insensitive volume"
+		}
+		t.Run(name, func(t *testing.T) {
+			content := []byte("case-folded")
+			digest := ComputeHash(content)
+			upper := upperHex(digest)
 
-	repo := newCIDRepo(&cidRow{ExternalID: upper})
-	store := newCIDStore()
-	store.put(upper, content)
+			repo := newCIDRepo(&cidRow{ExternalID: upper})
+			store := newCIDStore()
+			store.caseInsensitive = insensitive
+			store.put(upper, content)
 
-	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+			sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
 
-	if sum.Records != 1 {
-		t.Errorf("records = %d, want 1 — the row still had to move", sum.Records)
-	}
-	if len(store.parked) != 0 {
-		t.Error("parked a file that IS the digest on a case-insensitive volume — that would remove the content the rows now name")
-	}
-	if !store.has(upper) {
-		t.Error("the content is gone")
+			if sum.Records != 1 {
+				t.Fatalf("records = %d, want 1 — the row still had to move", sum.Records)
+			}
+			// THE invariant: the row names something that exists.
+			if got := repo.rows[0].ExternalID; !store.has(got) {
+				t.Errorf("row names %q, which is NOT on the store — permanent 404 on live content", got)
+			}
+			if insensitive && len(store.parked) != 0 {
+				t.Error("parked a file that IS the digest — that removes the content the row now names")
+			}
+			if !insensitive && len(store.parked) != 1 {
+				t.Error("on a case-sensitive volume the old name is a distinct file and should be parked")
+			}
+		})
 	}
 }
 

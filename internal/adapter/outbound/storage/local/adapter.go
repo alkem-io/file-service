@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -122,42 +121,46 @@ func (a *Adapter) Delete(externalID string) error {
 // hex. Anything else on the volume is legacy-named and in scope for the sweep.
 var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// ListLegacyNamed walks the flat blob namespace and returns names that are not the
-// current scheme. Sorted, so the cursor is a stable resume point across runs.
+// ListLegacyNamed streams the flat blob namespace once and returns the names that
+// are not the current scheme.
+//
+// d.ReadDir(n) reads a CHUNK per call, unlike os.ReadDir, which materializes and
+// sorts every entry — on a production store of hundreds of thousands of blobs that
+// is the difference between peak memory scaling with the matches and with the whole
+// corpus. Legacy names are rare, so the returned slice stays small.
+//
 // Reserved sidecar directories are excluded by taking files only at depth 1 and
 // skipping `_`/`.` prefixes — the same rule that makes those names unreachable as
-// blobs.
-func (a *Adapter) ListLegacyNamed(after string, limit int) ([]string, string, error) {
-	entries, err := os.ReadDir(a.basePath)
+// blob keys.
+func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
+	d, err := os.Open(a.basePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("list %s: %w", a.basePath, err)
+		// A missing root is NOT an empty corpus. Reporting it as one lets an
+		// unmounted volume read as a fully-swept store.
+		return nil, fmt.Errorf("open %s: %w", a.basePath, err)
 	}
-	names := make([]string, 0, limit)
-	next := ""
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	defer func() { _ = d.Close() }()
+
+	var names []string
+	for {
+		entries, err := d.ReadDir(512)
+		if errors.Is(err, io.EOF) {
+			return names, nil
 		}
-		n := e.Name()
-		if strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") || sha3HexName.MatchString(n) {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("scan %s: %w", a.basePath, err)
 		}
-		if n <= after {
-			continue
+		for _, e := range entries {
+			n := e.Name()
+			if e.IsDir() || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") || sha3HexName.MatchString(n) {
+				continue
+			}
+			names = append(names, n)
+			if len(names) == limit {
+				return names, nil
+			}
 		}
-		names = append(names, n)
 	}
-	sort.Strings(names)
-	if len(names) > limit {
-		names = names[:limit]
-	}
-	if len(names) > 0 {
-		next = names[len(names)-1]
-	}
-	return names, next, nil
 }
 
 // Link publishes existing bytes under a second name without copying them. A

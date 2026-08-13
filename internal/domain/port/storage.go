@@ -38,15 +38,24 @@ type StoragePort interface {
 	// (false, nil) is a definitive "not there"; a non-nil error means the
 	// backend could not answer.
 	Exists(externalID string) (bool, error)
-	// ListLegacyNamed returns one page of blob names on the store that are NOT the
-	// current content-addressing scheme, plus a cursor for the next page ("" when
-	// exhausted). Reserved sidecar directories are never included.
+	// ListLegacyNamed walks the blob namespace ONCE and returns the names that are
+	// not the current content-addressing scheme, up to limit. Reserved sidecar
+	// directories are never included.
+	//
+	// One pass, not paged: legacy names are rare in a large store, so re-walking the
+	// directory per page would cost a full enumeration to find a handful of files.
+	// Implementations MUST stream the directory rather than materializing it, so
+	// memory scales with the number of MATCHES, not with the corpus.
 	//
 	// The store, not the database, is the authority on what needs migrating: a
 	// database scan sees only names some row references, so an UNREFERENCED legacy
 	// blob would sit on the volume forever and "zero legacy-named blobs remain"
 	// could never be satisfied.
-	ListLegacyNamed(after string, limit int) (names []string, next string, err error)
+	//
+	// Returning fewer than limit means the walk completed. Returning exactly limit
+	// means it was truncated and a further run has more to do — callers MUST NOT
+	// read that as a drained corpus.
+	ListLegacyNamed(limit int) ([]string, error)
 	// Link publishes existing bytes under a second name, without copying them.
 	// Returns false if the target already exists — which is not an error on a
 	// content-addressed store, just a dedup hit.
@@ -57,8 +66,10 @@ type StoragePort interface {
 	// turns out to be wrong is recoverable by moving the file back, and an operator
 	// clears the parked directory only once the result has been verified.
 	//
-	// Idempotent in the way that matters: parking a name that is already absent is
-	// not an error, so a re-run after an interruption is safe.
+	// Parking a name that is already absent returns ("", nil) — an EMPTY PATH with a
+	// nil error, so a re-run after an interruption is safe. Callers MUST treat the
+	// empty path as "nothing moved" rather than as a completed park, or they will
+	// report bytes as recoverable that are not in the parked directory.
 	Park(externalID string) (string, error)
 	// OpenStage begins a streaming ingestion into not-yet-published storage
 	// (spec 020). Nothing is observable as a permanent object until Commit.

@@ -117,18 +117,14 @@ third beside `serve` and `sweep-dims`, run as a manually-triggered one-shot Job:
 - The legacy name is **never decoded or verified** against the bytes: these objects have
   unknown write history, so the bytes are the only truth and the new address is correct by
   construction. No multihash decoder, no new dependency.
-- Order is **publish → repoint → reclaim** so no record ever names an absent blob; every
-  record write is a compare-and-set on `(id, externalID, version)`, so a concurrent Replace
-  or promote wins and the sweep skips.
-- **Irreversible** (the legacy blob goes in the same pass) — `--dry-run` first. `--rate`
-  bounds objects/second; non-positive is rejected, never "unlimited". Absent content is a
-  skip, never a failure, so the migration has a terminating condition.
-- Renames make the other externalID-guarded writers (`sweep-dims`, and the boot-time MIME
-  repair launched on EVERY serve-pod boot) skip the affected rows. Harmless: both
-  re-derive their work-lists from self-clearing predicates, so those rows are picked up on
-  their next run. Sequencing is an efficiency choice, not a correctness requirement — no
-  operator controls when a pod boots.
-- Each real pass writes a run report to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
+- Unit of work is a **blob**: link under the digest, then ONE
+  `UPDATE ... WHERE "externalID" = <legacy>` moves every row naming it, then the legacy
+  file is **parked**. Link before the rename. `WHERE "externalID" = …` is the whole
+  concurrency guard — an earlier `(id, externalID, version)` compare-and-set was removed
+  because it lost races it had no reason to lose.
+- **Nothing is deleted.** Legacy files move to `_parked/`, so the migration is
+  reversible. `--dry-run` first regardless.
+- Each real pass writes a report AND a per-blob journal to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
   surviving record of the old→new mapping.
 
 The `file_backup_outbox` **table DDL is a server-owned migration** — file-service does

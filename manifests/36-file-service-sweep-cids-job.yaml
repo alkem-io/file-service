@@ -14,11 +14,18 @@
 #   #   SELECT count(*) FROM file
 #   #   WHERE "temporaryLocation" IS NOT TRUE AND "externalID" !~ '^[0-9a-f]{64}$';
 #
-# THIS MIGRATION IS IRREVERSIBLE. Each object is republished under the digest of its bytes, its row
-# is repointed with a compare-and-set, and the LEGACY BLOB IS THEN DELETED once nothing references
-# it. There is no undo. What survives is the pair of files the pass writes to
+# NOTHING IS DELETED. Each blob is hard-linked under the digest of its bytes, ONE
+# `UPDATE ... WHERE "externalID" = <legacy>` moves every row naming it, and the legacy file is then
+# MOVED into <LOCAL_STORAGE_PATH>/_parked/ — the migration's undo, expected to be full afterwards.
+# Clear it by hand only once the result is verified.
+#
+# CAVEAT: `_parked/` and `_sweep-reports/` both sit under the storage root that infra-ops'
+# file-storage cleanup Job deletes recursively (alkem-io/infrastructure-operations#2566). That
+# ticket, not the reserved-name rule, is what keeps them alive.
+#
+# The pass also writes the pair of files to
 # <LOCAL_STORAGE_PATH>/_sweep-reports/: a `.ndjson` journal appended and fsynced BEFORE each
-# reclamation, and a `.json` summary written at the end. Retain them — after the pass, they are the
+# file moves, and a `.json` summary written at the end. Retain them — after the pass, they are the
 # only record of the old→new mapping.
 #
 # THREE placeholders are FAIL-CLOSED — the pod will not start / not schedule until you set them, so

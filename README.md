@@ -135,12 +135,22 @@ their bytes can never equal their name and file-backup-service refuses them — 
 sweep re-addresses them under the digest of whatever bytes are on the store, repoints
 every referencing record, and reclaims the legacy blob once nothing names it.
 
-Per object the order is **publish → repoint → reclaim**, which is what makes it safe
-against live traffic: at no instant does a record name a blob that is absent. Every
-record write is a compare-and-set on `(id, externalID, version)`, so a concurrent
-content Replace or a temporary→permanent promotion wins and the sweep skips.
+The unit of work is a **blob**, not a row. Per blob: hard-link the bytes under their
+digest, then one `UPDATE file SET "externalID" = <digest> WHERE "externalID" = <legacy>`
+moves every row naming it, then the legacy file is **parked**. Link before the rename,
+always — dying between them leaves a spare hard link with every row still naming a file
+that exists, whereas the other order leaves rows naming a blob that no future pass can
+even find. `WHERE "externalID" = …` is the entire concurrency guard: a row whose content
+was replaced already carries a different name and simply does not match.
 
-- **Irreversible.** The legacy blob is reclaimed in the same pass. Run `--dry-run`
+- **Reversible.** Nothing is deleted — legacy files are moved to
+  `<LOCAL_STORAGE_PATH>/_parked/`. A rename that turns out to be wrong is repaired by
+  moving one file back. Clear that directory by hand only once the result is verified;
+  it is expected to be full afterwards. **Caveat:** `_parked/` and `_sweep-reports/`
+  both live under the storage root that infra-ops' file-storage cleanup Job deletes
+  recursively — see `alkem-io/infrastructure-operations#2566`. That ticket, not the
+  reserved-name rule, is what keeps them alive.
+- **Still run `--dry-run` first.** The legacy blob is reclaimed in the same pass. Run `--dry-run`
   first — it enumerates through the same predicate and changes nothing at all.
 - **It interacts with the other externalID-guarded writers, harmlessly.** `sweep-dims`
   and the boot-time MIME repair both compare-and-set on a record's *current* name, so any

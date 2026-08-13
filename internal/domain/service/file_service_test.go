@@ -223,11 +223,11 @@ func (m *mockStorage) ReadStream(externalID string) (io.ReadCloser, int64, error
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
-func (m *mockStorage) ListLegacyNamed(string, int) ([]string, string, error) { return nil, "", nil }
-func (m *mockStorage) Link(string, string) (bool, error)                     { return true, nil }
-func (m *mockStorage) Park(string) (string, error)                           { return "", nil }
-func (m *mockStorage) Delete(_ string) error                                 { m.deleted = true; return m.deleteErr }
-func (m *mockStorage) Exists(_ string) (bool, error)                         { return m.data != nil, nil }
+func (m *mockStorage) ListLegacyNamed(int) ([]string, error) { return nil, nil }
+func (m *mockStorage) Link(string, string) (bool, error)     { return true, nil }
+func (m *mockStorage) Park(string) (string, error)           { return "", nil }
+func (m *mockStorage) Delete(_ string) error                 { m.deleted = true; return m.deleteErr }
+func (m *mockStorage) Exists(_ string) (bool, error)         { return m.data != nil, nil }
 
 type mockProcessor struct {
 	processErr error
@@ -1325,11 +1325,9 @@ type dedupMockStorage struct {
 	deleted bool
 }
 
-func (m *dedupMockStorage) ListLegacyNamed(string, int) ([]string, string, error) {
-	return nil, "", nil
-}
-func (m *dedupMockStorage) Link(string, string) (bool, error) { return true, nil }
-func (m *dedupMockStorage) Park(string) (string, error)       { return "", nil }
+func (m *dedupMockStorage) ListLegacyNamed(int) ([]string, error) { return nil, nil }
+func (m *dedupMockStorage) Link(string, string) (bool, error)     { return true, nil }
+func (m *dedupMockStorage) Park(string) (string, error)           { return "", nil }
 func (m *dedupMockStorage) Save(content []byte) (model.StoredFile, error) {
 	hash := ComputeHash(content)
 	return model.StoredFile{ExternalID: hash, Size: len(content), Created: false}, nil

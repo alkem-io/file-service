@@ -37,9 +37,12 @@ const (
 	reasonWriteFailed = "write_failed"
 )
 
-// cidNormalizePageSize bounds one keyset page, so a full-corpus pass never loads
-// the work-list whole and never pins a connection across the whole run.
-const cidNormalizePageSize = 500
+// cidNormalizeMaxPerPass bounds how many legacy names one pass takes on. It is a
+// backstop, not a page size: the store is walked once and only MATCHES are kept, so
+// this only trips if production holds far more legacy content than expected. When it
+// trips the pass is truncated, which the summary says explicitly — reading it as a
+// drained corpus is how a migration gets declared done early.
+const cidNormalizeMaxPerPass = 50_000
 
 // maxPacerInterval caps how long one blob may wait. A rate low enough to exceed it
 // is not a throughput choice an operator can have meant — it is a hang, and the Job
@@ -75,10 +78,15 @@ type CIDNormalizeSummary struct {
 	Parked     int   // legacy files moved aside; nothing is deleted
 	Orphans    int   // legacy files no row referenced — parked, nothing renamed
 
-	// WouldNormalize / WouldSkip are the preview figures. Dry runs only.
+	// WouldNormalize is the preview figure: legacy-named files found. Dry runs only.
+	// There is deliberately no WouldSkip: the work-list comes from the store, so
+	// every name in it is a file that exists, and a preview that reported a skip
+	// count would be reporting a number it never measured.
 	WouldNormalize int
-	WouldSkip      int
 
+	// Truncated means the pass hit its per-pass ceiling and legacy names remain.
+	// Distinct from Aborted: nothing went wrong, there is simply more to do.
+	Truncated bool
 	// Aborted means the pass ENDED EARLY (page-scan error or shutdown) rather than
 	// exhausting the corpus. Distinct from "completed with failures".
 	Aborted bool
@@ -142,43 +150,43 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 	run := &cidRun{opts: opts, journal: cidJournalName(sum.StartedAt)}
 	pace := newPacer(opts.Rate)
 
-	cursor := ""
-	for {
-		if ctx.Err() != nil { // shutdown: stop promptly rather than scanning through a drain
+	// One walk of the store, up to a bounded number of matches. Legacy names are rare
+	// in a large corpus, so paging would re-enumerate everything to find a handful.
+	work, err := s.Storage.ListLegacyNamed(cidNormalizeMaxPerPass)
+	if err != nil {
+		// A scan error is NOT an empty corpus: an unmounted volume must not read as a
+		// fully-swept store.
+		s.Logger.Error("sweep-cids: store scan failed; nothing was touched", zap.Error(err))
+		sum.Aborted = true
+		sum.FinishedAt = time.Now().UTC()
+		s.logCIDNormalizeSummary(sum)
+		return sum
+	}
+	if len(work) == cidNormalizeMaxPerPass {
+		// Truncated, not drained. Saying so matters: "no work left" is the operator's
+		// terminating condition, and this is the opposite of that.
+		sum.Truncated = true
+		s.Logger.Warn("sweep-cids: hit the per-pass ceiling; MORE LEGACY NAMES REMAIN — re-run after this pass",
+			zap.Int("ceiling", cidNormalizeMaxPerPass))
+	}
+
+	for _, legacy := range work {
+		if ctx.Err() != nil {
 			sum.Aborted = true
 			break
 		}
-		page, next, err := s.Storage.ListLegacyNamed(cursor, cidNormalizePageSize)
-		if err != nil {
-			s.Logger.Error("sweep-cids: store scan failed; ending pass early", zap.Error(err))
+		if opts.DryRun {
+			sum.WouldNormalize++
+			continue
+		}
+		// Pacing applies only to real passes: a dry run does no per-blob store I/O
+		// worth throttling, and pacing it would turn the preview an operator runs
+		// before deciding into a long wait.
+		if err := pace.Wait(ctx); err != nil {
 			sum.Aborted = true
 			break
 		}
-		if len(page) == 0 {
-			break
-		}
-		for _, legacy := range page {
-			if ctx.Err() != nil {
-				sum.Aborted = true
-				break
-			}
-			if opts.DryRun {
-				sum.WouldNormalize++
-				continue
-			}
-			// Pacing applies only to real passes: a dry run does no per-blob store
-			// I/O worth throttling, and pacing it would turn the preview an operator
-			// runs before deciding into a long wait.
-			if err := pace.Wait(ctx); err != nil {
-				sum.Aborted = true
-				break
-			}
-			s.normalizeOneCID(ctx, legacy, &sum, run)
-		}
-		if sum.Aborted {
-			break
-		}
-		cursor = next
+		s.normalizeOneCID(ctx, legacy, &sum, run)
 	}
 
 	sum.FinishedAt = time.Now().UTC()
@@ -231,25 +239,27 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 	if !ok {
 		return
 	}
-	// Already correct modulo case: on a case-insensitive volume this file IS the
-	// digest, so there is nothing to link and nothing to park — only the rows were
-	// wrong, and the rename below fixes them. On a case-sensitive volume the two are
-	// distinct files and the normal path applies.
-	sameFile := strings.EqualFold(legacy, digest)
 
-	created := false
-	if !sameFile {
-		// LINK BEFORE THE RENAME. Dying between the two then leaves at worst a spare
-		// hard link, with every row still naming a file that exists. The other
-		// ordering leaves rows naming a blob that does not exist — and since that
-		// name is valid 64-hex, those rows no longer match this sweep's scan, so no
-		// re-run would ever find them.
-		var err error
-		if created, err = s.Storage.Link(legacy, digest); err != nil {
-			s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
-			return
-		}
+	// ALWAYS attempt the link, and let the FILESYSTEM answer whether these are one
+	// file or two. A string compare cannot: `strings.EqualFold` says an uppercase-hex
+	// legacy name and its lowercase digest are "the same file", which is true only on
+	// a case-INSENSITIVE volume. On the case-sensitive volume this Job actually runs
+	// on they are two distinct files, and skipping the link left every repointed row
+	// naming a blob that was never created — a permanent 404 the pass reported as
+	// clean, and which a second pass then turned into the only copy being parked.
+	//
+	// os.Link tells us the truth for free:
+	//   created == true   → it made a second name, so they ARE two files
+	//   created == false  → the target already resolved to existing content, either a
+	//                       genuine dedup hit or the same file under a folded name
+	created, err := s.Storage.Link(legacy, digest)
+	if err != nil {
+		s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
+		return
 	}
+	// Same file under a folded name: nothing was created and the names differ only by
+	// case. Parking it would delete the very content the rows are about to name.
+	sameFile := !created && strings.EqualFold(legacy, digest)
 
 	records, err := s.Repo.RenameExternalID(ctx, legacy, digest)
 	if err != nil {
@@ -325,6 +335,19 @@ func (s *FileService) unlinkUnreferencedPublish(legacy, digest string, created b
 // only once the result is verified.
 func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDNormalizeSummary, run *cidRun, orphan bool) {
 	change := CIDNormalizeChange{PreviousExternalID: legacy, NewExternalID: digest, Records: records}
+	if orphan {
+		// An orphan has no old→new mapping to preserve — no row ever named it — but it
+		// still must not move when nothing could record that the pass ran at all. The
+		// no-sink guard lives in journalChange, so skipping the call entirely let a
+		// real pass with no sink park the whole corpus and exit 0. Worse: point the Job
+		// at the wrong database and EVERY blob takes this branch.
+		if run.opts.Report == nil {
+			run.journalFailed = true
+			s.Logger.Error("sweep-cids: no report sink configured; refusing to park",
+				zap.String("externalID", legacy))
+			return
+		}
+	}
 	if !orphan {
 		// Durable BEFORE the file moves. An orphan needs no journal line: nothing
 		// referenced it, so there is no mapping to reconstruct.
@@ -336,10 +359,18 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 		}
 	}
 	path, err := s.Storage.Park(legacy)
-	if err != nil {
+	switch {
+	case err == nil && path == "":
+		// The name was already gone — a concurrent delete, a second sweep pod, or an
+		// interrupted prior run. Booking this as a park would stamp `parked: true`
+		// into the durable report for bytes that are not in the parked directory, and
+		// an operator reversing the migration would look for them and find nothing.
+		s.Logger.Info("sweep-cids: the legacy file was already gone; nothing parked",
+			zap.String("externalID", legacy))
+	case err != nil:
 		s.Logger.Warn("sweep-cids: could not park the legacy file; it remains at its original name",
 			zap.String("externalID", legacy), zap.Error(err))
-	} else {
+	default:
 		change.Parked = true
 		sum.Parked++
 		s.Logger.Info("sweep-cids: parked", zap.String("externalID", legacy), zap.String("path", path))
@@ -428,7 +459,10 @@ func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) bool {
 			zap.Error(err))
 		return false
 	}
-	run.reportPath = path
+	// Deliberately NOT recorded as reportPath: that field is the REPORT's, and a
+	// failed report write returns early without clearing it — so the run's last line
+	// would announce "run report written" pointing at the journal.
+	_ = path
 	return true
 }
 
@@ -470,12 +504,11 @@ func (s *FileService) logCIDNormalizeSummary(sum CIDNormalizeSummary) {
 		zap.Int("parked", sum.Parked),
 		zap.Int("orphans", sum.Orphans),
 		zap.Bool("reportFailed", sum.ReportFailed),
+		zap.Bool("truncated", sum.Truncated),
 		zap.Duration("took", sum.FinishedAt.Sub(sum.StartedAt)),
 	}
 	if sum.DryRun {
-		fields = append(fields,
-			zap.Int("wouldNormalize", sum.WouldNormalize),
-			zap.Int("wouldSkip", sum.WouldSkip))
+		fields = append(fields, zap.Int("wouldNormalize", sum.WouldNormalize))
 	}
 	switch {
 	case sum.Aborted:

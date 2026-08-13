@@ -122,6 +122,11 @@ type cidStore struct {
 	parkErr   error
 	// parked holds what Park moved aside; nothing is ever destroyed.
 	parked map[string][]byte
+	// caseInsensitive models APFS/SMB/Azure Files, where two names differing only by
+	// case ARE one file. A plain map is case-SENSITIVE, so without this the fakes can
+	// only ever exercise one of the two volume kinds — which is how a data-loss path
+	// shipped with a passing test.
+	caseInsensitive bool
 
 	created []string // names published for the first time (dedup hits excluded)
 	deletes []string
@@ -147,9 +152,21 @@ func newCIDStore() *cidStore {
 
 func (s *cidStore) put(name string, content []byte) { s.blobs[name] = content }
 
-func (s *cidStore) has(name string) bool {
-	_, ok := s.blobs[name]
-	return ok
+func (s *cidStore) has(name string) bool { return s.resolve(name) != "" }
+
+// resolve returns the key that actually holds this name on this volume kind, or "".
+func (s *cidStore) resolve(name string) string {
+	if _, ok := s.blobs[name]; ok {
+		return name
+	}
+	if s.caseInsensitive {
+		for k := range s.blobs {
+			if strings.EqualFold(k, name) {
+				return k
+			}
+		}
+	}
+	return ""
 }
 
 func (s *cidStore) Save(content []byte) (model.StoredFile, error) {
@@ -203,25 +220,21 @@ func (s *cidStore) Exists(externalID string) (bool, error) { return s.has(extern
 
 // ListLegacyNamed enumerates names on the store that are not the current scheme —
 // the sweep's actual work-list, which includes blobs no row references.
-func (s *cidStore) ListLegacyNamed(after string, limit int) ([]string, string, error) {
+func (s *cidStore) ListLegacyNamed(limit int) ([]string, error) {
 	if s.listErr != nil {
-		return nil, "", s.listErr
+		return nil, s.listErr
 	}
 	var names []string
 	for n := range s.blobs {
-		if !sha3HexName.MatchString(n) && n > after && !strings.HasPrefix(n, "_") {
+		if !sha3HexName.MatchString(n) && !strings.HasPrefix(n, "_") {
 			names = append(names, n)
 		}
 	}
-	sort.Strings(names)
+	sort.Strings(names) // map order is random; tests need a stable work-list
 	if len(names) > limit {
 		names = names[:limit]
 	}
-	next := ""
-	if len(names) > 0 {
-		next = names[len(names)-1]
-	}
-	return names, next, nil
+	return names, nil
 }
 
 func (s *cidStore) Link(existing, newName string) (bool, error) {
@@ -229,7 +242,7 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 		return false, s.linkErr
 	}
 	if s.has(newName) {
-		return false, nil // dedup hit
+		return false, nil // dedup hit — on a case-insensitive volume, the same file
 	}
 	s.blobs[newName] = s.blobs[existing]
 	s.created = append(s.created, newName)
@@ -242,9 +255,11 @@ func (s *cidStore) Park(externalID string) (string, error) {
 	if s.parkErr != nil {
 		return "", s.parkErr
 	}
-	if !s.has(externalID) {
-		return "", nil
+	key := s.resolve(externalID)
+	if key == "" {
+		return "", nil // already gone — an empty path, not a completed park
 	}
+	externalID = key
 	if s.parked == nil {
 		s.parked = map[string][]byte{}
 	}
