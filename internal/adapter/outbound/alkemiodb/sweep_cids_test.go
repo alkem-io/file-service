@@ -63,11 +63,17 @@ func TestRenameExternalID(t *testing.T) {
 
 	// Three rows share the legacy name; one names something else entirely.
 	var ids []uuid.UUID
+	var cleanups []func()
 	for i := 0; i < 3; i++ {
 		id, cleanup := createLegacyRow(t, pool, legacy)
-		defer cleanup()
+		cleanups = append(cleanups, cleanup)
 		ids = append(ids, id)
 	}
+	defer func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}()
 	otherID, cleanupOther := createLegacyRow(t, pool, other)
 	defer cleanupOther()
 
