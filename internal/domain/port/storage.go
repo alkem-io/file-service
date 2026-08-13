@@ -52,6 +52,10 @@ type StoragePort interface {
 	// blob would sit on the volume forever and "zero legacy-named blobs remain"
 	// could never be satisfied.
 	//
+	// limit MUST be > 0. It is the only bound on what the implementation retains, so
+	// a non-positive value would mean "keep everything" — the unbounded growth this
+	// signature exists to prevent. Implementations MUST reject it rather than walk.
+	//
 	// Returning fewer than limit means the walk completed. Returning exactly limit
 	// means it was truncated and a further run has more to do — callers MUST NOT
 	// read that as a drained corpus.

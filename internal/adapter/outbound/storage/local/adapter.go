@@ -133,6 +133,12 @@ var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // skipping `_`/`.` prefixes — the same rule that makes those names unreachable as
 // blob keys.
 func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
+	// Rejected before opening the directory: the `len(names) == limit` check below
+	// can never trip for a non-positive limit, so the walk would retain every match
+	// in the corpus — precisely the unbounded growth this one-pass form replaced.
+	if limit <= 0 {
+		return nil, fmt.Errorf("list legacy names: limit must be positive, got %d", limit)
+	}
 	d, err := os.Open(a.basePath)
 	if err != nil {
 		// A missing root is NOT an empty corpus. Reporting it as one lets an

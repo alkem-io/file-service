@@ -181,11 +181,11 @@ was replaced already carries a different name and simply does not match.
   them up is the `file-backup-service` backfill that runs *after* this sweep and enumerates
   the `file` table directly. Run the sweep first — a backfill before it repeats the
   acceptance mass-failure at production scale.
-- **One pre-existing race is narrowed, not closed.** Reclamation counts references and then
-  deletes; a copy that read its source row before the repoint can insert a row naming the
-  legacy blob inside that window. The standing fix for that class is atomic GC. The sweep
-  re-reads the count after deleting and logs loudly if a reference appeared — and the bytes
-  stay recoverable under the new digest on the journal line above.
+- **One pre-existing race is narrowed, not closed.** A copy that read its source row before
+  the rename can insert a row naming the legacy blob inside the window before it is parked.
+  The standing fix for that class is atomic GC. Nothing is deleted, so the consequence is a
+  file in `_parked/` rather than lost content — recovery is moving it back, or hashing the
+  parked blobs to find the one whose digest is wanted.
 - Each real pass writes a JSON **run report** to `<LOCAL_STORAGE_PATH>/_sweep-reports/`,
   recording the previous and new name of every record it changed. Since the legacy blob
   is gone afterwards, this is the only way to reconstruct the mapping. The reserved

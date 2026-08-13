@@ -565,3 +565,16 @@ func TestReadStreamRejectsDirectory(t *testing.T) {
 		t.Fatalf("ReadStream on a directory must return a non-nil, non-NotExist error, got %v", err)
 	}
 }
+
+// limit is the only bound on what the walk retains, so a non-positive value would
+// mean "keep every match in the corpus" — the unbounded growth the one-pass form
+// exists to prevent. It must be refused before the directory is opened.
+func TestListLegacyNamed_RejectsNonPositiveLimit(t *testing.T) {
+	a := New(t.TempDir())
+	for _, limit := range []int{0, -1} {
+		names, err := a.ListLegacyNamed(limit)
+		if err == nil {
+			t.Errorf("ListLegacyNamed(%d) returned %d names and no error; want a refusal", limit, len(names))
+		}
+	}
+}
