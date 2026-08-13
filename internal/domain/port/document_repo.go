@@ -13,6 +13,16 @@ type DocumentRepo interface {
 	// GetByID fetches the full document row. Returns
 	// model.ErrDocumentNotFound when no row has this id.
 	GetByID(ctx context.Context, id uuid.UUID) (model.Document, error)
+	// GetByIDs fetches the full document rows for a set of ids in ONE
+	// database round-trip — the batch counterpart of GetByID, for a caller
+	// that would otherwise fan out one lookup per id.
+	//
+	// Ids with no row are OMITTED from the result rather than reported: a
+	// partial result is normal (a row may be deleted between the caller's read
+	// and this batch), so this returns no ErrDocumentNotFound and the caller
+	// maps the returned documents back by ID. Result ORDER is unspecified.
+	// An empty ids slice returns an empty result.
+	GetByIDs(ctx context.Context, ids []uuid.UUID) ([]model.Document, error)
 	// FindByExternalIDAndBucket looks up the row matching a content hash
 	// within one bucket — the (externalID, storageBucketID) pair that backs
 	// per-bucket dedup. Returns model.ErrDocumentNotFound when the bucket

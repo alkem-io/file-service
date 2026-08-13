@@ -5,6 +5,22 @@ SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
 FROM file
 WHERE id = $1;
 
+-- name: GetDocumentsByIDs :many
+-- Batch metadata lookup: resolves up to a bounded set of ids in ONE round-trip
+-- (the whole reason POST /internal/file/meta-batch exists — a caller rendering
+-- N conversation attachments must not fan out N GetDocumentByID calls at the
+-- shared service). Same column list as GetDocumentByID so both feed the one
+-- documentRow conversion and the one response DTO.
+--
+-- Ids with no row are simply ABSENT from the result: a partial result is normal
+-- (a document may be deleted between the caller's read and this batch), so the
+-- query filters rather than reports, and the caller maps by id.
+SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
+       "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
+       "createdDate", "updatedDate", version, content_metadata, "externalReference"
+FROM file
+WHERE id = ANY($1::uuid[]);
+
 -- name: FindDocumentByExternalIDAndBucket :one
 -- Content-dedup lookup for PLAIN (non-reference) uploads only. The
 -- "externalReference" IS NULL filter is the keystone of the dual-identity

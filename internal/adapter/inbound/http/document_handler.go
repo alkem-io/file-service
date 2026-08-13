@@ -71,6 +71,92 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 	documentMetaResponse(doc).Render(w)
 }
 
+// maxMetaBatchIDs bounds one POST /internal/file/meta-batch request. The
+// endpoint exists to COLLAPSE a caller's per-attachment fan-out into one query;
+// an unbounded id list would just move the unbounded work across the wire
+// (one huge `id = ANY(...)` scan instead of N lookups) and hand a single caller
+// an unbounded slice of the shared service. 100 covers a page of conversation
+// attachments with room to spare, and a caller with more simply pages.
+const maxMetaBatchIDs = 100
+
+// GetMetaBatch handles POST /internal/file/meta-batch — the batched form of
+// GET /internal/file/{id}/meta. It answers with the SAME per-document shape
+// (documentMetaResponse, one owner) so a batched read can never describe a
+// document differently from a single read, and it resolves the whole id set in
+// ONE database round-trip.
+//
+// Request: {"ids": ["<uuid>", ...]} — non-empty, at most 100 elements, every
+// element a valid UUID; duplicates are de-duplicated and each document is
+// returned at most once. A body violating any of those is a 400.
+//
+// PARTIAL RESULTS ARE NORMAL AND ARE A 200: an id that resolves to no row is
+// simply omitted from `files`. A document may be deleted between the caller's
+// read and this batch, and one such id must not fail the other 99. Response
+// order is unspecified — the caller maps by `id`.
+//
+// This is metadata only: it never touches blob content.
+//
+// The path is kebab-case because every other collection-level custom operation
+// in this API is (`/internal/file/copy`, `/internal/file/by-reference`).
+func (h *DocumentHandler) GetMetaBatch(w http.ResponseWriter, r *http.Request) {
+	var body DocumentMetaBatchRequest
+	if _, ok := decodeStrictJSON(w, r, &body); !ok {
+		return
+	}
+
+	ids, ok := parseMetaBatchIDs(w, body.IDs)
+	if !ok {
+		return
+	}
+
+	docs, err := h.Service.Repo.GetByIDs(r.Context(), ids)
+	if err != nil {
+		h.Logger.Error("failed to batch-lookup documents", zap.Error(err))
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	files := make([]DocumentMetaResponse, 0, len(docs))
+	for _, doc := range docs {
+		files = append(files, documentMetaResponse(doc))
+	}
+	DocumentMetaBatchResponse{Files: files}.Render(w)
+}
+
+// parseMetaBatchIDs validates the batch id list and returns it parsed and
+// DE-DUPLICATED (first occurrence wins), so a caller that repeats an id gets
+// that document once rather than N times. A missing/empty list, an over-cap
+// list, or any element that is not a valid UUID is a 400 — a malformed element
+// is rejected outright rather than silently skipped, which would be
+// indistinguishable to the caller from "that document is gone". Returns false
+// after writing the error response.
+func parseMetaBatchIDs(w http.ResponseWriter, raw []string) ([]uuid.UUID, bool) {
+	if len(raw) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "ids must be a non-empty array")
+		return nil, false
+	}
+	if len(raw) > maxMetaBatchIDs {
+		writeJSONError(w, http.StatusBadRequest,
+			fmt.Sprintf("ids exceeds the maximum batch size of %d", maxMetaBatchIDs))
+		return nil, false
+	}
+	ids := make([]uuid.UUID, 0, len(raw))
+	seen := make(map[uuid.UUID]struct{}, len(raw))
+	for _, s := range raw {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "ids must contain only valid UUIDs")
+			return nil, false
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
 // ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
 // ref is required. bucketId OMITTED → GLOBAL resolution (the provider's fetch:
 // any document carrying the reference, all sharing one blob). bucketId present

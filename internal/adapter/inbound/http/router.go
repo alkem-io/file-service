@@ -69,6 +69,11 @@ func NewRouter(deps Deps) *chi.Mux {
 		r.Post("/file/copy", deps.DocumentHandler.Copy)
 		r.Get("/file/by-reference", deps.DocumentHandler.ByReference)
 		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
+		// Batched /meta. Collection-level custom operations in this API are
+		// kebab-case static segments (`/file/copy`, `/file/by-reference`), so
+		// this one is `/file/meta-batch` — a plain static segment that sits in
+		// the same static-child set as those and cannot shadow `/file/{id}/meta`.
+		r.Post("/file/meta-batch", deps.DocumentHandler.GetMetaBatch)
 		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
 		// Content-addressed read by SHA3-256 hash (workspace#008); rationale on GetBlobContent.
 		r.Get("/blob/{hash}/content", deps.DocumentHandler.GetBlobContent)

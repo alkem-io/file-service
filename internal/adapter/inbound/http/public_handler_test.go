@@ -60,6 +60,16 @@ type mockDocRepo struct {
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
+	// Batch metadata lookup scripting (POST /internal/file/meta-batch).
+	// batchDocs is the set of rows that EXIST, keyed by id: GetByIDs returns
+	// only the requested ids found there, mirroring the SQL's "ids with no row
+	// are simply absent". batchCalls counts REPO ROUND-TRIPS — the endpoint's
+	// entire reason to exist is that N ids cost exactly one.
+	batchDocs    map[uuid.UUID]model.Document
+	batchErr     error
+	batchCalls   int
+	lastBatchIDs []uuid.UUID
+
 	// Dimension-backfill capture.
 	backfillCalls          int
 	lastBackfillID         uuid.UUID
@@ -71,6 +81,20 @@ type mockDocRepo struct {
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	m.getByIDCalls++
 	return m.doc, m.err
+}
+func (m *mockDocRepo) GetByIDs(_ context.Context, ids []uuid.UUID) ([]model.Document, error) {
+	m.batchCalls++
+	m.lastBatchIDs = append([]uuid.UUID(nil), ids...)
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	docs := make([]model.Document, 0, len(ids))
+	for _, id := range ids {
+		if doc, ok := m.batchDocs[id]; ok {
+			docs = append(docs, doc)
+		}
+	}
+	return docs, nil
 }
 func (m *mockDocRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	if m.findErr != nil {
