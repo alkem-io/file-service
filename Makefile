@@ -1,4 +1,4 @@
-.PHONY: build build-stub docker test test-vips lint generate sqlc-generate openapi setup-hooks run clean
+.PHONY: build build-stub docker test test-vips lint generate sqlc-generate openapi setup-hooks run clean test-e2e
 
 BINARY := file-service
 GO := go
@@ -22,6 +22,15 @@ test:
 test-vips:
 	$(GO) test -tags vips $(GOFLAGS) -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -1
+
+# End-to-end: drives the sweep through its REAL adapters against a real directory and
+# a real database, rather than through fakes. Tag-gated because it needs Postgres.
+#
+# It is not redundant with `test`. The fakes share the implementation's blind spots —
+# they assert what the code was written to do — so two defects reached a clean lint, a
+# clean race-enabled suite and five review rounds before a manual run found them.
+test-e2e:
+	$(GO) test -tags e2e $(GOFLAGS) ./internal/domain/service/ -run EndToEnd -v
 
 lint:
 	golangci-lint run

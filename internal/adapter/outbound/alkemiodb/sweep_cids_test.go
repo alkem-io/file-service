@@ -12,9 +12,10 @@ import (
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
-// createLegacyRow inserts one row naming a given externalID, against a real
-// database (018-legacy-cid-normalization).
-func createLegacyRow(t *testing.T, pool *pgxpool.Pool, externalID string) (uuid.UUID, func()) {
+// seedLegacyFixture inserts one FIXTURE row naming a given externalID, against a
+// real database. It is test scaffolding — the sweep itself never inserts anything;
+// its only database call is the rename (018-legacy-cid-normalization).
+func seedLegacyFixture(t *testing.T, pool *pgxpool.Pool, externalID string) (uuid.UUID, func()) {
 	t.Helper()
 	a := New(pool)
 
@@ -77,7 +78,7 @@ func TestRenameExternalID(t *testing.T) {
 	var ids []uuid.UUID
 	var cleanups []func()
 	for i := 0; i < 3; i++ {
-		id, cleanup := createLegacyRow(t, pool, legacy)
+		id, cleanup := seedLegacyFixture(t, pool, legacy)
 		cleanups = append(cleanups, cleanup)
 		ids = append(ids, id)
 	}
@@ -86,7 +87,7 @@ func TestRenameExternalID(t *testing.T) {
 			c()
 		}
 	}()
-	otherID, cleanupOther := createLegacyRow(t, pool, other)
+	otherID, cleanupOther := seedLegacyFixture(t, pool, other)
 	defer cleanupOther()
 
 	moved, err := a.RenameExternalID(context.Background(), legacy, digest)
@@ -147,7 +148,7 @@ func TestRenameExternalID_TouchesOnlyTheName(t *testing.T) {
 	a := New(pool)
 
 	legacy := "QmUntouchedTest" + strings.Repeat("W", 32)
-	id, cleanup := createLegacyRow(t, pool, legacy)
+	id, cleanup := seedLegacyFixture(t, pool, legacy)
 	defer cleanup()
 
 	before, err := a.GetByID(context.Background(), id)
