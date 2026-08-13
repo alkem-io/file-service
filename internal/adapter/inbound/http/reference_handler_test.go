@@ -806,6 +806,79 @@ func TestPatch_ZeroUUIDRejectedOnBothReattributeFields(t *testing.T) {
 	}
 }
 
+// UpdateDocumentMetadata overwrites the authorizationId / createdBy columns
+// unconditionally, so a PATCH that does NOT mention them must RE-SUPPLY their
+// current values. Nothing else defends this: dropping the seeds would silently
+// NULL a re-homed conversation attachment's policy and owner on the very
+// request that moves it — unreadable (403 on every serve) and unattributable,
+// with no error anywhere.
+func TestPatch_OmittedReattributeFieldsAreResupplied(t *testing.T) {
+	docID := uuid.New()
+	currentAuth := uuid.New()
+	currentCreator := uuid.New()
+	destBucket := uuid.New()
+
+	// The real 013 re-home: MOVE the staged document into the conversation
+	// bucket, naming ONLY storageBucketId.
+	rr, repo := runPatch(t, docID, `{"storageBucketId":"`+destBucket.String()+`"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{
+			ID:                docID,
+			StorageBucketID:   uuid.New(),
+			DisplayName:       "attachment.png",
+			AuthorizationID:   currentAuth,
+			CreatedBy:         &currentCreator,
+			ExternalReference: ptr("media_id_rehome"),
+			Version:           1,
+		}
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 1 {
+		t.Fatalf("UpdateMetadata calls = %d, want 1", repo.updateMetadataCalls)
+	}
+	meta := repo.lastUpdateMeta
+	if meta.StorageBucketID != destBucket {
+		t.Errorf("storageBucketId = %v, want the move target %v", meta.StorageBucketID, destBucket)
+	}
+	if meta.AuthorizationID == nil || *meta.AuthorizationID != currentAuth {
+		t.Errorf("omitted authorizationId = %v, want the row's current %v re-supplied (an unconditional "+
+			"UPDATE would NULL the policy and orphan the document)", meta.AuthorizationID, currentAuth)
+	}
+	if meta.CreatedBy == nil || *meta.CreatedBy != currentCreator {
+		t.Errorf("omitted createdBy = %v, want the row's current %v re-supplied", meta.CreatedBy, currentCreator)
+	}
+	if meta.ExternalReference == nil || *meta.ExternalReference != "media_id_rehome" {
+		t.Errorf("omitted externalReference = %v, want media_id_rehome re-supplied", meta.ExternalReference)
+	}
+	if meta.DisplayName != "attachment.png" {
+		t.Errorf("omitted displayName = %q, want the row's current value re-supplied", meta.DisplayName)
+	}
+}
+
+// The mirror case: a re-attribute that names ONE field must not drop the other.
+func TestPatch_ReattributeOneFieldPreservesTheOther(t *testing.T) {
+	docID := uuid.New()
+	currentCreator := uuid.New()
+	newAuth := uuid.New()
+
+	rr, repo := runPatch(t, docID, `{"authorizationId":"`+newAuth.String()+`"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{
+			ID: docID, StorageBucketID: uuid.New(), AuthorizationID: uuid.New(),
+			CreatedBy: &currentCreator, Version: 1,
+		}
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastUpdateMeta.AuthorizationID == nil || *repo.lastUpdateMeta.AuthorizationID != newAuth {
+		t.Errorf("authorizationId = %v, want the re-attributed %v", repo.lastUpdateMeta.AuthorizationID, newAuth)
+	}
+	if repo.lastUpdateMeta.CreatedBy == nil || *repo.lastUpdateMeta.CreatedBy != currentCreator {
+		t.Errorf("createdBy = %v, want the untouched current %v", repo.lastUpdateMeta.CreatedBy, currentCreator)
+	}
+}
+
 // --- copy: authorizationId is mandatory and must be a real policy ---
 
 // The zero UUID parses cleanly but is the adapter's SQL-NULL sentinel, so a copy

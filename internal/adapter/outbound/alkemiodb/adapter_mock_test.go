@@ -539,3 +539,79 @@ func TestMock_ListImagesNeedingDims_PredicateGuardsSentinels(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestMock_FindByExternalIDAndBucket_ExcludesReferenceRows: the dual-identity
+// rule's keystone is a single predicate — `AND "externalReference" IS NULL` in
+// FindDocumentByExternalIDAndBucket — and it lives ONLY in that SQL. Every layer
+// above is blind to it: the domain tests use a mock repo that never sees a WHERE
+// clause, and the adapter's other tests match the statement with a loose
+// `SELECT .+ FROM file` regex that a dropped predicate sails straight through.
+//
+// Without it, content-dedup would match a REFERENCE-bearing row: a plain upload
+// of bytes that happen to equal an inbound Matrix attachment would dedup onto
+// that bridge row and couple its lifecycle to it, and two distinct media_ids
+// with identical bytes could collapse into one document — the exact confusion
+// the reference/content split exists to prevent. So assert the SQL itself.
+func TestMock_FindByExternalIDAndBucket_ExcludesReferenceRows(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	bucketID := uuid.New()
+	mock.ExpectQuery(`(?s)FROM file\s+WHERE "externalID" = \$1 AND "storageBucketId" = \$2 AND "externalReference" IS NULL\s+ORDER BY "createdDate" ASC, id ASC\s+LIMIT 1`).
+		WithArgs("hash-abc", pgtype.UUID{Bytes: bucketID, Valid: true}).
+		WillReturnRows(mock.NewRows(columns()))
+
+	_, err = New(mock).FindByExternalIDAndBucket(context.Background(), "hash-abc", bucketID)
+	if !errors.Is(err, model.ErrDocumentNotFound) {
+		t.Fatalf("FindByExternalIDAndBucket = %v, want ErrDocumentNotFound for an empty result", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// The reference-keyed lookups are the other half of the dual identity: they must
+// stay keyed on "externalReference" (global and bucket-scoped), with the
+// deterministic oldest-wins ordering the by-reference contract promises.
+func TestMock_ReferenceLookups_KeyOnExternalReference(t *testing.T) {
+	bucketID := uuid.New()
+
+	t.Run("global", func(t *testing.T) {
+		mock, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mock.Close()
+		mock.ExpectQuery(`(?s)FROM file\s+WHERE "externalReference" = \$1\s+ORDER BY "createdDate" ASC, id ASC\s+LIMIT 1`).
+			WithArgs(pgtype.Text{String: "media_id_x", Valid: true}).
+			WillReturnRows(mock.NewRows(columns()))
+
+		if _, err := New(mock).GetByReference(context.Background(), "media_id_x"); !errors.Is(err, model.ErrDocumentNotFound) {
+			t.Fatalf("GetByReference = %v, want ErrDocumentNotFound", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("bucket-scoped", func(t *testing.T) {
+		mock, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mock.Close()
+		mock.ExpectQuery(`(?s)FROM file\s+WHERE "externalReference" = \$1 AND "storageBucketId" = \$2\s+ORDER BY "createdDate" ASC, id ASC\s+LIMIT 1`).
+			WithArgs(pgtype.Text{String: "media_id_x", Valid: true}, pgtype.UUID{Bytes: bucketID, Valid: true}).
+			WillReturnRows(mock.NewRows(columns()))
+
+		if _, err := New(mock).GetByReferenceInBucket(context.Background(), "media_id_x", bucketID); !errors.Is(err, model.ErrDocumentNotFound) {
+			t.Fatalf("GetByReferenceInBucket = %v, want ErrDocumentNotFound", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+}
