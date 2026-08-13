@@ -131,6 +131,12 @@ func (s *ReportSink) ensureDir() error {
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("create report dir %s: %w", s.dir, err)
 	}
+	// Set here, not only on a successful fsync. Gating it on the fsync meant that on
+	// exactly the mounts where a directory fsync fails — the NFS/FUSE ones this note
+	// is about — every one of ~1053 journal appends re-ran MkdirAll, re-ran the
+	// failing double sync, and logged a warning: none of the saving the flag exists
+	// for, precisely when it matters.
+	s.dirReady = true
 	return nil
 }
 

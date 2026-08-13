@@ -189,6 +189,28 @@ func (a *Adapter) Link(existing, newName string) (bool, error) {
 	return true, nil
 }
 
+// SameFile reports whether two names resolve to the same underlying file, by inode
+// identity rather than by spelling. os.SameFile is the only thing that can answer it:
+// on a case-insensitive volume two spellings share one inode; on a case-sensitive one
+// they are separate files that may both exist.
+func (a *Adapter) SameFile(x, y string) (bool, error) {
+	if !IsBlobName(x) || !IsBlobName(y) {
+		return false, fmt.Errorf("same-file %q/%q: %w", x, y, port.ErrInvalidKey)
+	}
+	xi, err := os.Stat(a.filePath(x))
+	if err != nil {
+		return false, err
+	}
+	yi, err := os.Stat(a.filePath(y))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil // y is not there at all, so they cannot be one file
+		}
+		return false, err
+	}
+	return os.SameFile(xi, yi), nil
+}
+
 // ReservedParkedDir holds blobs a migration moved aside. Same construction as
 // ReservedReportDir: IsBlobName accepts only 32-128 alphanumerics, so this
 // name is disqualified twice over — too short, and `_` is outside the alphabet.

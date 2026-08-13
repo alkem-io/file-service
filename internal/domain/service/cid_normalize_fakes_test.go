@@ -260,6 +260,13 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 
 // Park moves the file aside instead of destroying it — the property that makes the
 // migration reversible.
+// SameFile models inode identity: on a case-insensitive volume two spellings are one
+// file, on a case-sensitive one they are two — which a map alone cannot express.
+func (s *cidStore) SameFile(x, y string) (bool, error) {
+	kx, ky := s.resolve(x), s.resolve(y)
+	return kx != "" && kx == ky, nil
+}
+
 func (s *cidStore) Park(externalID string) (string, error) {
 	if s.parkErr != nil {
 		return "", s.parkErr

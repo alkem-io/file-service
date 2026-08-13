@@ -64,6 +64,15 @@ type StoragePort interface {
 	// Returns false if the target already exists — which is not an error on a
 	// content-addressed store, just a dedup hit.
 	Link(existing, newName string) (created bool, err error)
+	// SameFile reports whether two names resolve to the SAME underlying file.
+	//
+	// No string comparison can answer this. An uppercase-hex name and its lowercase
+	// digest are one file on a case-insensitive volume and two on a case-sensitive
+	// one — and on a case-sensitive volume both may genuinely exist, in which case
+	// EqualFold says "same" about two distinct files and the old one is never
+	// reclaimed. Only the filesystem knows; implementations compare identity, not
+	// names.
+	SameFile(a, b string) (bool, error)
 	// Park moves a blob out of the content namespace into a reserved sidecar
 	// directory, returning where it went. It is the non-destructive alternative to
 	// Delete for a migration: the bytes remain on the volume, so a rename that

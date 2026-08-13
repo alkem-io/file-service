@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -35,6 +34,10 @@ const (
 	reasonReadFailed = "read_failed"
 	// reasonWriteFailed: publishing the bytes or renaming the rows errored.
 	reasonWriteFailed = "write_failed"
+	// reasonAlreadyAddressed: the name differs from its digest only by case and no row
+	// names it, so the content is already at its correct address. A skip, and not a
+	// defect — but it must be COUNTED, or the buckets stop accounting for the scan.
+	reasonAlreadyAddressed = "already_addressed"
 )
 
 // cidNormalizeMaxPerPass bounds how many legacy names one pass takes on. It is a
@@ -225,6 +228,9 @@ type cidRun struct {
 	journal string
 	// reportPath is where the summary report landed, logged as the run's last line.
 	reportPath string
+	// journalPath is where the journal landed, named in the error when the report
+	// cannot be written — that is when an operator most needs to find it.
+	journalPath string
 	// journalFailed records that at least one mapping could not be made durable.
 	journalFailed bool
 }
@@ -267,9 +273,19 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
 		return
 	}
-	// Same file under a folded name: nothing was created and the names differ only by
-	// case. Parking it would delete the very content the rows are about to name.
-	sameFile := !created && strings.EqualFold(legacy, digest)
+	// Ask the FILESYSTEM, not the spelling. `!created && EqualFold` was wrong in one
+	// direction that matters: on a case-sensitive volume both spellings can genuinely
+	// exist, so Link finds the target present (created=false), EqualFold says "same
+	// file", and the legacy one is never parked — leaving it in the content namespace
+	// forever and putting "zero legacy-named blobs remain" permanently out of reach.
+	sameFile := false
+	if !created {
+		var err error
+		if sameFile, err = s.Storage.SameFile(legacy, digest); err != nil {
+			s.failCID(legacy, sum, reasonReadFailed, "same-file check: "+err.Error())
+			return
+		}
+	}
 
 	records, err := s.Repo.RenameExternalID(ctx, legacy, digest)
 	if err != nil {
@@ -287,10 +303,12 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 				"rename: another record in this bucket already holds "+digest+"; needs manual reconciliation")
 			return
 		}
-		// The link we made is now referenced by nothing and, being valid 64-hex, is
-		// invisible to every future pass — the same permanent invisible orphan the
-		// records == 0 branch removes. Drop it here too.
-		s.unlinkUnreferencedPublish(digest, created)
+		// The link we made stays. It was unlinked here for one round, to avoid an
+		// invisible orphan — that was the wrong trade. An errored UPDATE may have
+		// COMMITTED server-side: pgx surfaces the error when the connection drops
+		// after the commit, so the rows may already name this digest. Deleting it
+		// then leaves every one of them pointing at nothing. Leaking a blob costs
+		// disk; deleting a live one costs content.
 		s.failCID(legacy, sum, reasonWriteFailed, "rename: "+err.Error())
 		return
 	}
@@ -307,6 +325,10 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		// needs moving.
 		s.Logger.Info("sweep-cids: name differs from its digest only by case and no row names it; the content is already correctly addressed",
 			zap.String("externalID", legacy), zap.String("digest", digest))
+		// Counted, so the buckets still account for every name the scan returned. A
+		// branch that returns silently makes the report show all-zero counts for a
+		// pass that enumerated work and left it in place.
+		s.skipCID(legacy, sum, reasonAlreadyAddressed, "the file is its own digest modulo case; no row needs moving")
 		return
 	}
 	if records == 0 {
@@ -316,7 +338,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		// DIGEST name is invisible to this sweep on any future run (it no longer
 		// matches the scan) and indistinguishable from live content, so leaving one
 		// converts a visible, sweepable problem into a permanent invisible one.
-		s.unlinkUnreferencedPublish(digest, created)
+		s.unlinkUnreferencedPublish(ctx, digest, created)
 		s.parkLegacy(legacy, "", 0, sum, run, true)
 		return
 	}
@@ -344,8 +366,17 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 // of code and a relink that can itself fail. What actually makes this safe is that
 // the bytes are about to be parked, not destroyed: if an upload does dedup onto
 // this digest in the window, restoring it is moving one file back out of _parked.
-func (s *FileService) unlinkUnreferencedPublish(digest string, created bool) {
+func (s *FileService) unlinkUnreferencedPublish(ctx context.Context, digest string, created bool) {
 	if !created {
+		return
+	}
+	// `records == 0` proves nothing names the LEGACY name. It says nothing about the
+	// digest — and rows naming a digest whose blob was MISSING are the alkemio#1995
+	// dangling cohort. Publishing the link healed them; unlinking it re-breaks them,
+	// and their only remaining copy would be the parked legacy file.
+	if n, err := s.Repo.CountByExternalID(ctx, digest); err != nil || n > 0 {
+		s.Logger.Info("sweep-cids: keeping the published blob — rows name this digest",
+			zap.String("externalID", digest), zap.Int("rows", n), zap.Error(err))
 		return
 	}
 	if err := s.Storage.Delete(digest); err != nil {
@@ -493,10 +524,11 @@ func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) bool {
 			zap.Error(err))
 		return false
 	}
-	// Deliberately NOT recorded as reportPath: that field is the REPORT's, and a
-	// failed report write returns early without clearing it — so the run's last line
-	// would announce "run report written" pointing at the journal.
-	_ = path
+	// Kept, but in its OWN field: sharing reportPath made a failed report announce
+	// "run report written" pointing at the journal, while discarding it left the
+	// operator guessing a nanosecond-timestamped filename in a directory holding
+	// every past run — for the one pass whose files are already parked.
+	run.journalPath = path
 	return true
 }
 

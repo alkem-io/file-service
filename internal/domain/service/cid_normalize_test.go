@@ -274,3 +274,51 @@ func TestCIDNormalize_CaseFoldedNameWithNoMatchingRowsIsNotParked(t *testing.T) 
 		t.Errorf("orphans = %d, want 0 — nothing was orphaned; the content is already correctly addressed", sum.Orphans)
 	}
 }
+
+// A case-sensitive volume can hold BOTH spellings as genuinely distinct files. String
+// comparison then says "same file" about two files, and the legacy one is never
+// parked — so it stays in the content namespace forever and "zero legacy-named blobs
+// remain" is permanently out of reach. Only inode identity can tell them apart.
+func TestCIDNormalize_BothSpellingsPresentOnACaseSensitiveVolume(t *testing.T) {
+	content := []byte("both spellings exist")
+	digest := ComputeHash(content)
+	upper := upperHex(digest)
+
+	repo := newCIDRepo(&cidRow{ExternalID: upper})
+	store := newCIDStore() // case-SENSITIVE: two distinct entries
+	store.put(upper, content)
+	store.put(digest, content) // a later upload already published the lowercase form
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if _, ok := store.parked[upper]; !ok {
+		t.Error("the legacy spelling was not parked — it is a distinct file here, so it stays in the content namespace forever")
+	}
+	if !store.has(digest) {
+		t.Error("the digest the row now names is gone")
+	}
+	if repo.rows[0].ExternalID != digest {
+		t.Errorf("row names %q, want %q", repo.rows[0].ExternalID, digest)
+	}
+	_ = sum
+}
+
+// Rows can name a digest whose blob is MISSING — the alkemio#1995 dangling cohort.
+// Publishing the link heals them; unlinking it because nothing names the LEGACY name
+// re-breaks them, and their only remaining copy would be the parked file.
+func TestCIDNormalize_DoesNotUnlinkADigestRowsAlreadyName(t *testing.T) {
+	content := []byte("dangling cohort content")
+	digest := ComputeHash(content)
+	const legacy = "QmDanglingDanglingDanglingDangling"
+
+	// The row names the digest, whose blob is absent; the bytes survive under the CID.
+	repo := newCIDRepo(&cidRow{ExternalID: digest})
+	store := newCIDStore()
+	store.put(legacy, content)
+
+	newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if !store.has(digest) {
+		t.Error("unlinked the digest that rows name — the pass healed a dangling record and then re-broke it")
+	}
+}

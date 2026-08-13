@@ -167,7 +167,8 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 	if err != nil {
 		sum.ReportFailed = true
 		s.Logger.Error("sweep-cids: could not write the run report",
-			zap.String("recoverFrom", "the per-blob journal, if it was written"), zap.Error(err))
+			zap.String("journal", run.journalPath),
+			zap.String("recoverFrom", "the per-blob journal named above"), zap.Error(err))
 		return
 	}
 	run.reportPath = path

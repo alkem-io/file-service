@@ -112,8 +112,14 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 		bucket); err != nil {
 		t.Fatalf("seed bucket: %v", err)
 	}
+	// Teardown is scoped to THIS run's bucket, not to a global displayName: two
+	// interleaved runs against a shared integration database would otherwise delete
+	// each other's rows mid-test. The authorization_policy rows are removed too —
+	// leaking one per seeded file on every run is how a shared database rots.
 	defer func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM file WHERE "displayName" = 'e2e-sweep-cids.png'`)
+		_, _ = pool.Exec(ctx, `DELETE FROM authorization_policy WHERE id IN (
+			SELECT "authorizationId" FROM file WHERE "storageBucketId" = $1)`, bucket)
+		_, _ = pool.Exec(ctx, `DELETE FROM file WHERE "storageBucketId" = $1`, bucket)
 		_, _ = pool.Exec(ctx, `DELETE FROM storage_bucket WHERE id = $1`, bucket)
 	}()
 
@@ -142,7 +148,7 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 			sum.Normalized, sum.Records, sum.Orphans, sum.Parked)
 	}
 
-	assertEveryRowResolves(t, ctx, pool, store, 3)
+	assertEveryRowResolves(t, ctx, pool, bucket, store, 3)
 	assertContentNamespaceIsClean(t, store, digestOf(normalized))
 	// An orphan under a DIGEST name no longer matches the scan, so no future pass
 	// could ever find it — strictly worse than the legacy-named one it replaced.
@@ -160,9 +166,9 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 
 // assertEveryRowResolves is THE invariant: after the pass, no row names content that
 // is not on the store.
-func assertEveryRowResolves(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store string, want int) {
+func assertEveryRowResolves(t *testing.T, ctx context.Context, pool *pgxpool.Pool, bucket uuid.UUID, store string, want int) {
 	t.Helper()
-	rows, err := pool.Query(ctx, `SELECT "externalID" FROM file WHERE "displayName" = 'e2e-sweep-cids.png'`)
+	rows, err := pool.Query(ctx, `SELECT "externalID" FROM file WHERE "storageBucketId" = $1`, bucket)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}

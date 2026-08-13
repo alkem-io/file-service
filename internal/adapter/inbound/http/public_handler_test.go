@@ -191,6 +191,7 @@ func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
 }
 func (m *mockStorage) Delete(_ string) error                   { return nil }
 func (m *mockStorage) Link(_, _ string) (bool, error)          { return true, nil }
+func (m *mockStorage) SameFile(_, _ string) (bool, error)      { return false, nil }
 func (m *mockStorage) Park(_ string) (string, error)           { return "", nil }
 func (m *mockStorage) ListLegacyNamed(_ int) ([]string, error) { return nil, nil }
 func (m *mockStorage) Exists(_ string) (bool, error)           { return m.data != nil, nil }

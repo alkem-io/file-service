@@ -153,7 +153,6 @@ spec:
           volumeMounts:
             - name: file-storage
               mountPath: /storage
-                        # temp file before committing under the content hash. Root stays immutable.
             - name: tmp
               mountPath: /tmp
           resources:
