@@ -37,7 +37,7 @@ import (
 
 func digestOf(b []byte) string {
 	h := sha3.New256()
-	h.Write(b)
+	_, _ = h.Write(b) // hash.Hash never errors
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -130,17 +130,7 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 	sink := local.NewReportSink(store, local.ReservedReportDir)
 	opts := service.CIDNormalizeOptions{Rate: 10_000, Report: sink}
 
-	// --- preview changes nothing ---
-	dry := opts
-	dry.DryRun = true
-	preview := svc.RunCIDNormalize(ctx, dry)
-	if preview.WouldNormalize != 3 {
-		t.Errorf("wouldNormalize = %d, want 3 (two referenced CIDs + one orphan; the normalized blob is out of scope)",
-			preview.WouldNormalize)
-	}
-	if entries, _ := os.ReadDir(filepath.Join(store, local.ReservedParkedDir)); len(entries) != 0 {
-		t.Error("the dry run parked something")
-	}
+	assertPreviewChangesNothing(t, ctx, svc, opts, store)
 
 	// --- the real pass ---
 	sum := svc.RunCIDNormalize(ctx, opts)
@@ -152,7 +142,26 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 			sum.Normalized, sum.Records, sum.Orphans, sum.Parked)
 	}
 
-	// THE invariant: every row resolves to content that exists.
+	assertEveryRowResolves(t, ctx, pool, store, 3)
+	assertContentNamespaceIsClean(t, store, digestOf(normalized))
+	// An orphan under a DIGEST name no longer matches the scan, so no future pass
+	// could ever find it — strictly worse than the legacy-named one it replaced.
+	if _, err := os.Stat(filepath.Join(store, digestOf(orphanBytes))); err == nil {
+		t.Error("published a digest-named blob for content nothing references")
+	}
+	assertParkedDirIsAccountedFor(t, store, sum)
+
+	// --- re-running a converged corpus is a no-op ---
+	again := svc.RunCIDNormalize(ctx, opts)
+	if again.Normalized != 0 || again.Orphans != 0 || again.Parked != 0 {
+		t.Errorf("re-run was not a no-op: %+v", again)
+	}
+}
+
+// assertEveryRowResolves is THE invariant: after the pass, no row names content that
+// is not on the store.
+func assertEveryRowResolves(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store string, want int) {
+	t.Helper()
 	rows, err := pool.Query(ctx, `SELECT "externalID" FROM file WHERE "displayName" = 'e2e-sweep-cids.png'`)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
@@ -169,32 +178,38 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 			t.Errorf("row names %q, which is not on the store: %v", ext, err)
 		}
 	}
-	if seen != 3 {
-		t.Errorf("read back %d rows, want 3", seen)
+	if seen != want {
+		t.Errorf("read back %d rows, want %d", seen, want)
 	}
+}
 
-	// Nothing legacy-named is left in the content namespace, and the control is intact.
-	entries, _ := os.ReadDir(store)
+// assertContentNamespaceIsClean checks the migration converged and took nothing with
+// it: only digest-named files remain, and the already-correct control is untouched.
+func assertContentNamespaceIsClean(t *testing.T, store, controlDigest string) {
+	t.Helper()
+	entries, err := os.ReadDir(store)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
 	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if len(e.Name()) != 64 {
+		if !e.IsDir() && len(e.Name()) != 64 {
 			t.Errorf("legacy-named file %q remains in the content namespace", e.Name())
 		}
 	}
-	if _, err := os.Stat(filepath.Join(store, digestOf(normalized))); err != nil {
+	if _, err := os.Stat(filepath.Join(store, controlDigest)); err != nil {
 		t.Errorf("the already-normalized control blob was disturbed: %v", err)
 	}
+}
 
-	// The orphan's digest must NOT be published: an orphan under a digest name no
-	// longer matches the scan, so no future pass could ever find it.
-	if _, err := os.Stat(filepath.Join(store, digestOf(orphanBytes))); err == nil {
-		t.Error("published a digest-named blob for content nothing references")
+// assertParkedDirIsAccountedFor is the reconciliation an operator performs to undo the
+// migration: every file in _parked/ must be explained by the run that put it there.
+// A count alone does not satisfy it — that gap is why this test exists.
+func assertParkedDirIsAccountedFor(t *testing.T, store string, sum service.CIDNormalizeSummary) {
+	t.Helper()
+	parked, err := os.ReadDir(filepath.Join(store, local.ReservedParkedDir))
+	if err != nil {
+		t.Fatalf("read parked dir: %v", err)
 	}
-
-	// _parked/ is the undo, and every file in it must be accounted for by the run.
-	parked, _ := os.ReadDir(filepath.Join(store, local.ReservedParkedDir))
 	if len(parked) != 3 {
 		t.Errorf("_parked/ holds %d files, want 3 — nothing is deleted", len(parked))
 	}
@@ -210,10 +225,21 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 			t.Errorf("%q sits in the migration's undo directory with nothing in the run accounting for it", e.Name())
 		}
 	}
+}
 
-	// --- re-running a converged corpus is a no-op ---
-	again := svc.RunCIDNormalize(ctx, opts)
-	if again.Normalized != 0 || again.Orphans != 0 || again.Parked != 0 {
-		t.Errorf("re-run was not a no-op: %+v", again)
+// assertPreviewChangesNothing pins the approval gate: the preview counts what a real
+// pass would touch and writes nothing at all.
+func assertPreviewChangesNothing(t *testing.T, ctx context.Context, svc *service.FileService,
+	opts service.CIDNormalizeOptions, store string) {
+	t.Helper()
+	dry := opts
+	dry.DryRun = true
+	preview := svc.RunCIDNormalize(ctx, dry)
+	if preview.WouldNormalize != 3 {
+		t.Errorf("wouldNormalize = %d, want 3 (two referenced CIDs + one orphan; the normalized blob is out of scope)",
+			preview.WouldNormalize)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(store, local.ReservedParkedDir)); len(entries) != 0 {
+		t.Error("the dry run parked something")
 	}
 }

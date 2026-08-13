@@ -34,6 +34,9 @@ test-e2e:
 
 lint:
 	golangci-lint run
+	# Tag-gated files are invisible to the run above, so they get their own pass —
+	# otherwise e2e coverage can rot behind a green gate.
+	golangci-lint run --build-tags e2e ./internal/domain/service/
 
 generate:
 	$(GO) generate ./...
