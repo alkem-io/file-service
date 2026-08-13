@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -169,12 +170,30 @@ func parseMetaBatchIDs(w http.ResponseWriter, raw []string) ([]uuid.UUID, bool) 
 // bucket-scoped read into a cross-bucket one because the caller's variable
 // interpolated empty is exactly the failure mode that must not be quiet.
 func (h *DocumentHandler) ByReference(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
+	// PARSED, not r.URL.Query(): Query() discards the parse error and DROPS
+	// every pair it cannot decode. A bucketId carrying an invalid percent-escape
+	// would therefore not reach the 400 below — the key would simply VANISH from
+	// the map, read as "absent", and fail the endpoint OPEN into the global,
+	// cross-bucket lookup. Surfacing the error keeps the three states distinct:
+	// absent → global, present+valid → bucket-scoped, present+empty/malformed → 400.
+	query, qerr := url.ParseQuery(r.URL.RawQuery)
+	if qerr != nil {
+		writeJSONError(w, http.StatusBadRequest, "malformed query string")
+		return
+	}
 	ref := query.Get("ref")
 	if ref == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: ref")
 		return
 	}
+	// ref is passed on VERBATIM — never trimmed, never rewritten:
+	// externalReference is opaque to file-service and must match byte-for-byte
+	// what the writer stored. It is not storability-checked here either: bytes no
+	// Postgres character column can hold (NUL, invalid UTF-8) could never have
+	// been WRITTEN in the first place — the write paths reject them — so such a
+	// ref can only ever be a lookup that matches nothing. No caller of this
+	// internal endpoint produces one; if that ever changes, the driver rejection
+	// surfaces as a 500 rather than the 400 it should be.
 
 	// Read the value and its PRESENCE separately: Get collapses "absent" and
 	// "present but empty" to "", and those two mean opposite things here.

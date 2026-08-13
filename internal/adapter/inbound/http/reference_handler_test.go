@@ -145,6 +145,44 @@ func TestByReference_PresentButEmptyBucketIs400(t *testing.T) {
 	}
 }
 
+// A query string Go cannot parse must FAIL CLOSED. net/url's URL.Query()
+// discards the parse error and silently DROPS every pair it cannot decode, so a
+// bucketId carrying an invalid percent-escape would disappear from the map, read
+// as "absent", and widen the read into the GLOBAL cross-bucket lookup — the
+// exact widening the present-but-empty 400 exists to prevent. The handler parses
+// the raw query itself so the failure surfaces.
+//
+// Each case is scripted so the global lookup would SUCCEED: the test can only
+// pass because the handler refused, not because nothing matched.
+func TestByReference_MalformedQueryFailsClosed(t *testing.T) {
+	for _, rawQuery := range []string{
+		"ref=x&bucketId=%zz", // invalid percent-escape in the value
+		"ref=x&bucket%zz=1",  // invalid percent-escape in a key
+		"ref=%zz",            // the required parameter itself is undecodable
+		"ref=x;bucketId=%zz", // semicolon separator (rejected since Go 1.17)
+	} {
+		h, repo, _ := newDocHandler()
+		repo.refDoc = &model.Document{ID: uuid.New(), ExternalID: "global-hash", MimeType: "text/plain"}
+		repo.refInBucketDoc = &model.Document{ID: uuid.New(), ExternalID: "scoped-hash", MimeType: "text/plain"}
+
+		r := chi.NewRouter()
+		r.Get("/internal/file/by-reference", h.ByReference)
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?"+rawQuery, nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("?%s: status = %d, want 400 for an unparseable query, body: %s", rawQuery, rr.Code, rr.Body.String())
+		}
+		if repo.refCalls != 0 {
+			t.Errorf("?%s: a malformed query fell through to the GLOBAL lookup (refCalls=%d)", rawQuery, repo.refCalls)
+		}
+		if repo.refInBucketCalls != 0 {
+			t.Errorf("?%s: a malformed query still ran a lookup (refInBucketCalls=%d)", rawQuery, repo.refInBucketCalls)
+		}
+	}
+}
+
 func TestByReference_NotFoundIs404(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	repo.refDoc = nil // → ErrDocumentNotFound
