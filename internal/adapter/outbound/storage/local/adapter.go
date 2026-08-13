@@ -189,6 +189,18 @@ func (a *Adapter) Link(existing, newName string) (bool, error) {
 	return true, nil
 }
 
+// SizeOf stats a blob without opening it.
+func (a *Adapter) SizeOf(externalID string) (int64, error) {
+	if !IsBlobName(externalID) {
+		return 0, fmt.Errorf("size %q: %w", externalID, port.ErrInvalidKey)
+	}
+	fi, err := os.Stat(a.filePath(externalID))
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
 // SameFile reports whether two names resolve to the same underlying file, by inode
 // identity rather than by spelling. os.SameFile is the only thing that can answer it:
 // on a case-insensitive volume two spellings share one inode; on a case-sensitive one

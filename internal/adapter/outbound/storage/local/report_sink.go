@@ -17,12 +17,16 @@ type ReportSink struct {
 	// logf receives non-fatal problems (a directory fsync that failed on a
 	// network mount, say). Nil is fine — the sink works without a logger.
 	logf func(format string, args ...any)
-	// dirReady records that the directory exists and its entry has been flushed.
+	// dirCreated records that MkdirAll has run; dirSynced that the directory entry has
+	// been flushed. They were ONE flag, and collapsing them silently disabled the
+	// fsync: ensureDir set it, so syncDirOnce always returned early and the journal's
+	// name was never made durable — the exact loss AppendJournal exists to bound.
 	// The journal appends one line per record; without this every one of them
 	// would re-MkdirAll and re-fsync a directory whose entry only changed on the
 	// first line, and on the NFS/FUSE mounts this runs on that is the slowest and
 	// most failure-prone step in the call.
-	dirReady bool
+	dirCreated bool
+	dirSynced  bool
 }
 
 // ReservedReportDir is the directory name reports live under, owned here because
@@ -125,18 +129,15 @@ func (s *ReportSink) AppendJournal(name string, line []byte) (string, error) {
 
 // ensureDir creates the reserved directory once per sink.
 func (s *ReportSink) ensureDir() error {
-	if s.dirReady {
+	if s.dirCreated {
 		return nil
 	}
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("create report dir %s: %w", s.dir, err)
 	}
-	// Set here, not only on a successful fsync. Gating it on the fsync meant that on
-	// exactly the mounts where a directory fsync fails — the NFS/FUSE ones this note
-	// is about — every one of ~1053 journal appends re-ran MkdirAll, re-ran the
-	// failing double sync, and logged a warning: none of the saving the flag exists
-	// for, precisely when it matters.
-	s.dirReady = true
+	// Only MkdirAll is cached here. Whether the entry is DURABLE is a separate
+	// question, answered by syncDirOnce.
+	s.dirCreated = true
 	return nil
 }
 
@@ -149,17 +150,15 @@ func (s *ReportSink) syncDirBestEffort(path string) {
 		if s.logf != nil {
 			s.logf("report directory fsync failed for %s (the file itself is durable): %v", path, err)
 		}
-		// dirReady is NOT set on failure. It was set unconditionally, and
-		// syncDirOnce returns early on it — so a transient failure of the one flush
-		// that makes the journal's NAME durable was never retried by any later
-		// append, on the first-ever pass, for blobs already reclaimed.
+		// dirSynced is NOT set on failure, so a later append retries the one flush
+		// that makes the journal's NAME durable.
 		return
 	}
-	s.dirReady = true
+	s.dirSynced = true
 }
 
 func (s *ReportSink) syncDirOnce(path string) {
-	if s.dirReady {
+	if s.dirSynced {
 		return
 	}
 	s.syncDirBestEffort(path)

@@ -64,6 +64,9 @@ type StoragePort interface {
 	// Returns false if the target already exists — which is not an error on a
 	// content-addressed store, just a dedup hit.
 	Link(existing, newName string) (created bool, err error)
+	// SizeOf returns a blob's size without reading it — enough to tell a dedup hit
+	// onto good content from one onto a truncated file.
+	SizeOf(externalID string) (int64, error)
 	// SameFile reports whether two names resolve to the SAME underlying file.
 	//
 	// No string comparison can answer this. An uppercase-hex name and its lowercase

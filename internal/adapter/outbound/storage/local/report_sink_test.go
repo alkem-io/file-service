@@ -159,3 +159,20 @@ func TestReservedReportDirMatchesConfig(t *testing.T) {
 			got, ReservedReportDir)
 	}
 }
+
+// The journal's directory entry must actually be flushed. Collapsing "the directory
+// exists" and "its entry is durable" into one flag silently disabled the fsync —
+// ensureDir set it, so syncDirOnce always returned early — and nothing caught it,
+// because reading the file back in the same process proves neither.
+func TestReportSink_JournalFlushesTheDirectoryEntryOnce(t *testing.T) {
+	sink := NewReportSink(t.TempDir(), reservedDir)
+	if _, err := sink.AppendJournal("run.ndjson", []byte("{}\n")); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if !sink.dirSynced {
+		t.Error("the first append never flushed the directory entry — a crash loses the journal's NAME, and with it every mapping inside")
+	}
+	if !sink.dirCreated {
+		t.Error("dirCreated not set after MkdirAll")
+	}
+}

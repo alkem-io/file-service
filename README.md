@@ -166,9 +166,11 @@ was replaced already carries a different name and simply does not match.
 - **No positional arguments.** The flag parser stops at the first non-flag operand, so
   `sweep-cids prod --dry-run` would parse cleanly with `--dry-run` silently dropped. Any
   positional argument exits `2`.
-- Exit `1` means the pass ended early, a record genuinely failed, the run report could not
-  be written, or the content store failed the pre-flight. A record whose content is absent
-  is a legitimate skip and never fails the run.
+- Exit `1` has **five** causes: the pass ended early, a record genuinely failed, the run
+  report or journal could not be written, the content store failed the pre-flight, or the
+  pass was **truncated** at its per-pass ceiling. That last one is not a fault — it means
+  "this worked, run it again" — and it is the one an operator is most likely to
+  misread, since the report writes cleanly and `failed` is 0.
 - A pass whose store is **missing or empty refuses to run**: an unmounted volume makes
   every read look like permanently-absent content, which would otherwise exit `0` and brand
   the whole corpus unrecoverable in the one durable record of the migration.

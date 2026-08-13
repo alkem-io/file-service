@@ -262,6 +262,14 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 // migration reversible.
 // SameFile models inode identity: on a case-insensitive volume two spellings are one
 // file, on a case-sensitive one they are two — which a map alone cannot express.
+func (s *cidStore) SizeOf(externalID string) (int64, error) {
+	k := s.resolve(externalID)
+	if k == "" {
+		return 0, os.ErrNotExist
+	}
+	return int64(len(s.blobs[k])), nil
+}
+
 func (s *cidStore) SameFile(x, y string) (bool, error) {
 	kx, ky := s.resolve(x), s.resolve(y)
 	return kx != "" && kx == ky, nil

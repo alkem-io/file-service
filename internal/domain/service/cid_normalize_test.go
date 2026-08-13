@@ -322,3 +322,30 @@ func TestCIDNormalize_DoesNotUnlinkADigestRowsAlreadyName(t *testing.T) {
 		t.Error("unlinked the digest that rows name — the pass healed a dangling record and then re-broke it")
 	}
 }
+
+// A dedup hit means a file is already at the digest — and until now nothing looked at
+// it. If that file is truncated (the NFS fault the short-read guard exists for),
+// repointing every row onto it and parking the good copy serves corrupt content and
+// reports a clean success.
+func TestCIDNormalize_DedupHitOntoATruncatedBlobIsRefused(t *testing.T) {
+	content := []byte("the complete content, all of it")
+	digest := ComputeHash(content)
+	const legacy = "QmGoodCopyGoodCopyGoodCopyGoodCopy"
+
+	repo := newCIDRepo(&cidRow{ExternalID: legacy})
+	store := newCIDStore()
+	store.put(legacy, content)
+	store.put(digest, []byte("trunc")) // same name, wrong bytes
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if sum.Failed != 1 || sum.Normalized != 0 {
+		t.Fatalf("failed=%d normalized=%d, want 1/0", sum.Failed, sum.Normalized)
+	}
+	if repo.rows[0].ExternalID != legacy {
+		t.Error("repointed a row onto a blob that is the wrong size")
+	}
+	if len(store.parked) != 0 {
+		t.Error("parked the good copy while pointing rows at a truncated one")
+	}
+}

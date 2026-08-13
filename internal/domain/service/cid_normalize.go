@@ -251,7 +251,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		}
 	}()
 
-	digest, ok := s.digestOf(legacy, sum)
+	digest, size, ok := s.digestOf(legacy, sum)
 	if !ok {
 		return
 	}
@@ -273,6 +273,10 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
 		return
 	}
+	if !s.dedupTargetIsIntact(legacy, digest, size, created, sum) {
+		return
+	}
+
 	// Ask the FILESYSTEM, not the spelling. `!created && EqualFold` was wrong in one
 	// direction that matters: on a case-sensitive volume both spellings can genuinely
 	// exist, so Link finds the target present (created=false), EqualFold says "same
@@ -374,9 +378,18 @@ func (s *FileService) unlinkUnreferencedPublish(ctx context.Context, digest stri
 	// digest — and rows naming a digest whose blob was MISSING are the alkemio#1995
 	// dangling cohort. Publishing the link healed them; unlinking it re-breaks them,
 	// and their only remaining copy would be the parked legacy file.
-	if n, err := s.Repo.CountByExternalID(ctx, digest); err != nil || n > 0 {
+	n, err := s.Repo.CountByExternalID(ctx, digest)
+	if err != nil {
+		// Cannot tell. Keeping it is the safe direction, but it leaves an orphan under
+		// a digest name that no future scan can match — so it is a WARN naming the
+		// blob, not an Info that reads like a routine decision.
+		s.Logger.Warn("sweep-cids: could not count references for a published blob; keeping it, and it is now invisible to future passes",
+			zap.String("externalID", digest), zap.Error(err))
+		return
+	}
+	if n > 0 {
 		s.Logger.Info("sweep-cids: keeping the published blob — rows name this digest",
-			zap.String("externalID", digest), zap.Int("rows", n), zap.Error(err))
+			zap.String("externalID", digest), zap.Int("rows", n))
 		return
 	}
 	if err := s.Storage.Delete(digest); err != nil {
@@ -458,8 +471,8 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 // content predates the current scheme with unknown write history, so the bytes are
 // the only truth available and adopting their digest is correct by construction
 // (FR-006, research R2).
-func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (string, bool) {
-	rc, size, err := s.Storage.ReadStream(legacy)
+func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest string, size int64, ok bool) {
+	rc, promised, err := s.Storage.ReadStream(legacy)
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -473,7 +486,7 @@ func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (string,
 		default:
 			s.failCID(legacy, sum, reasonReadFailed, err.Error())
 		}
-		return "", false
+		return "", 0, false
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -481,18 +494,18 @@ func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (string,
 	copied, err := io.Copy(h, rc)
 	if err != nil {
 		s.failCID(legacy, sum, reasonReadFailed, "read: "+err.Error())
-		return "", false
+		return "", 0, false
 	}
 	// io.Copy returns (n, nil) on a SHORT read that ended in a clean EOF — a blipping
 	// NFS volume, a truncated file. Hashing that would name a fragment as if it were
 	// the file and repoint every row to it. The open handle's own Stat is the
 	// authority on what it promised.
-	if copied != size {
+	if copied != promised {
 		s.failCID(legacy, sum, reasonReadFailed,
-			fmt.Sprintf("short read: got %d of %d bytes with no error; refusing to address a truncated file", copied, size))
-		return "", false
+			fmt.Sprintf("short read: got %d of %d bytes with no error; refusing to address a truncated file", copied, promised))
+		return "", 0, false
 	}
-	return h.Sum(), true
+	return h.Sum(), promised, true
 }
 
 // journalChange makes one old→new mapping durable before the blob it describes is
@@ -606,4 +619,27 @@ func newPacer(blobsPerSecond float64) *rate.Limiter {
 		blobsPerSecond = floor
 	}
 	return rate.NewLimiter(rate.Limit(blobsPerSecond), 1)
+}
+
+// dedupTargetIsIntact checks a blob that was ALREADY at the digest before this pass.
+// Nothing else looks at it: Link reports a dedup hit and moves on. If that file is
+// truncated or empty — the NFS fault the short-read guard exists for — repointing
+// every row onto it and then parking the good copy serves corrupt content and reports
+// a clean success. The size just measured makes the check free.
+func (s *FileService) dedupTargetIsIntact(legacy, digest string, size int64, created bool, sum *CIDNormalizeSummary) bool {
+	if created {
+		return true // we made it from bytes we just hashed
+	}
+	existing, err := s.Storage.SizeOf(digest)
+	if err != nil {
+		s.failCID(legacy, sum, reasonReadFailed, "size of existing blob: "+err.Error())
+		return false
+	}
+	if existing != size {
+		s.failCID(legacy, sum, reasonWriteFailed, fmt.Sprintf(
+			"a blob already at %s is %d bytes but this content is %d; refusing to repoint rows onto it",
+			digest, existing, size))
+		return false
+	}
+	return true
 }
