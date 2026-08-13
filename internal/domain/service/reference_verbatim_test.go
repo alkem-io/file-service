@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -141,6 +142,87 @@ func TestCopyDocument_ReferenceBearingSkipsContentDedup(t *testing.T) {
 	}
 	if repo.lastCreateDoc.ExternalReference == nil || *repo.lastCreateDoc.ExternalReference != ref {
 		t.Errorf("externalReference not carried onto the copied row: %v", repo.lastCreateDoc.ExternalReference)
+	}
+}
+
+// THE production re-share path (013): the server COPYs a media_id into a
+// conversation bucket with skipDedup=true, and that same (externalReference,
+// bucket) pair is already materialized — a repeated / retried re-share. The
+// partial UNIQUE(externalReference, storageBucketId) raises a duplicate key, and
+// the copy must resolve IDEMPOTENTLY to the existing row (Reused=true), not fail.
+//
+// skipDedup means "do not CONTENT-dedup"; it never means "do not resolve a
+// reference collision". Checking it first made the reference re-query dead code
+// on the only path that actually uses it — every real re-share sends
+// skipDedup=true — and turned an idempotent retry into a 409.
+func TestCopyDocument_ReShareOfExistingReferenceIsIdempotent(t *testing.T) {
+	ref := "media_id_reshare"
+	destBucket := uuid.New()
+	source := model.Document{ID: uuid.New(), ExternalID: "hash", MimeType: "image/png", Size: 5, DisplayName: "m.png"}
+	existing := model.Document{
+		ID: uuid.New(), ExternalID: "hash", MimeType: "image/png", Size: 5,
+		StorageBucketID: destBucket, ExternalReference: &ref,
+	}
+	repo := &mockRepo{doc: source, createErr: model.ErrDuplicateKey, refDoc: &existing}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CopyDocument(context.Background(), source.ID, model.CopyDocumentInput{
+		DestinationBucketID: destBucket,
+		AuthorizationID:     uuid.New(),
+		ExternalReference:   &ref,
+		SkipDedup:           true, // what the real re-share always sends
+	})
+	if err != nil {
+		t.Fatalf("re-share of an already-copied reference must resolve idempotently, got %v", err)
+	}
+	if doc.ID != existing.ID || !doc.Reused {
+		t.Errorf("resolved id=%v reused=%v, want the existing row %v with Reused=true", doc.ID, doc.Reused, existing.ID)
+	}
+	if repo.refCalls != 1 || repo.lastRefKey != ref {
+		t.Errorf("collision was not resolved BY REFERENCE: refCalls=%d key=%q", repo.refCalls, repo.lastRefKey)
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("reference collision consulted content-dedup (findCalls=%d), want 0", repo.findCalls)
+	}
+}
+
+// The counterpart the fix must not swallow: a skipDedup collision on a PLAIN
+// (reference-less) row is still a hard 409. skipDedup asked for a fresh row and
+// the schema refused; masquerading that as a dedup hit would silently corrupt
+// placeholder flows.
+func TestInsertDocument_SkipDedupWithoutReferenceStillConflicts(t *testing.T) {
+	repo := &mockRepo{createErr: model.ErrDuplicateKey, findDoc: &model.Document{ID: uuid.New()}}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "p.bin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+		SkipDedup:       true,
+	}, []byte("payload"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("skipDedup content collision = %v, want ErrConflict", err)
+	}
+}
+
+// A reference-bearing insert whose duplicate key did NOT come from the reference
+// index (no row carries the reference in that bucket) falls through to the
+// content handling — so a skipDedup caller still gets its 409 rather than a
+// misleading 500 from the failed reference re-query.
+func TestInsertDocument_ReferenceCollisionNotOnReferenceFallsThrough(t *testing.T) {
+	ref := "media_id_absent"
+	repo := &mockRepo{createErr: model.ErrDuplicateKey} // refDoc nil → reference re-query finds nothing
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:       "m.bin",
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+		SkipDedup:         true,
+	}, []byte("payload"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("err = %v, want ErrConflict once the reference re-query found no row", err)
 	}
 }
 
