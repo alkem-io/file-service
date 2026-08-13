@@ -282,10 +282,28 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 				"rename: another record in this bucket already holds "+digest+"; needs manual reconciliation")
 			return
 		}
+		// The link we made is now referenced by nothing and, being valid 64-hex, is
+		// invisible to every future pass — the same permanent invisible orphan the
+		// records == 0 branch removes. Drop it here too.
+		s.unlinkUnreferencedPublish(legacy, digest, created)
 		s.failCID(legacy, sum, reasonWriteFailed, "rename: "+err.Error())
 		return
 	}
 
+	if records == 0 && sameFile {
+		// Nothing names the legacy spelling, and on a case-insensitive volume this
+		// file IS the digest — so rows naming the digest are pointing at THIS file.
+		// Parking it would delete live content, which is the same data loss the
+		// records > 0 path guards, reached by a different route: an uppercase-hex
+		// name is in scope (the scan wants lowercase) while every row already carries
+		// the lowercase form, so the rename matches nothing and control lands here.
+		//
+		// Nothing to do: the content is already at its correct address and no row
+		// needs moving.
+		s.Logger.Info("sweep-cids: name differs from its digest only by case and no row names it; the content is already correctly addressed",
+			zap.String("externalID", legacy), zap.String("digest", digest))
+		return
+	}
 	if records == 0 {
 		// Nothing referenced this blob. It is an orphan — from a deleted row, or from
 		// a Replace that repointed its row and left this file behind — and parking it
@@ -382,7 +400,13 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 	}
 	if orphan {
 		sum.Orphans++
-		sum.ParkedOrphans = append(sum.ParkedOrphans, legacy)
+		if change.Parked {
+			// Only name it if it actually moved. Otherwise the report lists a file as
+			// being in _parked/ that is not there — the inverse of the care taken for
+			// change.Parked above, and it breaks the very reconciliation the parked
+			// directory exists to support.
+			sum.ParkedOrphans = append(sum.ParkedOrphans, legacy)
+		}
 		return
 	}
 	sum.Changed = append(sum.Changed, change)

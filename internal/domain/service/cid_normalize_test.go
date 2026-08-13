@@ -245,3 +245,32 @@ func TestNewPacer_CapsThePerObjectWait(t *testing.T) {
 		}
 	}
 }
+
+// The case-fold hazard has TWO routes, and fixing only the first left the second
+// wide open: when every row already carries the LOWERCASE digest, the rename matches
+// nothing and control lands in the orphan branch — which parked the one and only
+// file, 404ing every one of those rows.
+func TestCIDNormalize_CaseFoldedNameWithNoMatchingRowsIsNotParked(t *testing.T) {
+	content := []byte("case-folded, rows already on the digest")
+	digest := ComputeHash(content)
+	upper := upperHex(digest)
+
+	// The row names the LOWERCASE digest; the file on disk is the uppercase spelling.
+	repo := newCIDRepo(&cidRow{ExternalID: digest})
+	store := newCIDStore()
+	store.caseInsensitive = true
+	store.put(upper, content)
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if len(store.parked) != 0 {
+		t.Errorf("parked %v — on a case-insensitive volume that file IS the digest the row names, so this 404s live content",
+			store.parked)
+	}
+	if !store.has(digest) {
+		t.Error("the content the row names is gone")
+	}
+	if sum.Orphans != 0 {
+		t.Errorf("orphans = %d, want 0 — nothing was orphaned; the content is already correctly addressed", sum.Orphans)
+	}
+}
