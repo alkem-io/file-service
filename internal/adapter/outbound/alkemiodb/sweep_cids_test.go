@@ -18,33 +18,45 @@ func createLegacyRow(t *testing.T, pool *pgxpool.Pool, externalID string) (uuid.
 	t.Helper()
 	a := New(pool)
 
-	var storageBucketID [16]byte
-	if err := pool.QueryRow(context.Background(),
-		`SELECT "storageBucketId" FROM file WHERE "storageBucketId" IS NOT NULL LIMIT 1`,
-	).Scan(&storageBucketID); err != nil {
-		t.Skipf("no existing storage bucket FK to borrow: %v", err)
-	}
+	// Create our own prerequisites rather than borrowing whatever the database
+	// happens to contain, and FAIL on setup errors instead of skipping.
+	//
+	// The previous version skipped when no storage bucket existed and when the
+	// authorization_policy insert failed — so on a fresh integration database every
+	// test in this file went green without executing a single migration invariant.
+	// That is the same "passes for the wrong reason" failure that let the
+	// case-identity data loss ship. testPool already skips when there is no database
+	// at all; that is the only legitimate skip here.
 	authUUID, _ := uuid.NewV7()
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO authorization_policy (id, "credentialRules", "privilegeRules", type, version)
 		 VALUES ($1, '[]', '[]', 'document', 1)`, authUUID,
 	); err != nil {
-		t.Skipf("cannot create test auth policy: %v", err)
+		t.Fatalf("create test auth policy: %v", err)
+	}
+	bucketUUID, _ := uuid.NewV7()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO storage_bucket (id, version, "allowedMimeTypes", "maxFileSize")
+		 VALUES ($1, 1, '{}', 10485760)`, bucketUUID,
+	); err != nil {
+		t.Fatalf("create test storage bucket: %v", err)
 	}
 
 	docID, _ := uuid.NewV7()
 	now := time.Now()
 	doc := model.Document{
 		ID: docID, ExternalID: externalID, MimeType: "image/png", Size: 123,
-		DisplayName: "sweep-cids-test.png", StorageBucketID: uuid.UUID(storageBucketID),
+		DisplayName: "sweep-cids-test.png", StorageBucketID: bucketUUID,
 		AuthorizationID: authUUID, CreatedDate: now, UpdatedDate: now,
 	}
 	if _, err := a.Create(context.Background(), doc, model.ContentMetadata{}); err != nil {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM storage_bucket WHERE id = $1`, bucketUUID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
 		t.Fatalf("create test row: %v", err)
 	}
 	return docID, func() {
 		_, _ = a.Delete(context.Background(), docID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM storage_bucket WHERE id = $1`, bucketUUID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
 	}
 }
