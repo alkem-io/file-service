@@ -94,6 +94,120 @@ func TestServeDocument_SecurityHeaders(t *testing.T) {
 	}
 }
 
+// detectorXMLMIMEs are the `+xml` media types THIS SERVICE'S OWN MIME detector
+// can emit — every `+xml` string in gabriel-vasile/mimetype v1.4.13 (the vips
+// build's DetectMIME), which is what lands in file."mimeType" on ingest.
+//
+// The point of enumerating them here is that an enumeration is the wrong shape
+// for the PRODUCTION deny-list: only four of these were ever named there, so ten
+// content types the service stores by itself served INLINE. A browser routes
+// every one of them through its XML parser, where an <?xml-stylesheet?>
+// processing instruction loads XSLT and executes script in this origin — the
+// stored-XSS the hardening exists to close. The handler therefore matches the
+// `+xml` FAMILY, and this list is the regression fence: adding a detector
+// version with new dialects cannot silently reopen the hole.
+var detectorXMLMIMEs = []string{
+	"application/atom+xml",
+	"application/gml+xml",
+	"application/gpx+xml",
+	"application/owl+xml",
+	"application/rss+xml",
+	"application/vnd.garmin.tcx+xml",
+	"application/vnd.google-earth.kml+xml",
+	"application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+	"application/vnd.ms-visio.drawing.main+xml",
+	"application/xhtml+xml",
+	"application/x-xliff+xml",
+	"image/svg+xml",
+	"model/vnd.collada+xml",
+	"model/x3d+xml",
+}
+
+// Every `+xml` type the detector can produce must be forced to download. A
+// caller may also DECLARE any other `+xml` type (an empty upload keeps the
+// declared type verbatim), so the family match — not a list — is the invariant.
+func TestServeDocument_EveryXMLFamilyTypeIsActiveContent(t *testing.T) {
+	cases := append([]string{}, detectorXMLMIMEs...)
+	cases = append(cases,
+		// Family roots, which carry no +xml suffix (RFC 7303).
+		"application/xml", "text/xml",
+		// Dialects no detector here emits but a caller can declare.
+		"application/rdf+xml", "application/mathml+xml", "application/xslt+xml",
+		"application/vnd.mozilla.xul+xml", "application/dash+xml",
+		// Normalization-dependent spellings.
+		"Application/GPX+XML", "application/gpx+xml; charset=utf-8", "  model/x3d+xml  ",
+	)
+
+	for _, mime := range cases {
+		h, docID := newServeHandlerFor(model.Document{
+			ExternalID: "abc", MimeType: mime, DisplayName: "payload.xml", AuthorizationID: uuid.New(),
+		})
+		rr := serveOne(h, docID)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", mime, rr.Code)
+		}
+		if cd := rr.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+			t.Errorf("%s: Content-Disposition = %q, want an attachment — every XML-family type "+
+				"renders as XML and can execute script via an XSLT processing instruction", mime, cd)
+		}
+	}
+}
+
+// The family match must not swallow inert types that merely mention xml, or the
+// in-browser preview parity UX regresses into forced downloads.
+func TestServeDocument_XMLLookalikesStayInline(t *testing.T) {
+	for _, mime := range []string{
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/xml-dtd",
+		"text/xml-external-parsed-entity",
+		"image/png",
+		"application/pdf",
+	} {
+		h, docID := newServeHandlerFor(model.Document{
+			ExternalID: "abc", MimeType: mime, AuthorizationID: uuid.New(),
+		})
+		rr := serveOne(h, docID)
+		if cd := rr.Header().Get("Content-Disposition"); cd != "inline" {
+			t.Errorf("%s: Content-Disposition = %q, want inline", mime, cd)
+		}
+	}
+}
+
+// A conditional request that revalidates must still carry the hardening. A 304
+// has no body, but a cache UPDATES its stored response's headers from it (RFC
+// 9110 §15.4.5) — so a 304 that omitted nosniff / Content-Disposition would let
+// a cached copy predating the hardening stay unhardened and keep being served.
+func TestServeDocument_NotModifiedCarriesHardening(t *testing.T) {
+	for _, tc := range []struct{ mime, wantDisposition string }{
+		{"text/html", `attachment; filename="page.html"; filename*=UTF-8''page.html`},
+		{"image/png", "inline"},
+	} {
+		h, docID := newServeHandlerFor(model.Document{
+			ExternalID: "abc", MimeType: tc.mime, DisplayName: "page.html", AuthorizationID: uuid.New(),
+		})
+
+		r := chi.NewRouter()
+		r.Get("/rest/storage/document/{id}", h.ServeDocument)
+		req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
+		req.Header.Set("If-None-Match", `"abc"`)
+		req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotModified {
+			t.Fatalf("%s: status = %d, want 304", tc.mime, rr.Code)
+		}
+		if ns := rr.Header().Get("X-Content-Type-Options"); ns != "nosniff" {
+			t.Errorf("%s: 304 X-Content-Type-Options = %q, want nosniff", tc.mime, ns)
+		}
+		if cd := rr.Header().Get("Content-Disposition"); cd != tc.wantDisposition {
+			t.Errorf("%s: 304 Content-Disposition = %q, want %q", tc.mime, cd, tc.wantDisposition)
+		}
+	}
+}
+
 // A document with NO authorization policy is not publicly servable. Its
 // authorizationId column is NULL, which reads back as the zero UUID; passing
 // that to CheckPrivilege would delegate the decision to whatever the auth
