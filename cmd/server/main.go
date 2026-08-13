@@ -21,20 +21,25 @@ import (
 // wiring but NOT the serving lifecycle — so a finite, converging one-off migration can't become a
 // per-boot full-table scan on every serving pod.
 func run(args []string) int {
-	cmd := "serve"
+	// `rest` is derived alongside `cmd` rather than as args[1:] at each call site.
+	// A bare invocation — the documented default, and exactly what the Dockerfile's
+	// argument-less ENTRYPOINT produces — gives an EMPTY slice, and args[1:] on it
+	// panics with "slice bounds out of range [1:0]". That took down every serving
+	// pod, not just an edge case: the panic fires before any config load.
+	cmd, rest := "serve", args
 	if len(args) > 0 {
-		cmd = args[0]
+		cmd, rest = args[0], args[1:]
 	}
 	switch cmd {
 	case "-h", "--help", "help":
 		_, _ = fmt.Fprint(os.Stdout, usage)
 		return 0 // asking a command what it does is not a failure
 	case "serve":
-		return runNoArgs("serve", args[1:], runServe)
+		return runNoArgs("serve", rest, runServe)
 	case "sweep-dims":
-		return runNoArgs("sweep-dims", args[1:], runSweepDims)
+		return runNoArgs("sweep-dims", rest, runSweepDims)
 	case "sweep-cids":
-		return runSweepCIDs(args[1:])
+		return runSweepCIDs(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "file-service: unknown command %q\n\n%s", cmd, usage)
 		return 2

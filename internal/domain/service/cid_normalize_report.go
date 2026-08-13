@@ -66,8 +66,10 @@ type cidReportChange struct {
 	FileID             string `json:"fileId"`
 	PreviousExternalID string `json:"previousExternalID"`
 	NewExternalID      string `json:"newExternalID"`
-	SharedWith         int    `json:"sharedWith"`
-	LegacyBlob         string `json:"legacyBlob"`
+	// Omitted when the reference count was never taken (sharedUnknown), so a reader
+	// can distinguish that from a counted zero. The schema does not require it.
+	SharedWith *int   `json:"sharedWith,omitempty"`
+	LegacyBlob string `json:"legacyBlob"`
 }
 
 // cidJournalEntry is deliberately a SEPARATE shape from cidReportChange rather
@@ -140,7 +142,7 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 			FileID:             c.FileID.String(),
 			PreviousExternalID: c.PreviousExternalID,
 			NewExternalID:      c.NewExternalID,
-			SharedWith:         c.SharedWith,
+			SharedWith:         sharedWithOrNil(c.SharedWith),
 			LegacyBlob:         c.LegacyBlob,
 		})
 	}
@@ -179,7 +181,26 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 			zap.Error(err))
 		return
 	}
-	// Deliberately the full path: an operator reading only the Job logs must be
-	// able to find the file without knowing the storage layout (FR-019).
-	s.Logger.Info("sweep-cids: run report written", zap.String("path", path))
+	// Recorded, not logged here: the path must be the LAST line of the run (FR-019),
+	// and the summary is logged after this call so it can see ReportFailed.
+	run.reportPath = path
+}
+
+// logCIDNormalizeReportPath emits the run's final line. An operator reading only
+// the Job logs must be able to find the report without knowing the storage layout
+// (FR-019), so nothing is logged after it.
+func (s *FileService) logCIDNormalizeReportPath(sum CIDNormalizeSummary, run *cidRun) {
+	if sum.DryRun || run.reportPath == "" {
+		return
+	}
+	s.Logger.Info("sweep-cids: run report written", zap.String("path", run.reportPath))
+}
+
+// sharedWithOrNil omits a reference count that was never taken rather than
+// asserting a fabricated zero about it.
+func sharedWithOrNil(n int) *int {
+	if n == sharedUnknown {
+		return nil
+	}
+	return &n
 }

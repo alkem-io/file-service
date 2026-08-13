@@ -19,12 +19,17 @@ func newCIDSweep(repo *cidRepo, store *cidStore) *FileService {
 	return &FileService{Repo: repo, Storage: store, Logger: zap.NewNop()}
 }
 
+// cidOpts always attaches a sink: a real pass without one now refuses to reclaim
+// (nothing could record what it destroyed), so tests that exercise reclamation
+// need one even when they assert on the summary rather than the report. Passing
+// nil gets a throwaway. The refusal itself is covered by
+// TestCIDNormalize_RealPassWithoutASinkRefusesToReclaim, which builds its options
+// directly.
 func cidOpts(sink *cidSink) CIDNormalizeOptions {
-	o := CIDNormalizeOptions{Rate: cidTestRate}
-	if sink != nil {
-		o.Report = sink
+	if sink == nil {
+		sink = &cidSink{}
 	}
-	return o
+	return CIDNormalizeOptions{Rate: cidTestRate, Report: sink}
 }
 
 // FR-004 is the requirement that makes this sweep safe to run against live

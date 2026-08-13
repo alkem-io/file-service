@@ -133,6 +133,16 @@ spec:
               value: "local"
             - name: LOG_LEVEL
               value: "info"
+            # MUST match the file-service Deployment in the target environment.
+            # Left unset it defaults to false, svc.Outbox stays nil, and reclamation
+            # silently skips DeletePendingByHash — so pending backup hints survive
+            # the bytes they point at. Those hints are real: PromoteWithOutbox
+            # enqueues externalID verbatim, so a promoted legacy-named row leaves a
+            # pending row carrying a CID. Bounded by the consumer's 404-skip
+            # backstop, but it makes the sweep behave differently from what
+            # buildSweepCIDsService documents and what its test asserts.
+            - name: FILE_BACKUP_OUTBOX_ENABLED
+              value: "true"
             - name: TMPDIR
               value: /tmp
           volumeMounts:
@@ -152,6 +162,16 @@ spec:
               cpu: 300m
               memory: 256Mi
       volumes:
+        # NOT the sweep's staging area. local.OpenStage does
+        # os.CreateTemp(basePath, ".stage-*") — staging lands on the CONTENT PVC,
+        # not here, and nothing in the sweep path reads TMPDIR (libvips is never
+        # started). This sizeLimit therefore bounds nothing that matters.
+        #
+        # The real capacity requirement is on the content PVC: headroom for a full
+        # second copy of the largest blob being processed, since publish-then-
+        # reclaim means both copies exist at once. Size the run against that — an
+        # operator planning from the 64Mi below hits ENOSPC and every record fails
+        # as read_failed.
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi

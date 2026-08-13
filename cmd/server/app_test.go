@@ -287,9 +287,24 @@ func TestSweepCIDsRejectsNonFiniteRate(t *testing.T) {
 // unrecoverable — the operator's documented terminating condition, reached by a
 // pass that touched nothing.
 func TestVerifySweepStorage(t *testing.T) {
+	// A REAL blob name. The earlier fixture used a file literally called "blob",
+	// which asserted the looseness this guard exists to remove.
 	populated := t.TempDir()
-	if err := os.WriteFile(filepath.Join(populated, "blob"), []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(populated, strings.Repeat("a", 64)), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	legacyNamed := t.TempDir() // the cohort being migrated is not 64-hex
+	if err := os.WriteFile(filepath.Join(legacyNamed, "QmViQoajobQiqmFLn1Mk3rBt5BiGbnidYXso8oKiWq1fcp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Litter, not content: infra-ops' storage-checkup job writes exactly these into
+	// the volume root and only removes them in its last step, so an evicted pod
+	// leaves them behind. They must not make an empty store look populated.
+	litter := t.TempDir()
+	for _, n := range []string{"files_list.txt", "table_entries.txt", "removed_files.log"} {
+		if err := os.WriteFile(filepath.Join(litter, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	notADir := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
@@ -302,6 +317,8 @@ func TestVerifySweepStorage(t *testing.T) {
 		wantErr bool
 	}{
 		{"a populated content store", populated, false},
+		{"a store holding only legacy-named blobs", legacyNamed, false},
+		{"a store holding only another job's leftover temp files", litter, true},
 		{"unset", "", true},
 		{"missing (unmounted volume, or the relative dev default)", filepath.Join(t.TempDir(), "nope"), true},
 		{"empty (indistinguishable from a corpus whose content is all gone)", t.TempDir(), true},
@@ -412,5 +429,28 @@ func TestTopLevelDispatch(t *testing.T) {
 		if got := run(c.args); got != c.want {
 			t.Errorf("run(%q) = %d, want %d", c.args, got, c.want)
 		}
+	}
+}
+
+// The bare invocation — no arguments at all — is the documented default AND what
+// the Dockerfile's argument-less ENTRYPOINT produces on every serving pod. It was
+// missing from the table above, and `args[1:]` on the empty slice panicked with
+// "slice bounds out of range [1:0]" before any config was loaded: the whole fleet
+// would have CrashLoopBackOff'd on deploy while the test suite stayed green.
+//
+// This asserts only that dispatch REACHES serve — the config load then fails in a
+// unit-test environment, which is fine. Any panic fails the test.
+func TestTopLevelDispatchBareInvocationReachesServe(t *testing.T) {
+	for _, args := range [][]string{nil, {}, os.Args[1:][:0]} {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Fatalf("run(%#v) panicked: %v", args, rec)
+				}
+			}()
+			if got := run(args); got == 2 {
+				t.Errorf("run(%#v) = 2 — a bare invocation must dispatch to serve, not be rejected as a usage error", args)
+			}
+		}()
 	}
 }

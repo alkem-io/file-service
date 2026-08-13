@@ -47,6 +47,15 @@ const (
 	reasonWriteFailed = "write_failed"
 )
 
+// sharedUnknown marks a reference count that was never taken — the equal-fold
+// bail-out and a failed count query both reach the report without one. It is NOT
+// zero: the report's `sharedWith` is what the runbook's post-pass reconciliation
+// reads, and a fabricated 0 tells an operator "nothing else pointed at this blob,
+// safe to GC" about a blob that may still back many rows. Deleting on that advice
+// would undo the equal-fold guard by hand. Serialized as an omitted field, so a
+// reader can tell "unknown" from "counted zero".
+const sharedUnknown = -1
+
 // cidNormalizePageSize bounds one keyset page, so a full-corpus pass never loads
 // the work-list whole and never pins a connection across the whole run.
 const cidNormalizePageSize = 500
@@ -256,12 +265,27 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 	sum.FinishedAt = time.Now().UTC()
 	// A dry run writes nothing at all (FR-007); a real pass's report is the only
 	// durable record of the old→new mapping, so write it even for an aborted pass.
-	s.logCIDNormalizeSummary(sum, run)
+	// The summary is logged AFTER the report write, not before it. Taken by value
+	// beforehand, it could not see ReportFailed — which writeCIDNormalizeReport is
+	// the sole assigner of — so a pass that irreversibly reclaimed blobs and then
+	// lost its report logged `completed … failed=0` on the very line the runbook
+	// tells the operator to act on, while the process exited 1 and the report's own
+	// mappingIncomplete said otherwise.
+	// Ordering, and both halves matter:
+	//   1. write the report — the only assigner of ReportFailed
+	//   2. log the summary — so it can SEE ReportFailed
+	//   3. log the report path last — the runbook tells the operator to look there
 	if !opts.DryRun && opts.Report != nil {
-		// AFTER the summary, deliberately: the runbook tells an operator the report
-		// path is the last line the Job logs, and that is how they find it.
 		s.writeCIDNormalizeReport(&sum, run)
+	} else if run.journalFailed {
+		// writeCIDNormalizeReport is the usual assigner of ReportFailed, but it is
+		// itself sink-guarded — so with no sink at all, a real pass that could record
+		// nothing would have exited 0. The verdict must not depend on whether the
+		// thing that reports the verdict was configured.
+		sum.ReportFailed = true
 	}
+	s.logCIDNormalizeSummary(sum, run)
+	s.logCIDNormalizeReportPath(sum, run)
 	return sum
 }
 
@@ -272,6 +296,8 @@ type cidRun struct {
 	journal string
 	// journalPath is where the journal actually landed, for the closing log line.
 	journalPath string
+	// reportPath is where the summary report landed, logged as the run's last line.
+	reportPath string
 	// journalFailed records that at least one mapping could not be made durable
 	// before its blob was reclaimed.
 	journalFailed bool
@@ -297,7 +323,24 @@ func (r *cidRun) digestFor(legacy string) (string, bool) {
 
 // forgetDigest drops a memoized mapping whose published blob is about to be
 // deleted, so no later record is handed a name that no longer resolves.
-func (r *cidRun) forgetDigest(legacy string) { delete(r.published, legacy) }
+//
+// It drops the entry for this legacy name AND every other entry pointing at the
+// same digest. Dropping only the key was the bug: byte-identical content can sit
+// under two legacy names (a CIDv0 `Qm…` and a CIDv1 `bafy…`, or an uppercase-hex
+// name), so a second key can still map to a digest that is about to be destroyed
+// — and the record that takes that surviving hit is repointed to nothing.
+func (r *cidRun) forgetDigest(legacy string) {
+	digest, ok := r.published[legacy]
+	delete(r.published, legacy)
+	if !ok {
+		return
+	}
+	for k, v := range r.published {
+		if v == digest {
+			delete(r.published, k)
+		}
+	}
+}
 
 func (r *cidRun) rememberDigest(legacy, digest string) {
 	if len(r.published) >= cidDigestMemoLimit {
@@ -349,18 +392,52 @@ func sha3ExternalID(externalID string) bool {
 // a Replace, the Replace stored DIFFERENT bytes, so the blob we published is
 // referenced by nobody and never will be. The refcount decides which case this
 // is — the same rule that gates every other deletion in the service.
-func (s *FileService) reclaimOrphanPublish(ctx context.Context, published string, doc model.Document) {
-	if published == "" || published == doc.ExternalID {
+// It carries the SAME guards as reclaimLegacyBlob, because it deletes from a more
+// dangerous namespace: a legacy CID can never be produced by a new upload, whereas
+// the digest this path targets is exactly what every matching upload dedups into.
+func (s *FileService) reclaimOrphanPublish(ctx context.Context, published string, doc model.Document, createdHere bool) {
+	if published == "" {
+		return
+	}
+	// EqualFold, not ==. Uppercase-hex names are in scope (the scan predicate wants
+	// LOWERCASE hex) and Commit returns the lowercase digest, so on a
+	// case-insensitive volume the two names are the SAME file — and a byte
+	// comparison passes the guard that was written to stop exactly this. Its
+	// sibling at reclaimLegacyBlob already folds; this one did not, which made the
+	// `==` test dead code: the one case it existed to catch is the one it missed.
+	if strings.EqualFold(published, doc.ExternalID) {
+		return
+	}
+	// Only ever delete a blob THIS pass created. A dedup hit means the bytes were
+	// already on the store under that digest before we touched it — someone else's
+	// content, possibly an upload whose row has not committed yet — and unlinking
+	// it makes their record 404 permanently.
+	if !createdHere {
 		return
 	}
 	remaining, err := s.Repo.CountByExternalID(ctx, published)
-	if err != nil || remaining > 0 {
-		return // referenced, or we cannot tell — leaving a blob costs disk, deleting a live one costs data
+	if err != nil {
+		// Silently folding this into the referenced case leaked a blob per record
+		// with no diagnostics at all.
+		s.Logger.Warn("sweep-cids: could not count references for an orphaned publish; leaving it in place",
+			zap.String("externalID", published), zap.Error(err))
+		return
 	}
-	if s.cleanupOrphanedBlob(ctx, published) {
-		s.Logger.Info("sweep-cids: dropped a blob published for a record that then lost its compare-and-set",
-			zap.String("documentID", doc.ID.String()),
-			zap.String("externalID", published))
+	if remaining > 0 {
+		return
+	}
+	if !s.cleanupOrphanedBlob(ctx, published) {
+		return
+	}
+	s.Logger.Info("sweep-cids: dropped a blob published for a record that then lost its compare-and-set",
+		zap.String("documentID", doc.ID.String()),
+		zap.String("externalID", published))
+	// Same late-reference re-check the legacy path does: an upload that dedups onto
+	// this digest can commit its row between the count and the unlink.
+	if resurrected, err := s.Repo.CountByExternalID(ctx, published); err == nil && resurrected > 0 {
+		s.Logger.Error("sweep-cids: a record began referencing a published digest AFTER it was reclaimed — those rows now 404",
+			zap.String("externalID", published),
+			zap.Int("rows", resurrected))
 	}
 }
 
@@ -411,9 +488,31 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 		}
 	}()
 
+	// A memo hit skips the republish, so it must first prove the memoized blob is
+	// still there. It may not be: an ordinary DELETE of any record naming that
+	// digest drops its refcount to zero and the service's own cleanup unlinks it,
+	// and a memo entry keyed on a DIFFERENT legacy name can outlive
+	// reclaimOrphanPublish destroying the digest it points at. Either way the
+	// record would be repointed to nothing and then have its own legacy blob
+	// reclaimed — a live row naming an absent blob, permanently, in direct
+	// violation of FR-004. A stat is cheap next to the full read+write the memo
+	// exists to avoid; an unreadable probe is treated as a miss, which merely
+	// republishes.
+	// createdHere stays false on a memo hit: the blob may have been created by an
+	// earlier record in this pass, but it may equally be a dedup hit onto content
+	// that was already there. Only a publish that reports Created can be safely
+	// reclaimed, so an unprovable case leaks a blob rather than risking one.
+	createdHere := false
 	newExternalID, ok := run.digestFor(doc.ExternalID)
+	if ok {
+		present, err := s.Storage.Exists(newExternalID)
+		if err != nil || !present {
+			run.forgetDigest(doc.ExternalID)
+			ok = false
+		}
+	}
 	if !ok {
-		newExternalID, ok = s.publishUnderDigest(ctx, doc, sum)
+		newExternalID, createdHere, ok = s.publishUnderDigest(ctx, doc, sum)
 		if !ok {
 			return
 		}
@@ -429,6 +528,19 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 			// no re-run changes that, so it needs a person rather than a retry.
 			s.failCID(doc, sum, reasonWriteFailed,
 				"repoint: another record in this bucket already holds "+newExternalID+"; needs manual reconciliation")
+			return
+		}
+		if ctx.Err() != nil {
+			// Shutdown is not a fault of this record. publishUnderDigest already makes
+			// this distinction; without it here, a SIGTERM lands as a genuine
+			// `write_failed` against a healthy object and is written into the only
+			// durable audit trail of an irreversible migration. It is reachable on
+			// every 2nd+ record sharing a legacy blob, where the memo skips the
+			// publish and the CAS is the first ctx-touching call.
+			sum.Aborted = true
+			s.Logger.Warn("sweep-cids: shutdown during a repoint; the record is untouched and remains in scope",
+				zap.String("documentID", doc.ID.String()),
+				zap.String("externalID", doc.ExternalID))
 			return
 		}
 		s.failCID(doc, sum, reasonWriteFailed, "repoint: "+err.Error())
@@ -458,7 +570,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 		// exists, is repointed to it, and then has its own legacy blob reclaimed —
 		// leaving a live record pointing at nothing, permanently.
 		run.forgetDigest(doc.ExternalID)
-		s.reclaimOrphanPublish(ctx, newExternalID, doc)
+		s.reclaimOrphanPublish(ctx, newExternalID, doc, createdHere)
 		s.skipCID(doc, sum, reasonConcurrentChange, detail)
 		return
 	}
@@ -472,6 +584,11 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 	// Recorded before reclamation is attempted, so a panic inside reclaim cannot
 	// drop a record that `normalized` has already counted — the recover handler
 	// would then count the same record failed as well.
+	// legacyBlob is seeded with the honest value for "reclamation was never
+	// attempted". The field has no omitempty and the cross-repo schema requires it
+	// with an enum, so a panic between here and updateChanged would otherwise emit
+	// `"legacyBlob": ""` and make the whole retained report fail validation.
+	change.LegacyBlob = legacyBlobRetained
 	idx := sum.recordChanged(change)
 
 	// Durable BEFORE the bytes are destroyed — that ordering IS the guarantee that
@@ -502,7 +619,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 // Publishing is idempotent — an existing blob under the same digest is
 // authoritative and Commit reports a dedup hit rather than an error — which is
 // what makes an interrupted pass safe to re-run.
-func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document, sum *CIDNormalizeSummary) (string, bool) {
+func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document, sum *CIDNormalizeSummary) (name string, created, ok bool) {
 	rc, size, err := s.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		switch {
@@ -523,14 +640,14 @@ func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document
 		default:
 			s.failCID(doc, sum, reasonReadFailed, err.Error())
 		}
-		return "", false
+		return "", false, false
 	}
 	defer func() { _ = rc.Close() }()
 
 	stage, err := s.Storage.OpenStage(ctx)
 	if err != nil {
 		s.failCID(doc, sum, reasonWriteFailed, "open stage: "+err.Error())
-		return "", false
+		return "", false, false
 	}
 	copied, err := io.Copy(stage, &cidCancellableReader{ctx: ctx, r: rc})
 	if err != nil {
@@ -544,10 +661,10 @@ func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document
 			s.Logger.Info("sweep-cids: shutdown during a blob copy; ending the pass without blaming the record",
 				zap.String("documentID", doc.ID.String()),
 				zap.String("externalID", doc.ExternalID))
-			return "", false
+			return "", false, false
 		}
 		s.failCID(doc, sum, reasonReadFailed, "copy to stage: "+err.Error())
-		return "", false
+		return "", false, false
 	}
 	// io.Copy returns (n, nil) on a SHORT read that ended in a clean EOF — a
 	// blipping NFS volume, a truncated blob. Publishing that would address a
@@ -558,15 +675,15 @@ func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document
 		_ = stage.Abort()
 		s.failCID(doc, sum, reasonReadFailed,
 			fmt.Sprintf("short read: got %d of %d bytes with no error; refusing to publish a truncated blob", copied, size))
-		return "", false
+		return "", false, false
 	}
 	stored, err := stage.Commit()
 	if err != nil {
 		_ = stage.Abort()
 		s.failCID(doc, sum, reasonWriteFailed, "commit: "+err.Error())
-		return "", false
+		return "", false, false
 	}
-	return stored.ExternalID, true
+	return stored.ExternalID, stored.Created, true
 }
 
 // reclaimLegacyBlob deletes the legacy blob once no record references it, and
@@ -600,7 +717,7 @@ func (s *FileService) reclaimLegacyBlob(ctx context.Context, doc model.Document,
 			zap.String("documentID", doc.ID.String()),
 			zap.String("legacyExternalID", doc.ExternalID),
 			zap.String("newExternalID", newExternalID))
-		return 0, legacyBlobRetained
+		return sharedUnknown, legacyBlobRetained
 	}
 	remaining, err := s.Repo.CountByExternalID(ctx, doc.ExternalID)
 	if err != nil {
@@ -608,13 +725,13 @@ func (s *FileService) reclaimLegacyBlob(ctx context.Context, doc model.Document,
 			zap.String("documentID", doc.ID.String()),
 			zap.String("legacyExternalID", doc.ExternalID),
 			zap.Error(err))
-		return 0, legacyBlobRetained
+		return sharedUnknown, legacyBlobRetained
 	}
 	if remaining > 0 {
 		return remaining, legacyBlobStillInUse
 	}
 	if !s.cleanupOrphanedBlob(ctx, doc.ExternalID) {
-		return 0, legacyBlobRetained
+		return remaining, legacyBlobRetained // a genuinely counted zero
 	}
 	sum.Reclaimed++
 	s.verifyNoLateReference(ctx, doc)
@@ -647,9 +764,17 @@ func (s *FileService) verifyNoLateReference(ctx context.Context, doc model.Docum
 // 900 of 1053 loses no mapping for a blob it already reclaimed.
 func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) bool {
 	if run.opts.Report == nil {
-		// No sink configured (tests asserting on the summary directly): there is no
-		// journal to fall short of, so reclamation is not gated on one.
-		return true
+		// A DRY RUN never reaches here, so this is a real pass with no sink. Returning
+		// true would ungate reclamation for every record: the corpus is destroyed, no
+		// journal and no report are written, and ReportFailed — only ever assigned by
+		// writeCIDNormalizeReport, which is itself guarded on a non-nil sink — stays
+		// false, so the Job exits 0 over a destroyed corpus with no audit trail. The
+		// service enforces the sibling FR-007 rule itself rather than trusting its
+		// caller; this one is enforced the same way.
+		run.journalFailed = true
+		s.Logger.Error("sweep-cids: no report sink configured for a real pass; refusing to reclaim, since no mapping can be made durable",
+			zap.String("documentID", c.FileID.String()))
+		return false
 	}
 	line, err := cidJournalLine(c)
 	if err != nil {
@@ -753,5 +878,20 @@ func newPacer(objectsPerSecond float64) *rate.Limiter {
 	if !(objectsPerSecond > 0) || math.IsInf(objectsPerSecond, 1) {
 		objectsPerSecond = 1
 	}
+	// Floor the rate so no single object can wait longer than maxPacerInterval.
+	// The hand-rolled pacer this replaced clamped the computed interval; swapping
+	// in rate.Limiter dropped that, and the flag validation does not cover it —
+	// it rejects only non-positive and infinite values. A perfectly valid
+	// `--rate 1e-5` then means 27h46m PER OBJECT, and 1e-12 means 292 years, with
+	// the Job's context carrying no deadline: the pod hangs indefinitely having
+	// logged only "sweep-cids job starting", with backoffLimit 0 and no
+	// activeDeadlineSeconds to end it, and must be killed by hand.
+	if floor := 1 / maxPacerInterval.Seconds(); objectsPerSecond < floor {
+		objectsPerSecond = floor
+	}
 	return rate.NewLimiter(rate.Limit(objectsPerSecond), 1)
 }
+
+// maxPacerInterval caps how long one object may wait. A rate low enough to exceed
+// it is not a throughput choice an operator can have meant — it is a hang.
+const maxPacerInterval = time.Hour

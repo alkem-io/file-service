@@ -139,8 +139,15 @@ func (s *ReportSink) ensureDir() error {
 // fsync is the step most likely to fail — reporting the mapping as lost while it
 // sits on disk would be a worse error than the one being reported.
 func (s *ReportSink) syncDirBestEffort(path string) {
-	if err := s.syncDir(); err != nil && s.logf != nil {
-		s.logf("report directory fsync failed for %s (the file itself is durable): %v", path, err)
+	if err := s.syncDir(); err != nil {
+		if s.logf != nil {
+			s.logf("report directory fsync failed for %s (the file itself is durable): %v", path, err)
+		}
+		// dirReady is NOT set on failure. It was set unconditionally, and
+		// syncDirOnce returns early on it — so a transient failure of the one flush
+		// that makes the journal's NAME durable was never retried by any later
+		// append, on the first-ever pass, for blobs already reclaimed.
+		return
 	}
 	s.dirReady = true
 }
@@ -184,8 +191,22 @@ func writeAndSync(f *os.File, data []byte) error {
 	return f.Sync()
 }
 
+// syncDir flushes the reserved directory AND its own entry in the parent.
+//
+// Syncing s.dir alone makes the entries inside it durable — not the fact that
+// s.dir exists. On the first real pass, which is what creates it (dry runs write
+// nothing), a crash could therefore unlink the whole directory with every fsynced
+// mapping inside, for blobs already reclaimed and rows that no longer match the
+// scan predicate. That is precisely the loss AppendJournal exists to bound.
 func (s *ReportSink) syncDir() error {
-	d, err := os.Open(s.dir)
+	if err := syncPath(filepath.Dir(s.dir)); err != nil {
+		return err
+	}
+	return syncPath(s.dir)
+}
+
+func syncPath(p string) error {
+	d, err := os.Open(p) // #nosec G304 -- sink-owned directory paths only
 	if err != nil {
 		return err
 	}

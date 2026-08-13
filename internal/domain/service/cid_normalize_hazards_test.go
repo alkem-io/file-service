@@ -707,3 +707,143 @@ func TestCIDNormalize_JournalLinesClaimOnlyWhatIsKnown(t *testing.T) {
 		assertExactKeys(t, "journal line", e, "fileId", "previousExternalID", "newExternalID")
 	}
 }
+
+// The digest memo skips the republish for a second record sharing a legacy blob.
+// If the memoized blob is gone by then — an ordinary DELETE of any record naming
+// it drops the refcount to zero and the service's own cleanup unlinks it — the
+// record is repointed to nothing and then has its own legacy blob reclaimed.
+// A live row naming an absent blob, permanently: FR-004's exact prohibition.
+func TestCIDNormalize_MemoHitVerifiesTheBlobStillExists(t *testing.T) {
+	const legacy = "QmSharedMemoSharedMemoSharedMemoSh"
+	content := []byte("bytes shared by two records")
+
+	repo := newCIDRepo(
+		&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1},
+		&cidRow{ID: cidUUID(2), ExternalID: legacy, Version: 1},
+	)
+	store := newCIDStore()
+	store.put(legacy, content)
+	digest := ComputeHash(content)
+
+	// Between the two records, a user deletes the first document; refcount on the
+	// digest hits zero and the blob is cleaned up.
+	repo.afterNormalize = func(_ *cidRepo, id uuid.UUID) {
+		if id == cidUUID(1) {
+			delete(store.blobs, digest)
+		}
+	}
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	for _, row := range repo.rows {
+		if !store.has(row.ExternalID) {
+			t.Errorf("record %s names %q, which is NOT on the store — the memo handed it a digest that had been deleted",
+				row.ID, row.ExternalID)
+		}
+	}
+	if sum.Normalized != 2 {
+		t.Errorf("normalized = %d, want 2 (the second record must republish rather than trust the memo)", sum.Normalized)
+	}
+}
+
+// Byte-identical content can sit under two legacy names. Invalidating the memo by
+// KEY while the blob is destroyed by DIGEST leaves the second key pointing at a
+// name that no longer resolves.
+func TestCIDNormalize_ForgettingAMemoDropsEveryKeyForThatDigest(t *testing.T) {
+	run := &cidRun{}
+	run.rememberDigest("QmFirstNameFirstNameFirstNameFirst", "deadbeef")
+	run.rememberDigest("QmSecondNameSecondNameSecondNameS", "deadbeef")
+	run.rememberDigest("QmUnrelatedUnrelatedUnrelatedUnre", "cafebabe")
+
+	run.forgetDigest("QmFirstNameFirstNameFirstNameFirst")
+
+	if _, ok := run.digestFor("QmSecondNameSecondNameSecondNameS"); ok {
+		t.Error("a second legacy name still maps to the digest just destroyed — the record taking that hit is repointed to nothing")
+	}
+	if _, ok := run.digestFor("QmUnrelatedUnrelatedUnrelatedUnre"); !ok {
+		t.Error("an unrelated digest was evicted; the memo should drop only entries for the destroyed digest")
+	}
+}
+
+// The orphan-reclaim path deletes from the CURRENT-scheme namespace — what every
+// ordinary upload dedups into — so it must never unlink a blob it did not create,
+// and must fold case exactly as its sibling does.
+func TestCIDNormalize_OrphanReclaimNeverDeletesABlobItDidNotCreate(t *testing.T) {
+	content := []byte("content that already exists on the store")
+	digest := ComputeHash(content)
+
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmDedupDedupDedupDedupDedupDedupDe", Version: 1})
+	store := newCIDStore()
+	store.put(repo.rows[0].ExternalID, content)
+	// Someone else already published these bytes under their digest — e.g. an
+	// upload whose `file` row has not committed yet.
+	store.put(digest, content)
+	// A concurrent metadata write makes the sweep's compare-and-set lose.
+	repo.beforeNormalize = func(r *cidRepo, id uuid.UUID) { r.row(id).Version++ }
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if !store.has(digest) {
+		t.Error("deleted a pre-existing blob it merely deduped onto — another writer's content, which now 404s permanently")
+	}
+	if sum.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1", sum.Skipped)
+	}
+}
+
+// A real pass with no report sink must not reclaim: nothing could record what it
+// destroyed, and ReportFailed would never be set, so the Job would exit 0.
+func TestCIDNormalize_RealPassWithoutASinkRefusesToReclaim(t *testing.T) {
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmNoSinkNoSinkNoSinkNoSinkNoSinkNo", Version: 1})
+	store := newCIDStore()
+	store.put(repo.rows[0].ExternalID, []byte("payload"))
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), CIDNormalizeOptions{Rate: cidTestRate})
+
+	if sum.Reclaimed != 0 || len(store.deletes) != 0 {
+		t.Errorf("reclaimed %d blob(s) with no sink to record the mapping: %v", sum.Reclaimed, store.deletes)
+	}
+	if !sum.ReportFailed {
+		t.Error("ReportFailed not set — the Job would exit 0 having migrated with no audit trail")
+	}
+}
+
+// A shutdown landing on the compare-and-set is not a fault of that record. Booking
+// it as write_failed writes a false I/O failure into the only durable audit trail
+// of an irreversible migration.
+func TestCIDNormalize_ShutdownDuringRepointIsNotARecordFailure(t *testing.T) {
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmShutdownShutdownShutdownShutdow", Version: 1})
+	store := newCIDStore()
+	store.put(repo.rows[0].ExternalID, []byte("payload"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	repo.beforeNormalize = func(*cidRepo, uuid.UUID) {
+		cancel()
+		repo.normalizeErr = context.Canceled
+	}
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(ctx, cidOpts(nil))
+
+	if sum.Failed != 0 {
+		t.Errorf("failed = %d, want 0 — a SIGTERM is not a defect of the record it interrupted", sum.Failed)
+	}
+	if !sum.Aborted {
+		t.Error("a pass interrupted mid-repoint did not report Aborted, so its report would claim 'completed'")
+	}
+}
+
+// A rate low enough to exceed the per-object cap is a hang, not a throughput
+// choice: the Job's context carries no deadline and backoffLimit is 0.
+func TestNewPacer_CapsThePerObjectWait(t *testing.T) {
+	for _, rateVal := range []float64{1e-5, 1e-9, 1e-12} {
+		lim := newPacer(rateVal)
+		if d := lim.Reserve().Delay(); d > maxPacerInterval {
+			t.Errorf("rate %v → first delay %v, want at most %v", rateVal, d, maxPacerInterval)
+		}
+		// A second reservation is the one that actually waits.
+		if d := lim.Reserve().Delay(); d > maxPacerInterval {
+			t.Errorf("rate %v → second delay %v, want at most %v (the pod would hang until killed by hand)",
+				rateVal, d, maxPacerInterval)
+		}
+	}
+}
