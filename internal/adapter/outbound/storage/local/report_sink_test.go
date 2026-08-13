@@ -43,8 +43,8 @@ func TestReportSink_WritesIntoTheReservedDirectory(t *testing.T) {
 
 	// The reserved name is one the store's own key rules can never produce, so no
 	// enumeration of the blob namespace can mistake a report for content.
-	if isValidExternalID(reservedDir) {
-		t.Errorf("%q passes isValidExternalID — a blob could be named this and the reservation is not safe by construction", reservedDir)
+	if IsBlobName(reservedDir) {
+		t.Errorf("%q passes IsBlobName — a blob could be named this and the reservation is not safe by construction", reservedDir)
 	}
 	entries, err := os.ReadDir(base)
 	if err != nil {

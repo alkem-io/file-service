@@ -2289,7 +2289,7 @@ func TestDocumentHandler_GetBlobContent_NotFound(t *testing.T) {
 
 // A malformed key (rejected by the storage layer as ErrInvalidKey) maps to 400.
 // The actual key-validation rules (traversal/char-class) are owned and tested at the
-// storage layer (adapter_test.go isValidExternalID); the handler only maps the sentinel.
+// storage layer (adapter_test.go IsBlobName); the handler only maps the sentinel.
 func TestDocumentHandler_GetBlobContent_InvalidKey(t *testing.T) {
 	h, _, storage := newDocHandler()
 	storage.err = port.ErrInvalidKey

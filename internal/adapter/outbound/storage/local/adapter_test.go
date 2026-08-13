@@ -277,8 +277,8 @@ func TestIsValidExternalID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isValidExternalID(tc.id); got != tc.want {
-				t.Errorf("isValidExternalID(%q) = %v, want %v", tc.id, got, tc.want)
+			if got := IsBlobName(tc.id); got != tc.want {
+				t.Errorf("IsBlobName(%q) = %v, want %v", tc.id, got, tc.want)
 			}
 		})
 	}

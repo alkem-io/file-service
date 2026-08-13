@@ -45,7 +45,7 @@ type SweepCIDsConfig struct {
 	// written to (FR-018).
 	//
 	// The name is collision-proof BY CONSTRUCTION, not by convention: the store's
-	// key rule (isValidExternalID) accepts only 32-128 alphanumeric characters,
+	// key rule (local.IsBlobName) accepts only 32-128 alphanumeric characters,
 	// so "_sweep-reports" is disqualified twice over — under the length minimum,
 	// and '_'/'-' are outside the alphabet. No blob can ever be named this, so no
 	// enumeration of the store can mistake a report for content.

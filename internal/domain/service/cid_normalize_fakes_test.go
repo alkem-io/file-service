@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"testing"
 
 	"go.uber.org/zap"
 
@@ -24,8 +25,9 @@ import (
 // stores faithfully: a `file` table that really compare-and-sets, and a
 // content-addressed blob store that really dedups.
 
-// The current content-addressing scheme. Kept identical to the adapter's rule by
-// TestFakeLegacyFilterMatchesTheAdapter.
+// The current content-addressing scheme, as the fakes see it. Pinned to the real
+// adapter's rule by TestFakeSchemeMatchesTheAdapter — a fake that classifies names
+// differently from production tests nothing.
 var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // cidRow is one row of the `file` table, restricted to the columns the sweep
@@ -361,3 +363,41 @@ func testLogger() *zap.Logger { return zap.NewNop() }
 // because the scan predicate demands LOWERCASE hex, and the case where the legacy
 // name and the digest are the same file on a case-insensitive volume.
 func upperHex(s string) string { return strings.ToUpper(s) }
+
+// TestFakeSchemeMatchesTheAdapter pins the fakes' notion of "already normalized" to
+// the storage adapter's. They are separate definitions — the fakes cannot import the
+// adapter without a cycle — so nothing but this test stops them drifting, and a drift
+// makes every sweep test assert against a corpus production would classify differently.
+func TestFakeSchemeMatchesTheAdapter(t *testing.T) {
+	cases := []string{
+		strings.Repeat("a", 64),                          // current scheme
+		strings.ToUpper(strings.Repeat("a", 64)),         // uppercase hex — NOT the scheme
+		"QmViQoajobQiqmFLn1Mk3rBt5BiGbnidYXso8oKiWq1fcp", // legacy CID
+		strings.Repeat("a", 63),                          // too short
+		strings.Repeat("a", 65),                          // too long
+		"",
+	}
+	for _, name := range cases {
+		fake := sha3HexName.MatchString(name)
+		adapterRule := sha3HexRealRule(name)
+		if fake != adapterRule {
+			t.Errorf("%q: fake says normalized=%v, the adapter's rule says %v", name, fake, adapterRule)
+		}
+	}
+}
+
+// sha3HexRealRule restates the adapter's predicate independently, so the assertion is
+// not the regexp compared with itself.
+func sha3HexRealRule(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	for _, c := range name {
+		isDigit := c >= '0' && c <= '9'
+		isLowerHex := c >= 'a' && c <= 'f'
+		if !isDigit && !isLowerHex {
+			return false
+		}
+	}
+	return true
+}

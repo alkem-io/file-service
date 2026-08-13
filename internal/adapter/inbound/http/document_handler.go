@@ -108,7 +108,7 @@ func (h *DocumentHandler) GetBlobContent(w http.ResponseWriter, r *http.Request)
 	hash := chi.URLParam(r, "hash")
 
 	// Storage owns key validation (one definition — the deliberately legacy-CID-permissive
-	// isValidExternalID), so the handler never drifts from what the store serves; the shared
+	// IsBlobName), so the handler never drifts from what the store serves; the shared
 	// writeStorageReadError maps the failure. file-service does NOT try to tell an absent blob
 	// from a store outage (storage can't, so it doesn't claim to) — a non-ENOENT backend error
 	// is a retryable 500; a 404 is just "no such blob" and the worker decides what that means.

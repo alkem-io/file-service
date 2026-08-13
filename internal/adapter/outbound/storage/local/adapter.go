@@ -64,7 +64,7 @@ func (a *Adapter) Save(content []byte) (model.StoredFile, error) {
 // server. A non-ENOENT backend failure (e.g. an NFS EIO/ESTALE outage) is returned
 // as-is → the handler answers 500 (retryable), never a false 404.
 func (a *Adapter) Read(externalID string) ([]byte, error) {
-	if !isValidExternalID(externalID) {
+	if !IsBlobName(externalID) {
 		return nil, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
 	}
 	data, err := os.ReadFile(a.filePath(externalID))
@@ -80,7 +80,7 @@ func (a *Adapter) Read(externalID string) ([]byte, error) {
 // publishes a NEW hash under a NEW name — this name is immutable once written).
 // Same error contract as Read.
 func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
-	if !isValidExternalID(externalID) {
+	if !IsBlobName(externalID) {
 		return nil, 0, fmt.Errorf("read %q: %w", externalID, port.ErrInvalidKey)
 	}
 	f, err := os.Open(a.filePath(externalID))
@@ -105,7 +105,7 @@ func (a *Adapter) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 // Delete removes the blob. Idempotent: a missing file is success, so
 // concurrent refcount-driven cleanups cannot fail each other.
 func (a *Adapter) Delete(externalID string) error {
-	if !isValidExternalID(externalID) {
+	if !IsBlobName(externalID) {
 		return fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)
 	}
 	err := os.Remove(a.filePath(externalID))
@@ -173,7 +173,7 @@ func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
 // no-overwrite hard link, so a target that already exists is reported as a dedup
 // hit rather than clobbered.
 func (a *Adapter) Link(existing, newName string) (bool, error) {
-	if !isValidExternalID(existing) || !isValidExternalID(newName) {
+	if !IsBlobName(existing) || !IsBlobName(newName) {
 		return false, fmt.Errorf("link %q -> %q: %w", existing, newName, port.ErrInvalidKey)
 	}
 	if err := os.Link(a.filePath(existing), a.filePath(newName)); err != nil {
@@ -194,7 +194,7 @@ const ReservedParkedDir = "_parked"
 // within one filesystem is atomic and copies no data. Parking a name that is
 // already absent is not an error, so a re-run after an interruption is safe.
 func (a *Adapter) Park(externalID string) (string, error) {
-	if !isValidExternalID(externalID) {
+	if !IsBlobName(externalID) {
 		return "", fmt.Errorf("park %q: %w", externalID, port.ErrInvalidKey)
 	}
 	src := a.filePath(externalID)
@@ -219,7 +219,7 @@ func (a *Adapter) Park(externalID string) (string, error) {
 
 // Exists reports whether a blob is present without reading its bytes.
 func (a *Adapter) Exists(externalID string) (bool, error) {
-	if !isValidExternalID(externalID) {
+	if !IsBlobName(externalID) {
 		return false, fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)
 	}
 	_, err := os.Stat(a.filePath(externalID))
@@ -236,12 +236,15 @@ func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
 }
 
-// IsBlobName reports whether a name is one this store can address. Single definition
-// of "looks like content", exported so the sweep's pre-flight cannot drift from what
-// enumeration actually does.
-func IsBlobName(id string) bool { return isValidExternalID(id) }
-
-func isValidExternalID(id string) bool {
+// IsBlobName reports whether a name is one this store can address. It is the ONE
+// definition of "looks like content" — the sweep's pre-flight calls it rather than
+// carrying a copy, so the two cannot drift into a pre-flight that accepts names
+// enumeration ignores.
+//
+// It rejects path-traversal characters and is *deliberately* permissive about hash
+// encoding: any alphanumeric (ASCII) name of 32–128 characters, which admits both
+// current SHA3-256 hex names and the legacy CIDs this store still holds.
+func IsBlobName(id string) bool {
 	if len(id) < 32 || len(id) > 128 {
 		return false
 	}
