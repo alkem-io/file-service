@@ -101,6 +101,11 @@ type CIDNormalizeSummary struct {
 
 	Changed    []CIDNormalizeChange
 	NotChanged []CIDNormalizeNotChanged
+	// ParkedOrphans names the legacy files that no row referenced. They are parked
+	// like any other, so `_parked/` holds them — and without this an operator
+	// reconciling that directory finds files there with nothing saying why they
+	// moved, on the one directory whose purpose is to be reversible.
+	ParkedOrphans []string
 }
 
 // CIDNormalizeOptions configures one pass.
@@ -377,6 +382,7 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 	}
 	if orphan {
 		sum.Orphans++
+		sum.ParkedOrphans = append(sum.ParkedOrphans, legacy)
 		return
 	}
 	sum.Changed = append(sum.Changed, change)

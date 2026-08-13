@@ -87,6 +87,14 @@ func TestCIDNormalize_UnreferencedLegacyBlobIsParkedAndLeavesNoNewOrphan(t *test
 	if store.has(digest) {
 		t.Error("left a new orphan under a digest name, which no future sweep can find")
 	}
+	// It must also be NAMED. `_parked/` is the migration's undo, so a file sitting
+	// there with nothing in the report explaining why it moved is the one thing an
+	// operator reconciling that directory cannot resolve. A count alone does not do
+	// it — this was found by running the binary, with every fake-based test green.
+	if len(sum.ParkedOrphans) != 1 || sum.ParkedOrphans[0] != orphan {
+		t.Errorf("parkedOrphans = %v, want [%q] — the parked file must be traceable to this run",
+			sum.ParkedOrphans, orphan)
+	}
 }
 
 // Uppercase-hex names are in scope (the scan wants LOWERCASE hex), and whether the

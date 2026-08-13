@@ -46,6 +46,10 @@ type cidRunReport struct {
 	Counts        cidReportCounts    `json:"counts"`
 	Changed       []cidReportChange  `json:"changed"`
 	NotNormalized []cidReportSkipped `json:"notNormalized"`
+	// ParkedOrphans lists the legacy names no row referenced. They were parked, so
+	// they are in `_parked/`; naming them is what lets an operator reconcile that
+	// directory against this report.
+	ParkedOrphans []string `json:"parkedOrphans"`
 	// MappingIncomplete says at least one old→new mapping could not be made
 	// durable. Without it a pass that lost mappings still reads
 	// `"outcome": "completed", "failed": 0` — the opposite of its exit code.
@@ -129,6 +133,7 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 		// validating a retained report.
 		Changed:           make([]cidReportChange, 0, len(sum.Changed)),
 		NotNormalized:     make([]cidReportSkipped, 0, len(sum.NotChanged)),
+		ParkedOrphans:     append([]string{}, sum.ParkedOrphans...),
 		MappingIncomplete: run.journalFailed,
 	}
 	if sum.Aborted {
