@@ -441,6 +441,12 @@ func TestTopLevelDispatch(t *testing.T) {
 // This asserts only that dispatch REACHES serve — the config load then fails in a
 // unit-test environment, which is fine. Any panic fails the test.
 func TestTopLevelDispatchBareInvocationReachesServe(t *testing.T) {
+	// Guarantee the config load fails, so dispatch is all this exercises. Without
+	// this, a machine with a complete environment reaches runServe — which starts a
+	// DB-WRITING MIME repair and then blocks on :4003 until the test times out.
+	t.Setenv("AUTH_SERVICE_URL", "")
+	t.Setenv("NATS_URL", "")
+
 	for _, args := range [][]string{nil, {}, os.Args[1:][:0]} {
 		func() {
 			defer func() {
