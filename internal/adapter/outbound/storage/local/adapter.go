@@ -206,6 +206,11 @@ func (a *Adapter) Park(externalID string) (string, error) {
 		return "", fmt.Errorf("create parked dir %s: %w", dir, err)
 	}
 	dst := filepath.Join(dir, externalID)
+	// os.Rename replaces an existing destination on Linux, which is safe here because
+	// the destination cannot already exist: parking removes the name from the content
+	// namespace, and nothing can re-create it — the only writer there is Commit, which
+	// publishes under a SHA3 digest, never under a legacy name. A second pass over the
+	// same name therefore stats the source, finds it gone, and returns ("", nil) above.
 	if err := os.Rename(src, dst); err != nil {
 		return "", fmt.Errorf("park %s: %w", externalID, err)
 	}
@@ -231,23 +236,11 @@ func (a *Adapter) filePath(externalID string) string {
 	return filepath.Join(a.basePath, externalID)
 }
 
-// isValidExternalID rejects path-traversal attempts and other dangerous
-// characters in storage IDs. It is *deliberately* permissive about hash
-// encoding: it accepts any alphanumeric (ASCII) name of length 32–128, which
-// covers both externalID shapes the service must address:
-//   - SHA3-256 hex: 64 lowercase hex chars (current Go file-service format,
-//     the output of service.Hasher.Sum).
-//   - Legacy IPFS CIDs: the pre-migration TS file-service stored blobs under
-//     IPFS CID externalIDs — CIDv0 (base58btc "Qm…"), CIDv1 (base32 "bafy…"),
-//     uppercase hex, and other non-64-hex / non-CIDv0 forms all occur on disk.
-//
-// The security boundary here is rejecting path-traversal characters
-// ('/', '\', '.', '..', NUL, control chars, whitespace) and bounding length —
-// NOT pinning the hash encoding. Tightening this to exact canonical encodings
-// (e.g. 64-hex OR 46-char CIDv0 only) would reject legitimate pre-migration
-// externalIDs that exist on disk and break production reads (see PR #13,
-// "Accept legacy IPFS CID externalIDs in storage validator"). A future
-// lint/CodeRabbit pass should therefore NOT re-tighten this to exact formats.
+// IsBlobName reports whether a name is one this store can address. Single definition
+// of "looks like content", exported so the sweep's pre-flight cannot drift from what
+// enumeration actually does.
+func IsBlobName(id string) bool { return isValidExternalID(id) }
+
 func isValidExternalID(id string) bool {
 	if len(id) < 32 || len(id) > 128 {
 		return false

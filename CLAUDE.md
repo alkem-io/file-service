@@ -124,7 +124,7 @@ third beside `serve` and `sweep-dims`, run as a manually-triggered one-shot Job:
   because it lost races it had no reason to lose.
 - **Nothing is deleted.** Legacy files move to `_parked/`, so the migration is
   reversible. `--dry-run` first regardless.
-- Each real pass writes a report AND a per-blob journal to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
+- Each real pass ALWAYS writes the `.json` report (even changing nothing); the `.ndjson` journal appears only from the first rename and may be partial after a crash to `<LOCAL_STORAGE_PATH>/_sweep-reports/` — the only
   surviving record of the old→new mapping.
 
 The `file_backup_outbox` **table DDL is a server-owned migration** — file-service does

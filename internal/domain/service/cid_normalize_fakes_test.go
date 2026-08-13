@@ -24,6 +24,8 @@ import (
 // stores faithfully: a `file` table that really compare-and-sets, and a
 // content-addressed blob store that really dedups.
 
+// The current content-addressing scheme. Kept identical to the adapter's rule by
+// TestFakeLegacyFilterMatchesTheAdapter.
 var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // cidRow is one row of the `file` table, restricted to the columns the sweep
@@ -221,6 +223,11 @@ func (s *cidStore) Exists(externalID string) (bool, error) { return s.has(extern
 // ListLegacyNamed enumerates names on the store that are not the current scheme —
 // the sweep's actual work-list, which includes blobs no row references.
 func (s *cidStore) ListLegacyNamed(limit int) ([]string, error) {
+	// The port makes limit > 0 a precondition; a fake that quietly accepts a bad one
+	// lets a caller ship a violation the real adapter would have refused.
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive, got %d", limit)
+	}
 	if s.listErr != nil {
 		return nil, s.listErr
 	}

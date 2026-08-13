@@ -23,7 +23,10 @@
 # file-storage cleanup Job deletes recursively (alkem-io/infrastructure-operations#2566). That
 # ticket, not the reserved-name rule, is what keeps them alive.
 #
-# The pass also writes the pair of files to
+# The pass writes a `.json` summary report ALWAYS, even when it changed nothing, and a `.ndjson`
+# journal only from its first rename onward — a pass over a converged corpus produces only the
+# `.json`. The report is the complete final result; the journal is a crash-recovery aid and may be
+# partial after an interruption. Both land in
 # <LOCAL_STORAGE_PATH>/_sweep-reports/: a `.ndjson` journal appended and fsynced BEFORE each
 # file moves, and a `.json` summary written at the end. Retain them — after the pass, they are the
 # only record of the old→new mapping.

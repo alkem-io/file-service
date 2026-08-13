@@ -234,6 +234,11 @@ func TestCIDsJobExitCode(t *testing.T) {
 		// Aborted alone must gate exit 1, or that silently exits 0.
 		{"ended early on page one", service.CIDNormalizeSummary{Aborted: true}, 1},
 		{"dry run is subject to the same rule", service.CIDNormalizeSummary{DryRun: true, WouldNormalize: 1053}, 0},
+		// A pass that migrated cleanly and then lost its audit trail is NOT success:
+		// re-running cannot recover the mapping, and the Job would otherwise be marked
+		// Complete with no alert.
+		{"report could not be written", service.CIDNormalizeSummary{Normalized: 1053, ReportFailed: true}, 1},
+		{"report lost with nothing else wrong", service.CIDNormalizeSummary{ReportFailed: true}, 1},
 	}
 	for _, c := range cases {
 		if got := cidsJobExitCode(c.sum); got != c.want {

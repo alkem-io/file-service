@@ -186,20 +186,14 @@ was replaced already carries a different name and simply does not match.
   The standing fix for that class is atomic GC. Nothing is deleted, so the consequence is a
   file in `_parked/` rather than lost content — recovery is moving it back, or hashing the
   parked blobs to find the one whose digest is wanted.
-- Each real pass writes a JSON **run report** to `<LOCAL_STORAGE_PATH>/_sweep-reports/`,
-  recording the previous and new name of every record it changed. Since the legacy blob
-  is gone afterwards, this is the only way to reconstruct the mapping. The reserved
-  directory name is one the store's key rules can never produce, so no enumeration of
-  the store can mistake a report for content. The absolute path is the last line the
-  Job logs. Alongside it, a `.ndjson` **journal** records each mapping *before* the blob
-  it names is reclaimed, so a pass killed mid-corpus still leaves a complete record of
-  everything it destroyed. A run that cannot write either **exits 1**.
-
-An in-repo Job manifest ships at `manifests/36-file-service-sweep-cids-job.yaml`. It ships
-with `--dry-run` set and three fail-closed placeholders (image, PVC claim, and the flag
-itself), so a verbatim apply can never run the irreversible pass against the wrong build
-or the wrong volume.
-
+- Each real pass writes to `<LOCAL_STORAGE_PATH>/_sweep-reports/`: a `.json` summary
+  report ALWAYS, even when it changed nothing, and a `.ndjson` journal only from its
+  first rename onward — a pass over a converged corpus produces only the `.json`. The
+  report is the complete final result; the journal is a crash-recovery aid, may be
+  partial after an interruption, and is what bounds the loss if a pass is killed
+  mid-corpus. Retain both when both exist. A run whose report or journal could not be
+  written exits `1`. The reserved directory name is one the store's key rules can never
+  produce, so no enumeration of the store can mistake a report for content.
 ## Development
 
 ```bash

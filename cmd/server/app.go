@@ -417,25 +417,6 @@ func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.L
 // verifySweepStorage checks the content store is actually there before an irreversible pass reads
 // "absent" as a fact about the data. A non-empty directory is the bar: an empty one is either an
 // unmounted volume or a store with nothing to sweep, and the sweep has no business guessing which.
-// looksLikeBlobName mirrors the storage adapter's key rule closely enough to tell
-// content from litter: 32-128 alphanumerics, which admits both current SHA3-256
-// hex names and the legacy CIDs this sweep exists to migrate. It is a deliberate
-// duplicate of an unexported rule in the local adapter — the pre-flight lives in
-// cmd and cannot import it — and is pinned to that rule by a test.
-func looksLikeBlobName(n string) bool {
-	if len(n) < 32 || len(n) > 128 {
-		return false
-	}
-	for _, c := range n {
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 func verifySweepStorage(path string) error {
 	if path == "" {
 		return errors.New("LOCAL_STORAGE_PATH is empty")
@@ -472,7 +453,7 @@ func verifySweepStorage(path string) error {
 			// files_list.txt and table_entries.txt into this exact directory and only
 			// removes them in its last step, so an evicted checkup pod leaves them behind
 			// permanently.
-			if !looksLikeBlobName(n) {
+			if !local.IsBlobName(n) {
 				continue
 			}
 			return nil // a real blob: the volume is mounted and populated
