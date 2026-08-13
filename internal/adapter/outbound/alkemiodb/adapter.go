@@ -138,9 +138,10 @@ func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, 
 
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
-// rules). A unique violation — another row already holds this content in the
-// bucket — surfaces as model.ErrDuplicateKey so the service can fall back to
-// its dedup path.
+// rules). A unique violation surfaces as a *model.DuplicateKeyError — which
+// matches the model.ErrDuplicateKey sentinel AND names the violated index — so
+// the service resolves the collision by the index that actually raised it
+// rather than by probing.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -148,8 +149,8 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadat
 	}
 	id, err := a.queries.CreateDocument(ctx, createDocumentParams(doc, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return uuid.Nil, model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return uuid.Nil, dup
 		}
 		return uuid.Nil, err
 	}
@@ -181,11 +182,43 @@ func createDocumentParams(doc model.Document, raw []byte) queries.CreateDocument
 	}
 }
 
-// isUniqueViolation reports whether err is a Postgres unique-constraint violation — the
-// signal that another row already holds this content in the bucket (the dedup race).
-func isUniqueViolation(err error) bool {
+// uqFileExternalReferenceBucket is the NAME of the partial unique index enforcing
+// at most one row per (externalReference, storageBucketId). It is EXPLICITLY named
+// in both the production DDL (the server's TypeORM migration
+// FileExternalReference1782299000000) and this repo's sqlc schema mirror
+// (db/schema/document.sql), so the name is byte-identical in every environment —
+// which is what makes classifying a violation by it sound. Postgres reports the
+// INDEX name as the constraint name for a bare unique index.
+//
+// Only THIS index is named. The table's other unique indexes carry TypeORM's
+// hash-generated names in production ("REL_d9e2dfcccf59233c17cc6bc641" for
+// authorizationId, "REL_9fb9257b14ec21daf5bc9aa4c8" for tagsetId — see the
+// server's 1764590884532-baseline migration) and Postgres-generated ones in the
+// local schema mirror, so they are classified by EXCLUSION rather than against
+// names that differ per environment.
+const uqFileExternalReferenceBucket = "UQ_file_externalReference_storageBucketId"
+
+// duplicateKeyError translates a Postgres unique-constraint violation into the
+// domain's typed duplicate-key error, classifying WHICH index was violated so the
+// service can resolve the collision deterministically instead of probing for it.
+// Returns nil when err is not a unique violation, so every call site reads as
+// `if dup := duplicateKeyError(err); dup != nil { return dup }`.
+//
+// This is the single boundary where a pgconn error becomes domain vocabulary: the
+// pgx type stops here and only model.UniqueConstraint crosses into the core.
+func duplicateKeyError(err error) error {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation
+	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
+		return nil
+	}
+	constraint := model.ConstraintOther
+	switch pgErr.ConstraintName {
+	case "":
+		constraint = model.ConstraintUnspecified
+	case uqFileExternalReferenceBucket:
+		constraint = model.ConstraintExternalReferenceBucket
+	}
+	return &model.DuplicateKeyError{Constraint: constraint, Name: pgErr.ConstraintName}
 }
 
 // UpdateFile rewrites the content fields (externalID, mimeType, size) plus
@@ -201,8 +234,8 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, expectedExternal
 	}
 	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -237,8 +270,8 @@ func updateFileParams(id uuid.UUID, expectedExternalID string, expectedVersion i
 func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
 	rows, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}

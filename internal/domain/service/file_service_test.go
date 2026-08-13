@@ -16,6 +16,31 @@ import (
 
 var nopLogger = zap.NewNop()
 
+// dupOnReference / dupOnOther build the CLASSIFIED duplicate-key error the
+// adapter returns for a unique violation, naming which index raised it. The
+// service branches on that classification, so a test that scripted the bare
+// model.ErrDuplicateKey sentinel would be asserting against an unattributable
+// violation — a different case with a different (loud) outcome.
+func dupOnReference() error {
+	return &model.DuplicateKeyError{
+		Constraint: model.ConstraintExternalReferenceBucket,
+		Name:       "UQ_file_externalReference_storageBucketId",
+	}
+}
+
+// dupUnattributed is a unique violation the database reported WITHOUT naming the
+// index — the one case the service cannot resolve and must refuse to guess at.
+func dupUnattributed() error {
+	return &model.DuplicateKeyError{Constraint: model.ConstraintUnspecified}
+}
+
+func dupOnOther() error {
+	return &model.DuplicateKeyError{
+		Constraint: model.ConstraintOther,
+		Name:       "REL_d9e2dfcccf59233c17cc6bc641", // the authorizationId unique, prod's name
+	}
+}
+
 // faultyReadCloser fails on the first Read — a storage transport fault mid-header (EIO / NFS blip),
 // as opposed to bytes that are simply undecodable.
 type faultyReadCloser struct{}
@@ -446,7 +471,7 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 				AuthorizationID: winnerAuth,
 			}, nil
 		},
-		createErr: model.ErrDuplicateKey,
+		createErr: dupOnOther(),
 	}
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
@@ -592,7 +617,7 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 			t.Fatal("FindByExternalIDAndBucket must not be called when SkipDedup=true")
 			return model.Document{}, nil
 		},
-		createErr: model.ErrDuplicateKey,
+		createErr: dupOnOther(),
 	}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
@@ -950,7 +975,7 @@ func TestCopyDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 
 	// Use mockRepoRace to script the create behavior (ErrDuplicateKey).
 	// GetByID returns the source; find must not be called when SkipDedup=true.
-	repo := &copyRaceRepo{source: source, createErr: model.ErrDuplicateKey}
+	repo := &copyRaceRepo{source: source, createErr: dupOnOther()}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
 	_, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{

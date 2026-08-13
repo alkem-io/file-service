@@ -206,9 +206,10 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		}
 	}
 
-	// Reuse insertDocument so race-handling, error mapping (ErrDuplicateKey →
-	// ErrConflict on SkipDedup, race re-query otherwise), and audit fields
-	// stay identical to CreateDocument.
+	// Reuse insertDocument so the constraint-directed duplicate resolution
+	// (reference collision → idempotent; any other index → ErrConflict for a
+	// SkipDedup caller, content re-query otherwise) and the audit fields stay
+	// identical to CreateDocument.
 	createInput := model.CreateDocumentInput{
 		DisplayName:       source.DisplayName,
 		CreatedBy:         input.CreatedBy,
@@ -294,8 +295,9 @@ func (s *FileService) reconcileReplaceMIME(knownMIME string, content []byte) (mi
 	}
 }
 
-// insertDocument builds the Document, attempts a Create, and handles the
-// unique-key race by re-querying and returning the concurrent winner.
+// insertDocument builds the Document, attempts a Create, and hands a
+// unique-key failure to resolveDuplicateInsert, which branches on the index
+// that actually raised it.
 //
 // Blob cleanup policy: once Storage.Save has published a blob, we never
 // delete it on subsequent failures. externalID is global content identity,
@@ -335,66 +337,117 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		return &doc, nil
 	}
 
-	if errors.Is(err, model.ErrDuplicateKey) {
-		// A reference-bearing insert is identity'd by (externalReference,
-		// storageBucketId) — the partial UNIQUE index — so a duplicate key there
-		// means "this reference is ALREADY materialized in this bucket". Resolve
-		// it to the existing row and report Reused=true: re-homing/re-sharing the
-		// same media_id into the same bucket twice is an idempotent no-op, not a
-		// conflict.
-		//
-		// This deliberately runs BEFORE the SkipDedup check. SkipDedup means "do
-		// not CONTENT-dedup" — never "do not resolve a reference collision" — and
-		// the only production caller of the reference path (a re-share COPY)
-		// always sends skipDedup=true. Ordering it the other way round made this
-		// whole branch dead code on that path and turned an idempotent re-share
-		// into a 409.
-		//
-		// The winner is returned WITHOUT requiring its externalID to equal the
-		// content we just staged. That is the dual-identity rule, not a dropped
-		// check: a reference row's identity IS its reference, so the row holding
-		// (reference, bucket) is the correct answer even if its bytes have since
-		// been replaced. Requiring content equality would fail an idempotent
-		// re-share for no reachable benefit — the response reports the stored
-		// row's externalID/mimeType/size, so the caller sees exactly what the DB
-		// holds.
-		if hasReference(input.ExternalReference) {
-			raced, findErr := s.Repo.GetByReferenceInBucket(ctx, *input.ExternalReference, input.StorageBucketID)
-			if findErr == nil {
-				raced.Reused = true
-				return &raced, nil
-			}
-			if !errors.Is(findErr, model.ErrDocumentNotFound) {
-				s.Logger.Warn("dedup: unique violation but reference re-query failed",
-					zap.String("externalID", stored.ExternalID), zap.Error(findErr))
-				return nil, fmt.Errorf("create document record: duplicate key, reference winner lookup failed: %w", findErr)
-			}
-			// No row carries this reference in this bucket, so the violation came
-			// from some OTHER unique index (a content constraint where one
-			// exists). Fall through to the content handling below.
-		}
-		// SkipDedup means the caller explicitly asked for a fresh row. If the
-		// schema enforces unique(externalID, storageBucketID), we can't honor
-		// that intent — surface as ErrConflict rather than masquerading as a
-		// dedup hit (which would silently corrupt placeholder flows).
+	var dup *model.DuplicateKeyError
+	if errors.As(err, &dup) {
+		return s.resolveDuplicateInsert(ctx, input, stored, dup)
+	}
+	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// resolveDuplicateInsert resolves an insert that lost to a unique index, branching
+// on WHICH index raised it. The database names the violated constraint on every
+// unique violation and the adapter classifies that name, so this is a decision, not
+// a guess:
+//
+//   - the (externalReference, storageBucketId) index → an idempotent re-share;
+//     resolve to the row already holding that reference.
+//   - any other index → the contract every non-reference caller has always had:
+//     ErrConflict for a SkipDedup caller, content-dedup resolution otherwise.
+//   - unattributable (no constraint name) → a loud error. The two resolutions are
+//     mutually exclusive and both are WRONG for the other index, so picking one
+//     blind would either 409 a legitimate re-share or hand the caller a row it
+//     never asked for.
+//
+// Round 2 got this wrong twice in a row for the same underlying reason: it PROBED
+// (re-query and infer) instead of reading what Postgres already reported. Probing
+// reference-first made a SkipDedup content collision resolvable as a dedup hit;
+// probing content-first made every re-share a 409. Neither ordering is fixable,
+// because the probe's miss is indistinguishable from a concurrent delete.
+func (s *FileService) resolveDuplicateInsert(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, dup *model.DuplicateKeyError) (*model.Document, error) {
+	switch dup.Constraint {
+	case model.ConstraintExternalReferenceBucket:
+		return s.resolveReferenceCollision(ctx, input, dup)
+	case model.ConstraintOther:
+		// SkipDedup means the caller explicitly asked for a fresh row, and some
+		// index other than the reference one refused. Surface that as ErrConflict
+		// rather than masquerading as a dedup hit (which would silently corrupt
+		// placeholder flows).
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// Best-effort content race re-query. For plain (non-reference) rows this
-		// branch is effectively inert in prod: there is no externalID
-		// content-unique index there, so content-dedup is an app-level,
-		// best-effort, racey lookup — the by-content re-query only fires on the
-		// off chance such a content constraint exists and raised a duplicate.
-		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
-		if findErr == nil {
-			raced.Reused = true
-			return &raced, nil
-		}
-		s.Logger.Warn("dedup: unique violation but re-query failed",
-			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
-		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
+		return s.resolveContentCollision(ctx, input, stored, dup)
+	default:
+		s.Logger.Error("dedup: unique violation with no constraint name; cannot resolve",
+			zap.String("externalID", stored.ExternalID),
+			zap.String("bucketID", input.StorageBucketID.String()))
+		return nil, fmt.Errorf("create document record: unattributable unique violation: %w", dup)
 	}
-	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// resolveReferenceCollision resolves a collision on the partial
+// UNIQUE(externalReference, storageBucketId) index: this reference is ALREADY
+// materialized in this bucket, so re-homing / re-sharing the same media_id twice
+// is an idempotent no-op and returns the existing row with Reused=true.
+//
+// It runs REGARDLESS of SkipDedup. SkipDedup means "do not CONTENT-dedup" — never
+// "do not resolve a reference collision" — and the only production caller of the
+// reference path (a re-share COPY) always sends skipDedup=true.
+//
+// The winner is returned WITHOUT requiring its externalID to equal the content we
+// just staged. That is the dual-identity rule, not a dropped check: a reference
+// row's identity IS its reference, so the row holding (reference, bucket) is the
+// correct answer even if its bytes have since been replaced. The response reports
+// the stored row's externalID/mimeType/size, so the caller sees what the DB holds.
+//
+// NOTE for the caller (a documented, pre-existing property of every Reused
+// resolution): the caller-supplied authorizationId/tagsetId are NOT used — the
+// existing row's are authoritative — so a caller that minted a policy for this
+// copy owns releasing it. file-service does not own the authorization_policy
+// table and cannot delete it here; Reused=true is the signal.
+func (s *FileService) resolveReferenceCollision(ctx context.Context, input model.CreateDocumentInput, dup *model.DuplicateKeyError) (*model.Document, error) {
+	if !hasReference(input.ExternalReference) {
+		// The partial index only covers rows WITH a reference, so an insert
+		// carrying none cannot violate it. Reaching here means the classification
+		// and the input disagree; resolving either way would be fabrication.
+		return nil, fmt.Errorf("create document record: reference-index violation on a reference-less insert: %w", dup)
+	}
+	raced, findErr := s.Repo.GetByReferenceInBucket(ctx, *input.ExternalReference, input.StorageBucketID)
+	if findErr == nil {
+		raced.Reused = true
+		return &raced, nil
+	}
+	if errors.Is(findErr, model.ErrDocumentNotFound) {
+		// The row owning (reference, bucket) at insert time was deleted before
+		// this re-query. There is nothing to resolve TO, and nothing to fall
+		// through to either: the content lookup filters `externalReference IS
+		// NULL`, so in a reference-only bucket it can only ever answer with an
+		// UNRELATED reference-less row (or a misleading not-found). Report the
+		// race for what it is — a 409 the caller retries.
+		s.Logger.Warn("dedup: reference collision winner vanished before re-query",
+			zap.String("reference", *input.ExternalReference),
+			zap.String("bucketID", input.StorageBucketID.String()))
+		return nil, ErrConflict
+	}
+	s.Logger.Warn("dedup: unique violation but reference re-query failed",
+		zap.String("reference", *input.ExternalReference), zap.Error(findErr))
+	return nil, fmt.Errorf("create document record: duplicate key, reference winner lookup failed: %w", findErr)
+}
+
+// resolveContentCollision resolves a NON-reference unique violation for a caller
+// that allows dedup, by re-querying the concurrent content winner. In production
+// this branch is near-inert: the `file` table has no (externalID, storageBucketId)
+// unique index, so content-dedup is an app-level best-effort lookup and this only
+// fires where such an index exists.
+func (s *FileService) resolveContentCollision(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, dup *model.DuplicateKeyError) (*model.Document, error) {
+	raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+	if findErr == nil {
+		raced.Reused = true
+		return &raced, nil
+	}
+	s.Logger.Warn("dedup: unique violation but re-query failed",
+		zap.String("externalID", stored.ExternalID),
+		zap.String("constraint", dup.Name), zap.Error(findErr))
+	return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
 }
 
 // DeleteDocument removes a document record and its file (if not shared).

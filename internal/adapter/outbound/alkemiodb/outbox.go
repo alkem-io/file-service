@@ -32,8 +32,8 @@ func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, cont
 
 	id, err := q.CreateDocument(ctx, createDocumentParams(doc, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return uuid.Nil, model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return uuid.Nil, dup
 		}
 		return uuid.Nil, err
 	}
@@ -74,8 +74,8 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expect
 
 	rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -117,8 +117,8 @@ func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document,
 
 	rows, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(current.ID, meta, current.Version))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}

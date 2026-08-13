@@ -396,7 +396,7 @@ func TestDocumentHandler_Create_SkipDedup_BypassesDedup(t *testing.T) {
 // masquerading as Reused=true.
 func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -613,7 +613,7 @@ func TestDocumentHandler_Copy_SkipDedup_Conflict_Returns409(t *testing.T) {
 		MimeType:   "image/png",
 		Size:       42,
 	}
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	body, _ := json.Marshal(CopyDocumentRequest{
 		SourceID:            sourceID.String(),

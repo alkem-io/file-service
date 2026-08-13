@@ -163,7 +163,7 @@ func TestCopyDocument_ReShareOfExistingReferenceIsIdempotent(t *testing.T) {
 		ID: uuid.New(), ExternalID: "hash", MimeType: "image/png", Size: 5,
 		StorageBucketID: destBucket, ExternalReference: &ref,
 	}
-	repo := &mockRepo{doc: source, createErr: model.ErrDuplicateKey, refDoc: &existing}
+	repo := &mockRepo{doc: source, createErr: dupOnReference(), refDoc: &existing}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
 	doc, err := svc.CopyDocument(context.Background(), source.ID, model.CopyDocumentInput{
@@ -186,12 +186,12 @@ func TestCopyDocument_ReShareOfExistingReferenceIsIdempotent(t *testing.T) {
 	}
 }
 
-// The counterpart the fix must not swallow: a skipDedup collision on a PLAIN
-// (reference-less) row is still a hard 409. skipDedup asked for a fresh row and
-// the schema refused; masquerading that as a dedup hit would silently corrupt
-// placeholder flows.
+// The counterpart the fix must not swallow: a skipDedup collision on any index
+// OTHER than the reference one is still a hard 409. skipDedup asked for a fresh
+// row and the schema refused; masquerading that as a dedup hit would silently
+// corrupt placeholder flows.
 func TestInsertDocument_SkipDedupWithoutReferenceStillConflicts(t *testing.T) {
-	repo := &mockRepo{createErr: model.ErrDuplicateKey, findDoc: &model.Document{ID: uuid.New()}}
+	repo := &mockRepo{createErr: dupOnOther(), findDoc: &model.Document{ID: uuid.New()}}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
 	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
@@ -205,13 +205,16 @@ func TestInsertDocument_SkipDedupWithoutReferenceStillConflicts(t *testing.T) {
 	}
 }
 
-// A reference-bearing insert whose duplicate key did NOT come from the reference
-// index (no row carries the reference in that bucket) falls through to the
-// content handling — so a skipDedup caller still gets its 409 rather than a
-// misleading 500 from the failed reference re-query.
-func TestInsertDocument_ReferenceCollisionNotOnReferenceFallsThrough(t *testing.T) {
+// A REFERENCE-BEARING insert whose violation came from some OTHER index (the
+// authorizationId unique, say) must NOT be resolved as a reference collision:
+// the reference lookup is not even consulted, and a skipDedup caller gets its
+// 409. The row carrying this reference may well exist in another bucket, and
+// probing for it here is how the wrong row gets returned as "the winner".
+func TestInsertDocument_NonReferenceIndexIsNotResolvedByReference(t *testing.T) {
 	ref := "media_id_absent"
-	repo := &mockRepo{createErr: model.ErrDuplicateKey} // refDoc nil → reference re-query finds nothing
+	// Scripted so a reference re-query would SUCCEED — the test can only pass
+	// because the classification stopped it from running.
+	repo := &mockRepo{createErr: dupOnOther(), refDoc: &model.Document{ID: uuid.New(), ExternalID: "other-hash"}}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
 	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
@@ -222,7 +225,74 @@ func TestInsertDocument_ReferenceCollisionNotOnReferenceFallsThrough(t *testing.
 		SkipDedup:         true,
 	}, []byte("payload"), "", nil, 0)
 	if !errors.Is(err, ErrConflict) {
-		t.Errorf("err = %v, want ErrConflict once the reference re-query found no row", err)
+		t.Errorf("err = %v, want ErrConflict for a non-reference index violation under skipDedup", err)
+	}
+	if repo.refCalls != 0 {
+		t.Errorf("a non-reference violation was probed by reference (refCalls=%d)", repo.refCalls)
+	}
+}
+
+// THE B2 case: the violation IS the reference index, but the row that owned
+// (reference, bucket) was deleted between the failed insert and the re-query.
+// There is nothing to resolve to — and nothing to fall through to, because the
+// content lookup filters `externalReference IS NULL` and in a reference-only
+// bucket can only answer with an UNRELATED reference-less row. The race must
+// surface as ErrConflict (a retryable 409), never as that unrelated row with
+// Reused=true and never as a "source document not found" 404.
+func TestInsertDocument_ReferenceWinnerVanishedIsConflictNotAWrongRow(t *testing.T) {
+	ref := "media_id_deleted_mid_race"
+	unrelated := model.Document{ID: uuid.New(), ExternalID: "hash", DisplayName: "someone-elses-row"}
+	// refDoc nil → the reference re-query misses; findDoc set → a fall-through
+	// to content dedup would hand back this unrelated reference-less row.
+	repo := &mockRepo{createErr: dupOnReference(), findDoc: &unrelated}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:       "m.bin",
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}, []byte("payload"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict when the reference winner vanished mid-race", err)
+	}
+	if doc != nil {
+		t.Errorf("returned document %+v; a vanished winner must resolve to no row at all", doc)
+	}
+	if repo.findCalls != 0 {
+		t.Errorf("a vanished reference winner fell through to content dedup (findCalls=%d) and would return an unrelated row", repo.findCalls)
+	}
+	if !errors.Is(err, ErrConflict) || errors.Is(err, model.ErrDocumentNotFound) {
+		t.Errorf("err = %v, must not read as a not-found (the handler would render a misleading 404)", err)
+	}
+}
+
+// A unique violation the database did not attribute to any index is
+// UNRESOLVABLE: the two resolutions are mutually exclusive and each is wrong for
+// the other index. It must fail loudly — never a silent dedup hit, never a 404.
+func TestInsertDocument_UnattributableViolationFailsLoudly(t *testing.T) {
+	ref := "media_id_x"
+	repo := &mockRepo{
+		createErr: dupUnattributed(), // a unique violation the database did not name
+		refDoc:    &model.Document{ID: uuid.New(), ExternalID: "ref-hash"},
+		findDoc:   &model.Document{ID: uuid.New(), ExternalID: "content-hash"},
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:       "m.bin",
+		StorageBucketID:   uuid.New(),
+		AuthorizationID:   uuid.New(),
+		ExternalReference: &ref,
+	}, []byte("payload"), "", nil, 0)
+	if err == nil {
+		t.Fatalf("unattributable unique violation resolved to %+v; want an error", doc)
+	}
+	if errors.Is(err, model.ErrDocumentNotFound) {
+		t.Errorf("err = %v, must not read as a not-found (the handler would render a misleading 404)", err)
+	}
+	if repo.refCalls != 0 || repo.findCalls != 0 {
+		t.Errorf("an unattributable violation was probed anyway: refCalls=%d findCalls=%d", repo.refCalls, repo.findCalls)
 	}
 }
 
@@ -234,7 +304,7 @@ func TestInsertDocument_ReferenceRaceReQueriesByReference(t *testing.T) {
 	winner := model.Document{ID: uuid.New(), ExternalID: "hash"}
 	repo := &mockRepoRace{
 		find:      func() (model.Document, error) { return model.Document{}, model.ErrDocumentNotFound },
-		createErr: model.ErrDuplicateKey,
+		createErr: dupOnReference(),
 		refWinner: &winner,
 	}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}

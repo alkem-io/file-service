@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pashagolub/pgxmock/v5"
 
@@ -512,6 +514,89 @@ func TestMock_Create_DBError(t *testing.T) {
 	}, model.ContentMetadata{})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+// A unique violation must arrive in the domain CLASSIFIED by the index that
+// raised it — that classification is the whole basis on which insertDocument
+// decides between "idempotent re-share" and "hard conflict", and it is the one
+// thing only this adapter can supply.
+//
+// Postgres reports the INDEX name as the constraint name for a bare unique
+// index, so the partial UQ_file_externalReference_storageBucketId — explicitly
+// named identically by the server's TypeORM migration and by db/schema/document.sql
+// — is matchable. Every other name (TypeORM's hash-generated REL_*, Postgres's
+// generated ones) classifies as "some other index" by exclusion, and an
+// unnamed violation stays UNSPECIFIED rather than being guessed at.
+func TestMock_Create_UniqueViolationIsClassifiedByIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		constraint string
+		want       model.UniqueConstraint
+	}{
+		{"reference index", "UQ_file_externalReference_storageBucketId", model.ConstraintExternalReferenceBucket},
+		{"authorizationId unique (prod name)", "REL_d9e2dfcccf59233c17cc6bc641", model.ConstraintOther},
+		{"local schema-mirror name", "file_authorizationId_key", model.ConstraintOther},
+		{"unnamed violation", "", model.ConstraintUnspecified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, err := pgxmock.NewPool()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mock.Close()
+
+			mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
+				WillReturnError(&pgconn.PgError{
+					Code:           pgerrcode.UniqueViolation,
+					ConstraintName: tc.constraint,
+				})
+
+			_, err = New(mock).Create(context.Background(), model.Document{
+				ID: uuid.New(), StorageBucketID: uuid.New(), AuthorizationID: uuid.New(),
+				CreatedDate: time.Now(), UpdatedDate: time.Now(),
+			}, model.ContentMetadata{})
+
+			if !errors.Is(err, model.ErrDuplicateKey) {
+				t.Fatalf("err = %v, want a match for the ErrDuplicateKey sentinel", err)
+			}
+			var dup *model.DuplicateKeyError
+			if !errors.As(err, &dup) {
+				t.Fatalf("err = %v, want a *model.DuplicateKeyError carrying the index identity", err)
+			}
+			if dup.Constraint != tc.want {
+				t.Errorf("Constraint = %v, want %v (raw name %q)", dup.Constraint, tc.want, dup.Name)
+			}
+			if dup.Name != tc.constraint {
+				t.Errorf("Name = %q, want the raw reported name %q", dup.Name, tc.constraint)
+			}
+		})
+	}
+}
+
+// A non-unique database error must NOT be dressed up as a duplicate key.
+func TestMock_Create_NonUniqueErrorIsNotADuplicate(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
+		WillReturnError(&pgconn.PgError{
+			Code:           pgerrcode.ForeignKeyViolation,
+			ConstraintName: "FK_file_storageBucketId",
+		})
+
+	_, err = New(mock).Create(context.Background(), model.Document{
+		ID: uuid.New(), StorageBucketID: uuid.New(), AuthorizationID: uuid.New(),
+		CreatedDate: time.Now(), UpdatedDate: time.Now(),
+	}, model.ContentMetadata{})
+	if errors.Is(err, model.ErrDuplicateKey) {
+		t.Fatalf("a foreign-key violation was classified as a duplicate key: %v", err)
+	}
+	if err == nil {
+		t.Fatal("expected the foreign-key error to surface")
 	}
 }
 
