@@ -19,9 +19,11 @@ leave no partial permanent object.
 
 **Language/Version**: Go 1.26.1
 **Primary Dependencies**: chi v5, pgx/v5 + sqlc, zap, `gabriel-vasile/mimetype`,
-govips v2 — **consumed from the fork** via `replace github.com/davidbyttow/govips/v2
-=> github.com/antst/govips/v2 @<pinned commit 10498ea>` (fork keeps the upstream
-module path; standard fork-replace workflow). New fork APIs used:
+govips v2 — originally **consumed from the fork** via `replace
+github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 @<pinned commit
+10498ea>`; **superseded 2026-08-13**, the streaming work landed upstream
+(davidbyttow/govips#539 + #540) and the `replace` was dropped for a direct
+require on an upstream master pseudo-version. Streaming APIs used:
 `LoadImageFromReader` (+`AccessSequential`), `SaveToWriter`,
 `SetStreamDiscThreshold`, `SetStreamScratchDir`, `SetPipeReadLimit`.
 **Storage**: PostgreSQL `file` table (unchanged); content-addressed blobs

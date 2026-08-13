@@ -25,7 +25,8 @@ then written to storage. Consequences:
 The enabling capability for the image path — streaming decode from a reader
 and streaming encode to a writer — exists in the project's image-processing
 library fork (antst/govips#2) and will be upstreamed once this feature has
-proven it in production use.
+proven it in production use. (Upstreamed 2026-08-13 as davidbyttow/govips#539 +
+#540; the service now consumes upstream govips directly.)
 
 ## Clarifications
 
