@@ -129,12 +129,24 @@ const cidRetainedDetailLimit = 20_000
 
 // recordChanged / recordNotChanged keep the counters authoritative and the
 // slices bounded, which is why the counters are not derived from len().
-func (sum *CIDNormalizeSummary) recordChanged(c CIDNormalizeChange) {
+// recordChanged returns the index of the retained entry, or -1 when the ceiling
+// was hit and only the counts will reflect this record.
+func (sum *CIDNormalizeSummary) recordChanged(c CIDNormalizeChange) int {
 	if len(sum.Changed) < cidRetainedDetailLimit {
 		sum.Changed = append(sum.Changed, c)
-		return
+		return len(sum.Changed) - 1
 	}
 	sum.DetailTruncated = true
+	return -1
+}
+
+// updateChanged fills in what became of the legacy blob, once that is known.
+func (sum *CIDNormalizeSummary) updateChanged(idx, sharedWith int, legacyBlob string) {
+	if idx < 0 || idx >= len(sum.Changed) {
+		return
+	}
+	sum.Changed[idx].SharedWith = sharedWith
+	sum.Changed[idx].LegacyBlob = legacyBlob
 }
 
 func (sum *CIDNormalizeSummary) recordNotChanged(n CIDNormalizeNotChanged) {
@@ -183,9 +195,14 @@ type CIDNormalizeOptions struct {
 // The pass is resumable WITHOUT any stored cursor: normalizing a record removes
 // it from the predicate, so a re-run simply re-derives what is left (FR-008).
 func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOptions) CIDNormalizeSummary {
-	sum := CIDNormalizeSummary{DryRun: opts.DryRun, Rate: opts.Rate, StartedAt: time.Now().UTC()}
-	run := &cidRun{opts: opts, journal: cidJournalName(sum.StartedAt)}
+	// The rate is normalized HERE, not only at the CLI. The report declares `rate`
+	// as a positive finite number, and a NaN reaching json.Marshal takes the whole
+	// report down — the one artifact this pass cannot afford to lose. Recording
+	// what the limiter actually enforces also stops the report claiming a ceiling
+	// that was never in force.
 	pace := newPacer(opts.Rate)
+	sum := CIDNormalizeSummary{DryRun: opts.DryRun, Rate: float64(pace.Limit()), StartedAt: time.Now().UTC()}
+	run := &cidRun{opts: opts, journal: cidJournalName(sum.StartedAt)}
 
 	var cursor uuid.UUID // uuid.Nil → first page
 	for {
@@ -217,16 +234,17 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 			// the pass on the first one — a lesson already paid for in sweep-dims.
 			cursor = doc.ID
 
-			if opts.DryRun {
-				s.previewOneCID(doc, &sum)
-				continue
-			}
-			// Pacing is per object and applies only to real passes: a dry run does
-			// no per-object store I/O worth throttling, so pacing it would turn a
-			// preview an operator runs before deciding into a long wait.
+			// Paced in BOTH modes. The preview probes the store for each record, so
+			// it is no longer the metadata-only scan that once justified exempting
+			// it — an unpaced preview would be the one mode hammering the shared
+			// volume the ceiling exists to protect.
 			if err := pace.Wait(ctx); err != nil {
 				sum.Aborted = true
 				break
+			}
+			if opts.DryRun {
+				s.previewOneCID(doc, &sum)
+				continue
 			}
 			s.normalizeOneCID(ctx, doc, &sum, run)
 		}
@@ -238,10 +256,12 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 	sum.FinishedAt = time.Now().UTC()
 	// A dry run writes nothing at all (FR-007); a real pass's report is the only
 	// durable record of the old→new mapping, so write it even for an aborted pass.
+	s.logCIDNormalizeSummary(sum, run)
 	if !opts.DryRun && opts.Report != nil {
+		// AFTER the summary, deliberately: the runbook tells an operator the report
+		// path is the last line the Job logs, and that is how they find it.
 		s.writeCIDNormalizeReport(&sum, run)
 	}
-	s.logCIDNormalizeSummary(sum, run)
 	return sum
 }
 
@@ -274,6 +294,10 @@ func (r *cidRun) digestFor(legacy string) (string, bool) {
 	d, ok := r.published[legacy]
 	return d, ok
 }
+
+// forgetDigest drops a memoized mapping whose published blob is about to be
+// deleted, so no later record is handed a name that no longer resolves.
+func (r *cidRun) forgetDigest(legacy string) { delete(r.published, legacy) }
 
 func (r *cidRun) rememberDigest(legacy, digest string) {
 	if len(r.published) >= cidDigestMemoLimit {
@@ -429,6 +453,11 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 		if current, err := s.Repo.GetByID(ctx, doc.ID); err == nil && !sha3ExternalID(current.ExternalID) {
 			detail = "compare-and-set lost to a concurrent metadata write; the record is STILL legacy-named and remains in scope for the next pass"
 		}
+		// Order matters: forget the memo BEFORE dropping the blob. Otherwise the next
+		// record sharing this legacy name gets a memo hit for a digest that no longer
+		// exists, is repointed to it, and then has its own legacy blob reclaimed —
+		// leaving a live record pointing at nothing, permanently.
+		run.forgetDigest(doc.ExternalID)
 		s.reclaimOrphanPublish(ctx, newExternalID, doc)
 		s.skipCID(doc, sum, reasonConcurrentChange, detail)
 		return
@@ -440,11 +469,25 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 		PreviousExternalID: doc.ExternalID,
 		NewExternalID:      newExternalID,
 	}
-	// Durable BEFORE the bytes are destroyed. Everything after this point can be
-	// reconstructed from the journal if the process dies.
-	s.journalChange(change, run)
-	change.SharedWith, change.LegacyBlob = s.reclaimLegacyBlob(ctx, doc, newExternalID, sum)
-	sum.recordChanged(change)
+	// Recorded before reclamation is attempted, so a panic inside reclaim cannot
+	// drop a record that `normalized` has already counted — the recover handler
+	// would then count the same record failed as well.
+	idx := sum.recordChanged(change)
+
+	// Durable BEFORE the bytes are destroyed — that ordering IS the guarantee that
+	// a pass killed mid-corpus loses no mapping for a blob it already destroyed. If
+	// the line did not land, the guarantee does not hold for this record, so the
+	// blob is kept rather than destroyed with nothing recording its old name. That
+	// costs disk; the alternative costs the only copy of the mapping.
+	if !s.journalChange(change, run) {
+		sum.updateChanged(idx, 0, legacyBlobRetained)
+		s.Logger.Error("sweep-cids: keeping the legacy blob because its mapping is not durable",
+			zap.String("documentID", doc.ID.String()),
+			zap.String("legacyExternalID", doc.ExternalID))
+		return
+	}
+	shared, fate := s.reclaimLegacyBlob(ctx, doc, newExternalID, sum)
+	sum.updateChanged(idx, shared, fate)
 }
 
 // publishUnderDigest streams the legacy blob into a staging write and commits
@@ -492,6 +535,17 @@ func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document
 	copied, err := io.Copy(stage, &cidCancellableReader{ctx: ctx, r: rc})
 	if err != nil {
 		_ = stage.Abort()
+		// Shutdown is not a fault of this record. Recording it as one would put a
+		// false I/O failure against a healthy object in the durable report, and —
+		// if the signal arrived while processing the last record — would let the
+		// pass report "completed" over a corpus it never finished.
+		if ctx.Err() != nil {
+			sum.Aborted = true
+			s.Logger.Info("sweep-cids: shutdown during a blob copy; ending the pass without blaming the record",
+				zap.String("documentID", doc.ID.String()),
+				zap.String("externalID", doc.ExternalID))
+			return "", false
+		}
 		s.failCID(doc, sum, reasonReadFailed, "copy to stage: "+err.Error())
 		return "", false
 	}
@@ -591,16 +645,18 @@ func (s *FileService) verifyNoLateReference(ctx context.Context, doc model.Docum
 // journalChange makes one old→new mapping durable before the bytes it describes
 // are destroyed. Append-only NDJSON, fsynced per line: a pass killed at record
 // 900 of 1053 loses no mapping for a blob it already reclaimed.
-func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) {
+func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) bool {
 	if run.opts.Report == nil {
-		return
+		// No sink configured (tests asserting on the summary directly): there is no
+		// journal to fall short of, so reclamation is not gated on one.
+		return true
 	}
 	line, err := cidJournalLine(c)
 	if err != nil {
 		run.journalFailed = true
 		s.Logger.Error("sweep-cids: could not encode a journal line; this mapping is NOT durable",
 			zap.String("documentID", c.FileID.String()), zap.Error(err))
-		return
+		return false
 	}
 	path, err := run.opts.Report.AppendJournal(run.journal, line)
 	if err != nil {
@@ -610,9 +666,10 @@ func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) {
 			zap.String("previousExternalID", c.PreviousExternalID),
 			zap.String("newExternalID", c.NewExternalID),
 			zap.Error(err))
-		return
+		return false
 	}
 	run.journalPath = path
+	return true
 }
 
 func (s *FileService) skipCID(doc model.Document, sum *CIDNormalizeSummary, reason, detail string) {

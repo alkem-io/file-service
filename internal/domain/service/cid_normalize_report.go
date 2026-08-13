@@ -47,8 +47,12 @@ type cidRunReport struct {
 	Changed       []cidReportChange  `json:"changed"`
 	NotNormalized []cidReportSkipped `json:"notNormalized"`
 	// DetailTruncated says the arrays above are shorter than counts, because the
-	// pass hit its retention ceiling. The journal remains complete.
+	// pass hit its retention ceiling.
 	DetailTruncated bool `json:"detailTruncated,omitempty"`
+	// MappingIncomplete says at least one old→new mapping could not be made
+	// durable. Without it a pass that lost mappings still reads `"outcome":
+	// "completed", "failed": 0` — the opposite of the exit code it returned.
+	MappingIncomplete bool `json:"mappingIncomplete,omitempty"`
 }
 
 type cidReportCounts struct {
@@ -63,9 +67,19 @@ type cidReportChange struct {
 	PreviousExternalID string `json:"previousExternalID"`
 	NewExternalID      string `json:"newExternalID"`
 	SharedWith         int    `json:"sharedWith"`
-	// LegacyBlob is omitted from a journal line, which is written before
-	// reclamation is attempted and therefore cannot know the answer.
-	LegacyBlob string `json:"legacyBlob,omitempty"`
+	LegacyBlob         string `json:"legacyBlob"`
+}
+
+// cidJournalEntry is deliberately a SEPARATE shape from cidReportChange rather
+// than a reuse of it. A journal line is written BEFORE reclamation is attempted,
+// so neither the reference count nor the blob's fate is known yet — emitting the
+// report struct would stamp a confident `"sharedWith": 0` on every line, and a
+// reader recovering from the journal would conclude that every shared legacy blob
+// was unshared.
+type cidJournalEntry struct {
+	FileID             string `json:"fileId"`
+	PreviousExternalID string `json:"previousExternalID"`
+	NewExternalID      string `json:"newExternalID"`
 }
 
 type cidReportSkipped struct {
@@ -78,7 +92,7 @@ type cidReportSkipped struct {
 // cidJournalLine encodes one mapping as a single NDJSON line, written and
 // fsynced before the legacy blob it names is reclaimed.
 func cidJournalLine(c CIDNormalizeChange) ([]byte, error) {
-	data, err := json.Marshal(cidReportChange{
+	data, err := json.Marshal(cidJournalEntry{
 		FileID:             c.FileID.String(),
 		PreviousExternalID: c.PreviousExternalID,
 		NewExternalID:      c.NewExternalID,
@@ -120,6 +134,7 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 		rep.Outcome = cidOutcomeEndedEarly
 	}
 	rep.DetailTruncated = sum.DetailTruncated
+	rep.MappingIncomplete = run.journalFailed
 	for _, c := range sum.Changed {
 		rep.Changed = append(rep.Changed, cidReportChange{
 			FileID:             c.FileID.String(),

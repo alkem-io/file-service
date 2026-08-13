@@ -26,16 +26,39 @@ func run(args []string) int {
 		cmd = args[0]
 	}
 	switch cmd {
+	case "-h", "--help", "help":
+		_, _ = fmt.Fprint(os.Stdout, usage)
+		return 0 // asking a command what it does is not a failure
 	case "serve":
-		return runServe()
+		return runNoArgs("serve", args[1:], runServe)
 	case "sweep-dims":
-		return runSweepDims()
+		return runNoArgs("sweep-dims", args[1:], runSweepDims)
 	case "sweep-cids":
 		return runSweepCIDs(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims | sweep-cids)\n", cmd)
+		fmt.Fprintf(os.Stderr, "file-service: unknown command %q\n\n%s", cmd, usage)
 		return 2
 	}
+}
+
+const usage = `usage: file-service <command> [flags]
+
+  serve                                   run the HTTP server (default)
+  sweep-dims                              one-shot image-dimension backfill (spec 019/020)
+  sweep-cids [--dry-run] [--rate N]       one-shot legacy blob-name normalization (spec 018)
+
+Sweeps are manually-triggered Jobs; neither runs on a schedule or at start-up.
+`
+
+// runNoArgs rejects arguments for the subcommands that take none. Silently
+// swallowing them is how a flag meant to change behaviour — say a --dry-run typed
+// against the wrong subcommand — goes unnoticed until the change is irreversible.
+func runNoArgs(name string, args []string, run func() int) int {
+	if len(args) > 0 {
+		fmt.Fprintf(os.Stderr, "file-service: %s takes no arguments, got %q\n", name, args)
+		return 2
+	}
+	return run()
 }
 
 // runServe boots the long-running HTTP server and blocks until SIGINT/SIGTERM.

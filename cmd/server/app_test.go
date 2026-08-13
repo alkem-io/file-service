@@ -6,8 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/alkem-io/file-service/internal/adapter/outbound/storage/local"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -360,3 +363,54 @@ func TestParseSweepRate(t *testing.T) {
 }
 
 func floatPtr(v float64) *float64 { return &v }
+
+// The pre-flight answers "is the volume mounted and holding content". It must not
+// be satisfied by the sink's own reserved directory or a staging temp file — a
+// store that has lost every blob would otherwise pass on the strength of a
+// directory a previous run created, and every read would then be classified as
+// permanently-absent content on a pass that exits 0.
+func TestVerifySweepStorage_IgnoresNonBlobEntries(t *testing.T) {
+	onlyReports := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(onlyReports, local.ReservedReportDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(onlyReports, ".stage-123"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySweepStorage(onlyReports); err == nil {
+		t.Error("a store holding only a reports directory and a staging temp passed the pre-flight — every read would then look like permanently-absent content")
+	}
+
+	withBlob := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(withBlob, local.ReservedReportDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withBlob, strings.Repeat("a", 64)), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySweepStorage(withBlob); err != nil {
+		t.Errorf("a store holding a real blob failed the pre-flight: %v", err)
+	}
+}
+
+// Silently swallowing arguments is how a flag meant to change behaviour — a
+// --dry-run typed against the wrong subcommand — goes unnoticed until the change
+// is irreversible.
+func TestTopLevelDispatch(t *testing.T) {
+	cases := []struct {
+		args []string
+		want int
+	}{
+		{[]string{"-h"}, 0},
+		{[]string{"--help"}, 0},
+		{[]string{"help"}, 0},
+		{[]string{"bogus"}, 2},
+		{[]string{"serve", "--dry-run"}, 2}, // must not be swallowed
+		{[]string{"sweep-dims", "--dry-run"}, 2},
+	}
+	for _, c := range cases {
+		if got := run(c.args); got != c.want {
+			t.Errorf("run(%q) = %d, want %d", c.args, got, c.want)
+		}
+	}
+}

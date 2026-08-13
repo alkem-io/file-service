@@ -563,21 +563,37 @@ func TestCIDNormalize_DoesNotScanPastTheLastShortPage(t *testing.T) {
 // A blob copy that ignores cancellation absorbs SIGTERM until it finishes; if that
 // outlasts the grace period kubernetes SIGKILLs the pod, which is the one exit path
 // that skips the end-of-pass report.
+//
+// The cancellation must land MID-COPY. Cancelling before the pass starts proves
+// nothing: the loop checks ctx at the top of every page and every record, so such a
+// test never reaches the copy at all.
 func TestCIDNormalize_CopyHonoursCancellationMidBlob(t *testing.T) {
 	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmCancelCancelCancelCancelCancel", Version: 1})
 	store := newCIDStore()
 	store.put(repo.rows[0].ExternalID, []byte("payload"))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// Fires once the record has been selected and its blob opened — past every
+	// loop-level ctx check, so only the copy can observe it.
+	store.onReadStream = func() { cancel() }
 
 	sum := newCIDSweep(repo, store).RunCIDNormalize(ctx, cidOpts(nil))
 
+	if store.reads[repo.rows[0].ExternalID] == 0 {
+		t.Fatal("the blob was never opened — the test did not reach the copy path it claims to exercise")
+	}
 	if sum.Normalized != 0 {
-		t.Errorf("normalized %d records under a cancelled context", sum.Normalized)
+		t.Errorf("normalized %d records after the copy was cancelled", sum.Normalized)
 	}
 	if !sum.Aborted {
-		t.Error("a cancelled pass did not report Aborted")
+		t.Error("a shutdown during the copy did not mark the pass Aborted — the pass would report 'completed' over a corpus it never finished")
+	}
+	// A shutdown is not the record's fault, and the durable report must not say it was.
+	if sum.Failed != 0 {
+		t.Errorf("failed = %d, want 0 — a signal is not an I/O fault of the record being processed", sum.Failed)
+	}
+	if len(store.deletes) != 0 {
+		t.Errorf("reclaimed %v during a cancelled pass", store.deletes)
 	}
 }
 
@@ -594,5 +610,100 @@ func TestCIDNormalize_TruncatedDetailIsDeclared(t *testing.T) {
 	}
 	if !sum.DetailTruncated {
 		t.Error("hit the ceiling without declaring truncation — the report would read as a shorter pass")
+	}
+}
+
+// The memo makes a shared legacy blob publish once. If a record's compare-and-set
+// then fails and the orphan reclaim deletes that published blob, the memo must not
+// keep handing the dead name to the next record sharing the same legacy blob —
+// which would repoint a live record at nothing and then reclaim its legacy copy too.
+func TestCIDNormalize_OrphanReclaimDoesNotPoisonTheMemo(t *testing.T) {
+	const legacy = "QmPoisonPoisonPoisonPoisonPoison"
+	content := []byte("shared by two records")
+	digest := ComputeHash(content)
+
+	repo := newCIDRepo(
+		&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1},
+		&cidRow{ID: cidUUID(2), ExternalID: legacy, Version: 1},
+	)
+	store := newCIDStore()
+	store.put(legacy, content)
+
+	// The FIRST record loses its compare-and-set; the second proceeds normally.
+	repo.beforeNormalize = func(r *cidRepo, id uuid.UUID) {
+		if id == cidUUID(1) {
+			r.row(id).Version++
+		}
+	}
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if sum.Normalized != 1 || sum.Skipped != 1 {
+		t.Fatalf("normalized=%d skipped=%d, want 1/1", sum.Normalized, sum.Skipped)
+	}
+	second := repo.row(cidUUID(2))
+	if second.ExternalID != digest {
+		t.Fatalf("second record names %q, want %q", second.ExternalID, digest)
+	}
+	// The whole point: whatever the second record names must actually be on the store.
+	if !store.has(second.ExternalID) {
+		t.Error("a live record names a blob that is not on the store — the orphan reclaim deleted a digest the memo kept serving")
+	}
+}
+
+// The journal ordering is the guarantee. If a line cannot be written, the blob it
+// describes must survive — destroying bytes whose old name was never recorded is
+// exactly the loss the journal exists to prevent.
+func TestCIDNormalize_UnjournalledRecordKeepsItsLegacyBlob(t *testing.T) {
+	const legacy = "QmNoJournalNoJournalNoJournalNoJ"
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1})
+	store := newCIDStore()
+	store.put(legacy, []byte("payload"))
+
+	sink := &cidSink{journalErr: errors.New("volume read-only")}
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(sink))
+
+	if sum.Normalized != 1 {
+		t.Fatalf("normalized = %d, want 1 — the repoint itself succeeded", sum.Normalized)
+	}
+	if !store.has(legacy) {
+		t.Error("the legacy blob was reclaimed even though its mapping never reached the disk")
+	}
+	if sum.Reclaimed != 0 {
+		t.Errorf("reclaimed = %d, want 0", sum.Reclaimed)
+	}
+	if sum.Changed[0].LegacyBlob != legacyBlobRetained {
+		t.Errorf("legacyBlob = %q, want %q", sum.Changed[0].LegacyBlob, legacyBlobRetained)
+	}
+	if !sum.ReportFailed {
+		t.Error("a run that could not record a mapping reported clean success")
+	}
+}
+
+// A journal line is written before the reference count is taken, so it cannot know
+// sharedWith or the blob's fate. Emitting the report struct would stamp a confident
+// "sharedWith": 0 on every line and a reader recovering from the journal would
+// conclude every shared legacy blob was unshared.
+func TestCIDNormalize_JournalLinesClaimOnlyWhatIsKnown(t *testing.T) {
+	const legacy = "QmJournalShapeJournalShapeJourn"
+	repo := newCIDRepo(
+		&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1},
+		&cidRow{ID: cidUUID(2), ExternalID: legacy, Version: 1},
+	)
+	store := newCIDStore()
+	store.put(legacy, []byte("shared"))
+
+	sink := &cidSink{}
+	newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(sink))
+
+	if len(sink.journalLines) != 2 {
+		t.Fatalf("journal has %d lines, want 2", len(sink.journalLines))
+	}
+	for i, line := range sink.journalLines {
+		var e map[string]any
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		assertExactKeys(t, "journal line", e, "fileId", "previousExternalID", "newExternalID")
 	}
 }

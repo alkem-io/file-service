@@ -17,6 +17,12 @@ type ReportSink struct {
 	// logf receives non-fatal problems (a directory fsync that failed on a
 	// network mount, say). Nil is fine — the sink works without a logger.
 	logf func(format string, args ...any)
+	// dirReady records that the directory exists and its entry has been flushed.
+	// The journal appends one line per record; without this every one of them
+	// would re-MkdirAll and re-fsync a directory whose entry only changed on the
+	// first line, and on the NFS/FUSE mounts this runs on that is the slowest and
+	// most failure-prone step in the call.
+	dirReady bool
 }
 
 // ReservedReportDir is the directory name reports live under, owned here because
@@ -42,70 +48,121 @@ func (s *ReportSink) WithLogf(logf func(format string, args ...any)) *ReportSink
 // operator-facing output before any report exists.
 func (s *ReportSink) Dir() string { return s.dir }
 
-// WriteReport writes data to <dir>/<name> exclusively and fsyncs it before
-// returning the absolute path. An existing report is never clobbered.
+// WriteReport writes data to <dir>/<name> and fsyncs it before returning the
+// absolute path. An existing report is never clobbered.
+//
+// It stages to a temp file and renames into place, rather than creating the final
+// name and writing into it. Writing in place would mean a crash mid-write leaves a
+// TRUNCATED report under a name indistinguishable from a complete one — and for an
+// irreversible migration whose report is the only surviving record, "looks valid
+// but is short" is the worst possible failure. Rename is atomic within a
+// directory, so the final name only ever appears once the bytes are durable.
 func (s *ReportSink) WriteReport(name string, data []byte) (string, error) {
-	return s.write(name, data, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	path, err := s.pathFor(name)
+	if err != nil {
+		return "", err
+	}
+	if err := s.ensureDir(); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("write report %s: %w", path, os.ErrExist)
+	}
+
+	tmp, err := os.CreateTemp(s.dir, "."+name+".partial-*")
+	if err != nil {
+		return "", fmt.Errorf("stage report %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	if err := writeAndSync(tmp, data); err != nil {
+		_ = tmp.Close()
+		s.remove(tmpName)
+		return "", fmt.Errorf("write report %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		s.remove(tmpName)
+		return "", fmt.Errorf("close report %s: %w", path, err)
+	}
+	// O_EXCL semantics via Link: rename would silently replace an existing report,
+	// and reports accumulate across runs.
+	if err := os.Link(tmpName, path); err != nil {
+		s.remove(tmpName)
+		return "", fmt.Errorf("publish report %s: %w", path, err)
+	}
+	s.remove(tmpName)
+	s.syncDirBestEffort(path)
+	return s.abs(path), nil
 }
 
 // AppendJournal appends line to <dir>/<name>, fsyncing before it returns, so a
 // mapping recorded here outlives the process that recorded it.
 func (s *ReportSink) AppendJournal(name string, line []byte) (string, error) {
-	return s.write(name, line, os.O_WRONLY|os.O_CREATE|os.O_APPEND)
-}
-
-func (s *ReportSink) write(name string, data []byte, flags int) (string, error) {
 	path, err := s.pathFor(name)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(s.dir, 0o750); err != nil {
-		return "", fmt.Errorf("create report dir %s: %w", s.dir, err)
+	if err := s.ensureDir(); err != nil {
+		return "", err
 	}
-	exclusive := flags&os.O_EXCL != 0
-
 	// #nosec G304 -- path is <reserved dir>/<name>, and name is constrained by
 	// pathFor to a bare file name, so it cannot escape the directory this sink owns.
-	f, err := os.OpenFile(path, flags, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("open report %s: %w", path, err)
+		return "", fmt.Errorf("open journal %s: %w", path, err)
 	}
-	if err := writeAndSync(f, data); err != nil {
+	if err := writeAndSync(f, line); err != nil {
 		_ = f.Close()
-		s.discardPartial(path, exclusive)
-		return "", fmt.Errorf("write report %s: %w", path, err)
+		return "", fmt.Errorf("append journal %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		s.discardPartial(path, exclusive)
-		return "", fmt.Errorf("close report %s: %w", path, err)
+		return "", fmt.Errorf("close journal %s: %w", path, err)
 	}
+	// Only the FIRST append creates a directory entry; the rest extend a file that
+	// is already linked, so re-fsyncing the directory per line would flush nothing.
+	s.syncDirOnce(path)
+	return s.abs(path), nil
+}
 
-	// Syncing the file alone can leave its directory entry unflushed. Best-effort
-	// on purpose: the data is already durable here, and on the NFS/FUSE mounts
-	// this service runs on a directory fsync is the step most likely to fail.
-	// Failing the call would tell an operator the mapping was lost while it sits
-	// on disk — a worse error than the one being reported.
+// ensureDir creates the reserved directory once per sink.
+func (s *ReportSink) ensureDir() error {
+	if s.dirReady {
+		return nil
+	}
+	if err := os.MkdirAll(s.dir, 0o750); err != nil {
+		return fmt.Errorf("create report dir %s: %w", s.dir, err)
+	}
+	return nil
+}
+
+// syncDirBestEffort flushes the directory entry. Deliberately non-fatal: the file
+// data is already durable, and on the NFS/FUSE mounts this runs on a directory
+// fsync is the step most likely to fail — reporting the mapping as lost while it
+// sits on disk would be a worse error than the one being reported.
+func (s *ReportSink) syncDirBestEffort(path string) {
 	if err := s.syncDir(); err != nil && s.logf != nil {
 		s.logf("report directory fsync failed for %s (the file itself is durable): %v", path, err)
 	}
-
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs, nil
-	}
-	return path, nil // relative, but it still locates the file
+	s.dirReady = true
 }
 
-// discardPartial removes a file this call created but could not finish. A
-// half-written file whose name looks exactly like a valid report is worse than
-// no file: whoever later globs the directory cannot tell them apart. An APPEND
-// is left alone — its earlier lines are still the record.
-func (s *ReportSink) discardPartial(path string, created bool) {
-	if !created {
+func (s *ReportSink) syncDirOnce(path string) {
+	if s.dirReady {
 		return
 	}
-	if err := os.Remove(path); err != nil && s.logf != nil {
-		s.logf("could not remove the partially-written report %s: %v", path, err)
+	s.syncDirBestEffort(path)
+}
+
+func (s *ReportSink) remove(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) && s.logf != nil {
+		s.logf("could not remove the staging file %s: %v", path, err)
 	}
+}
+
+func (s *ReportSink) abs(path string) string {
+	if a, err := filepath.Abs(path); err == nil {
+		return a
+	}
+	return path // relative, but it still locates the file
 }
 
 // pathFor validates the caller's name and resolves it inside the reserved dir.

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -427,14 +429,40 @@ func verifySweepStorage(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
 	}
-	entries, err := os.ReadDir(path)
+	// #nosec G304 -- path is the operator-configured storage root this sweep is
+	// pointed at; opening it is the entire purpose of the check.
+	d, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("read: %w", err)
+		return fmt.Errorf("open: %w", err)
 	}
-	if len(entries) == 0 {
-		return fmt.Errorf("%s is empty — an unmounted volume looks exactly like a corpus whose content is all gone", path)
+	defer func() { _ = d.Close() }()
+
+	// Read in small batches rather than os.ReadDir, which enumerates, allocates and
+	// SORTS every blob in a flat content store to answer a yes/no question.
+	//
+	// Only real blobs count. The sink's own reserved directory and any staging
+	// temporaries live in this same flat namespace, so counting entries would let a
+	// store that has lost every blob pass the check on the strength of the
+	// directory a previous run created.
+	for {
+		names, err := d.Readdirnames(64)
+		for _, n := range names {
+			if n == local.ReservedReportDir || strings.HasPrefix(n, ".") {
+				continue
+			}
+			return nil // a real blob: the volume is mounted and populated
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("read: %w", err)
+		}
+		if len(names) == 0 {
+			break
+		}
 	}
-	return nil
+	return fmt.Errorf("%s holds no content — an unmounted volume looks exactly like a corpus whose blobs are all gone, and this sweep cannot tell them apart from the inside", path)
 }
 
 // cidsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is

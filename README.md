@@ -125,6 +125,10 @@ file-service sweep-cids [--dry-run] [--rate N]  # normalize legacy blob names (s
 
 ### `sweep-cids` — legacy IPFS-CID → SHA3-256 blob names
 
+> Summarized here for a reader already in this repo. The **contract** is
+> `agents-hq/specs/018-legacy-cid-normalization/contracts/sweep-cids-cli.md`; it wins
+> on any disagreement.
+
 Objects written before content addressing are named by an IPFS CID, so SHA3-256 of
 their bytes can never equal their name and file-backup-service refuses them — they are
 **unbackable, therefore data-at-risk** (see `alkem-io/file-service#63`, bucket A). This

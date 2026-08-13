@@ -176,6 +176,10 @@ type cidStore struct {
 	reads   map[string]int // per-name ReadStream calls, to prove a shared blob is read once
 	stages  int            // staging writes opened
 
+	// onReadStream fires as a blob is opened — the seam a shutdown lands in when it
+	// arrives mid-copy rather than between records.
+	onReadStream func()
+
 	// afterCommit / afterDelete observe the instants between the sweep's three
 	// steps, which is where the "no record ever names an absent blob" invariant
 	// has to be checked.
@@ -216,6 +220,9 @@ func (s *cidStore) Read(externalID string) ([]byte, error) {
 
 func (s *cidStore) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 	s.reads[externalID]++
+	if s.onReadStream != nil {
+		s.onReadStream()
+	}
 	b, err := s.Read(externalID)
 	if err != nil {
 		return nil, 0, err
