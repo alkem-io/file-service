@@ -119,6 +119,32 @@ func TestByReference_InvalidBucketIs400(t *testing.T) {
 	}
 }
 
+// Only an ABSENT bucketId selects the GLOBAL (cross-bucket) lookup. A parameter
+// that is present but empty — `&bucketId=`, what an interpolated-but-unset
+// caller variable produces — must be a 400, never a silent widening of a
+// bucket-scoped read into a cross-bucket one.
+func TestByReference_PresentButEmptyBucketIs400(t *testing.T) {
+	for _, query := range []string{"?ref=x&bucketId=", "?ref=x&bucketId"} {
+		h, repo, _ := newDocHandler()
+		// Scripted so a widened GLOBAL resolution would SUCCEED — the test can
+		// only pass because the handler refuses, not because nothing matched.
+		repo.refDoc = &model.Document{ID: uuid.New(), ExternalID: "global-hash", MimeType: "text/plain"}
+
+		r := chi.NewRouter()
+		r.Get("/internal/file/by-reference", h.ByReference)
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference"+query, nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 for a present-but-empty bucketId, body: %s", query, rr.Code, rr.Body.String())
+		}
+		if repo.refCalls != 0 {
+			t.Errorf("%s: an empty bucketId widened the read to a GLOBAL lookup (refCalls=%d)", query, repo.refCalls)
+		}
+	}
+}
+
 func TestByReference_NotFoundIs404(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	repo.refDoc = nil // → ErrDocumentNotFound
@@ -450,6 +476,333 @@ func TestCreate_SkipImageProcessing_TakesVerbatimArm(t *testing.T) {
 				t.Errorf("stored bytes = %q, want the upload verbatim", storage.saved)
 			}
 		})
+	}
+}
+
+// A metadata part whose name isn't recognized is a 400, not a silent drop. An
+// exact-match collector that ignores what it doesn't know turns a caller typo
+// into a 201 that stored the WRONG thing: "skipimageprocessing" mis-cased means
+// the verbatim contract was silently transcoded, "externalRef" means a bridge
+// document with no reference that the provider can never resolve.
+func TestCreate_UnknownMultipartFieldIs400(t *testing.T) {
+	for _, field := range []string{
+		"skipimageprocessing", // mis-cased near-miss on the verbatim flag
+		"SkipImageProcessing",
+		"externalRef", // misspelled near-miss on the bridge key
+		"external_reference",
+		"storagebucketid",
+		"totallyUnknown",
+	} {
+		t.Run(field, func(t *testing.T) {
+			h, repo, _ := newDocHandler()
+			body, ct := buildCreateBody(t, [][2]string{
+				{"displayName", "m.bin"},
+				{"storageBucketId", uuid.New().String()},
+				{"authorizationId", uuid.New().String()},
+				{field, "true"},
+			}, true, []byte("hello"))
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+			req.Header.Set("Content-Type", ct)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for the unknown field %q, body: %s", rr.Code, field, rr.Body.String())
+			}
+			if repo.lastCreateDoc.ID != uuid.Nil {
+				t.Error("a request with an unknown field must not have written a row")
+			}
+		})
+	}
+}
+
+// The verbatim decision is taken when the file part is staged and is
+// irreversible — the bytes are already written. A later skipImageProcessing part
+// that CONTRADICTS it must be rejected in BOTH directions, so the request record
+// can never claim a processed store for content that was stored verbatim (or the
+// reverse). The consistent restatement stays a 201.
+func TestCreate_ContradictingSkipImageProcessingPartIs400(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		before     string
+		after      string
+		wantStatus int
+	}{
+		{"false after verbatim stage", "true", "false", http.StatusBadRequest},
+		{"true after processed stage", "false", "true", http.StatusBadRequest},
+		{"consistent restatement (true)", "true", "true", http.StatusCreated},
+		{"consistent restatement (false)", "false", "false", http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo, _, processor := newDocHandlerWithProcessor()
+			processor.detectMIME = "image/png" // transcodable → the two arms actually diverge
+
+			// skipImageProcessing FIRST (so it governs staging), file, then the
+			// duplicate part.
+			var body bytes.Buffer
+			wr := multipart.NewWriter(&body)
+			_ = wr.WriteField("skipImageProcessing", tc.before)
+			part, _ := wr.CreateFormFile("file", "blob")
+			_, _ = part.Write([]byte("\x89PNG\r\n\x1a\npretend"))
+			_ = wr.WriteField("displayName", "m.png")
+			_ = wr.WriteField("storageBucketId", uuid.New().String())
+			_ = wr.WriteField("authorizationId", uuid.New().String())
+			_ = wr.WriteField("skipImageProcessing", tc.after)
+			_ = wr.Close()
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+			req.Header.Set("Content-Type", wr.FormDataContentType())
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d, body: %s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if tc.wantStatus != http.StatusCreated {
+				if repo.lastCreateDoc.ID != uuid.Nil {
+					t.Error("a contradicted skipImageProcessing must not have written a row")
+				}
+				return
+			}
+			// On the accepted path the stored bytes and the staging decision must
+			// agree: skip=true means the transcoder never ran.
+			wantTranscode := 1
+			if tc.before == "true" {
+				wantTranscode = 0
+			}
+			if processor.transcodeCalls != wantTranscode {
+				t.Errorf("TranscodeStream calls = %d, want %d", processor.transcodeCalls, wantTranscode)
+			}
+		})
+	}
+}
+
+// A reference Postgres cannot store as text — invalid UTF-8, or a NUL — must be
+// a clean 400 BEFORE anything is published. Without the up-front check the
+// INSERT fails server-side and surfaces as a 500 that has already committed a
+// blob nothing will ever reference (blob cleanup is deliberately never done on
+// the create error path).
+func TestCreate_UnstorableExternalReferenceIs400WithoutPublishing(t *testing.T) {
+	for _, tc := range []struct{ name, ref string }{
+		{"invalid utf-8", "media_\xff\xfe_id"},
+		{"embedded NUL", "media\x00id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo, storage := newDocHandler()
+			body, ct := buildCreateBody(t, [][2]string{
+				{"displayName", "m.bin"},
+				{"storageBucketId", uuid.New().String()},
+				{"authorizationId", uuid.New().String()},
+				{"externalReference", tc.ref},
+			}, true, []byte("hello"))
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+			req.Header.Set("Content-Type", ct)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+			}
+			if repo.lastCreateDoc.ID != uuid.Nil {
+				t.Error("rejected create must not have written a row")
+			}
+			if len(storage.stages) != 1 || storage.stages[0].committed {
+				t.Errorf("rejected create published a blob (orphan): stages=%d", len(storage.stages))
+			}
+		})
+	}
+}
+
+// The same rule on the JSON paths, where a NUL arrives as a \u0000 escape.
+func TestCopyAndPatch_UnstorableExternalReferenceIs400(t *testing.T) {
+	sourceID := uuid.New()
+
+	h, repo, _ := newDocHandler()
+	repo.doc = model.Document{ID: sourceID, ExternalID: "hash", MimeType: "image/png", DisplayName: "b.png"}
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+	copyBody := `{"sourceId":"` + sourceID.String() +
+		`","destinationBucketId":"` + uuid.New().String() +
+		`","authorizationId":"` + uuid.New().String() +
+		`","externalReference":"media\u0000id"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(copyBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("copy: status = %d, want 400 for a NUL-bearing externalReference, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.ID != uuid.Nil {
+		t.Error("copy: rejected request must not have written a row")
+	}
+
+	docID := uuid.New()
+	prr, prepo := runPatch(t, docID, `{"externalReference":"media\u0000id"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: docID, StorageBucketID: uuid.New(), Version: 1}
+	})
+	if prr.Code != http.StatusBadRequest {
+		t.Errorf("patch: status = %d, want 400, body: %s", prr.Code, prr.Body.String())
+	}
+	if prepo.updateMetadataCalls != 0 {
+		t.Errorf("patch: rejected request must not write (calls=%d)", prepo.updateMetadataCalls)
+	}
+}
+
+// file."displayName" is character data too, so the SAME unstorable bytes are the
+// same orphan-blob 500 — and the control-character rule cannot substitute for the
+// encoding check: ranging over a string DECODES an invalid byte to U+FFFD
+// (> 0x20), so an invalid-UTF-8 name passes every other displayName rule. 013's
+// inbound re-home names the file, and the multipart create path carries arbitrary
+// bytes, so this is reachable. (Invalid UTF-8 cannot arrive on the JSON paths —
+// encoding/json substitutes U+FFFD while decoding — so the create path is where
+// it must be caught; a NUL is rejected on both.)
+func TestCreate_UnstorableDisplayNameIs400WithoutPublishing(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	body, ct := buildCreateBody(t, [][2]string{
+		{"displayName", "photo_\xff\xfe.png"},
+		{"storageBucketId", uuid.New().String()},
+		{"authorizationId", uuid.New().String()},
+	}, true, []byte("hello"))
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an invalid-UTF-8 displayName, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.ID != uuid.Nil {
+		t.Error("rejected create must not have written a row")
+	}
+	if len(storage.stages) != 1 || storage.stages[0].committed {
+		t.Errorf("rejected create published a blob (orphan): stages=%d", len(storage.stages))
+	}
+}
+
+// The nil-UUID rule is uniform across ALL THREE paths, not just PATCH: an
+// optional owner/tagset that IS supplied must be a real id. uuidToPgxNullable
+// writes a LITERAL all-zero UUID (NOT NULL) for it, which then reads back out
+// through meta / by-reference as an owner "00000000-…" that matches no actor —
+// the very sentinel leak this branch closed for authorizationId. Omitting the
+// field remains the way to say "no owner" (asserted separately), so this adds no
+// required-ness.
+func TestCreateAndCopy_ZeroUUIDOptionalIdsAre400(t *testing.T) {
+	for _, field := range []string{"createdBy", "tagsetId"} {
+		t.Run("create/"+field, func(t *testing.T) {
+			h, repo, storage := newDocHandler()
+			body, ct := buildCreateBody(t, [][2]string{
+				{"displayName", "m.bin"},
+				{"storageBucketId", uuid.New().String()},
+				{"authorizationId", uuid.New().String()},
+				{field, uuid.Nil.String()},
+			}, true, []byte("hello"))
+
+			r := chi.NewRouter()
+			r.Post("/internal/file", h.Create)
+			req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+			req.Header.Set("Content-Type", ct)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for a nil-UUID %s, body: %s", rr.Code, field, rr.Body.String())
+			}
+			if repo.lastCreateDoc.ID != uuid.Nil {
+				t.Error("rejected create must not have written a row")
+			}
+			if len(storage.stages) != 1 || storage.stages[0].committed {
+				t.Errorf("rejected create published a blob (orphan): stages=%d", len(storage.stages))
+			}
+		})
+
+		t.Run("copy/"+field, func(t *testing.T) {
+			h, repo, _ := newDocHandler()
+			sourceID := uuid.New()
+			repo.doc = model.Document{ID: sourceID, ExternalID: "hash", MimeType: "image/png", DisplayName: "b.png"}
+
+			body := `{"sourceId":"` + sourceID.String() +
+				`","destinationBucketId":"` + uuid.New().String() +
+				`","authorizationId":"` + uuid.New().String() +
+				`","` + field + `":"` + uuid.Nil.String() + `"}`
+
+			r := chi.NewRouter()
+			r.Post("/internal/file/copy", h.Copy)
+			req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for a nil-UUID %s, body: %s", rr.Code, field, rr.Body.String())
+			}
+			if repo.lastCreateDoc.ID != uuid.Nil {
+				t.Error("rejected copy must not have written a row")
+			}
+		})
+	}
+}
+
+// The counterpart the rejection above must not swallow: OMITTING createdBy /
+// tagsetId is still how a caller says "no owner / no tagset" (the Synapse media
+// provider sends neither), and must stay a 201 that stores NULL.
+func TestCreate_OmittedOptionalIdsStoreNull(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	body, ct := buildCreateBody(t, [][2]string{
+		{"displayName", "m.bin"},
+		{"storageBucketId", uuid.New().String()},
+		{"authorizationId", uuid.New().String()},
+		// createdBy / tagsetId intentionally omitted
+	}, true, []byte("hello"))
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.CreatedBy != nil {
+		t.Errorf("createdBy = %v, want nil (NULL) when omitted", repo.lastCreateDoc.CreatedBy)
+	}
+	if repo.lastCreateDoc.TagsetID != nil {
+		t.Errorf("tagsetId = %v, want nil (NULL) when omitted", repo.lastCreateDoc.TagsetID)
+	}
+}
+
+// The all-zero UUID is the adapter's SQL-NULL sentinel, so it is not a VALUE on
+// any re-attribute field — clearing is expressed with an explicit JSON null and
+// nothing else. createdBy is clearable and still must reject it: persisting the
+// zero UUID would report a real owner that matches no actor.
+func TestPatch_ZeroUUIDRejectedOnBothReattributeFields(t *testing.T) {
+	for _, field := range []string{"authorizationId", "createdBy"} {
+		docID := uuid.New()
+		creator := uuid.New()
+		rr, repo := runPatch(t, docID, `{"`+field+`":"`+uuid.Nil.String()+`"}`, func(repo *mockDocRepo) {
+			repo.doc = model.Document{
+				ID: docID, StorageBucketID: uuid.New(),
+				AuthorizationID: uuid.New(), CreatedBy: &creator, Version: 1,
+			}
+		})
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 for the nil UUID, body: %s", field, rr.Code, rr.Body.String())
+		}
+		if repo.updateMetadataCalls != 0 {
+			t.Errorf("%s: rejected PATCH must not write (calls=%d)", field, repo.updateMetadataCalls)
+		}
 	}
 }
 

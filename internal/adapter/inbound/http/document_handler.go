@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -71,22 +72,34 @@ func (h *DocumentHandler) GetMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 // ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
-// ref is required. bucketId omitted → GLOBAL resolution (the provider's fetch:
+// ref is required. bucketId OMITTED → GLOBAL resolution (the provider's fetch:
 // any document carrying the reference, all sharing one blob). bucketId present
 // → bucket-SCOPED resolution (read resolution: the document in that bucket).
 // 200 → document meta (incl. externalReference + image dims); 404 → no match.
+//
+// Only an ABSENT bucketId parameter selects the global lookup. A bucketId that
+// is PRESENT but empty (`&bucketId=`) is malformed input, not an omission, and
+// is rejected with the same 400 as a malformed one — silently widening a
+// bucket-scoped read into a cross-bucket one because the caller's variable
+// interpolated empty is exactly the failure mode that must not be quiet.
 func (h *DocumentHandler) ByReference(w http.ResponseWriter, r *http.Request) {
-	ref := r.URL.Query().Get("ref")
+	query := r.URL.Query()
+	ref := query.Get("ref")
 	if ref == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing required query parameter: ref")
 		return
 	}
 
+	// Read the value and its PRESENCE separately: Get collapses "absent" and
+	// "present but empty" to "", and those two mean opposite things here.
+	bucketParam := query.Get("bucketId")
+	_, bucketPresent := query["bucketId"]
+
 	var (
 		doc model.Document
 		err error
 	)
-	if bucketParam := r.URL.Query().Get("bucketId"); bucketParam == "" {
+	if !bucketPresent {
 		doc, err = h.Service.Repo.GetByReference(r.Context(), ref)
 	} else {
 		bucketID, perr := uuid.Parse(bucketParam)
@@ -220,7 +233,16 @@ type createFields struct {
 	authorizationIDPresent bool
 }
 
-func (f *createFields) set(name, value string) {
+// set records one metadata part. An UNRECOGNIZED name is an error, not a
+// silent no-op: an exact-match switch that ignores what it doesn't know turns a
+// caller typo ("skipimageprocessing", "externalRef") into a 201 that stored the
+// wrong thing — a verbatim contract silently transcoded, or a bridge document
+// with no reference and therefore unreachable by the provider. This is the same
+// choice the JSON paths already make with DisallowUnknownFields: an unknown
+// field surfaces as a 400 rather than a successful-but-wrong write. The error
+// message is safe as a 400 body (the field NAME comes from the request, the
+// value never does).
+func (f *createFields) set(name, value string) error {
 	switch name {
 	case "displayName":
 		f.displayName = value
@@ -245,12 +267,46 @@ func (f *createFields) set(name, value string) {
 		f.externalReference = value
 	case "skipImageProcessing":
 		f.skipImageProcessing = value
+	default:
+		return fmt.Errorf("unknown multipart field: %s", sanitizeFieldName(name))
 	}
+	return nil
 }
 
-// parseOptionalUUID parses an optional UUID form field: empty means absent
+// sanitizeFieldName reduces an unrecognized multipart field name to printable
+// ASCII before it is echoed in a 400 body, so a crafted part name cannot smuggle
+// control characters into the response. Over-long names are truncated.
+func sanitizeFieldName(name string) string {
+	const maxFieldNameLen = 64
+	if len(name) > maxFieldNameLen {
+		name = name[:maxFieldNameLen]
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := range len(name) {
+		if c := name[i]; c < 0x20 || c >= 0x7f {
+			b.WriteByte('_')
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// parseOptionalUUID parses an optional UUID field (multipart form value, or a
+// JSON string field flattened through derefString): empty means absent
 // (nil, nil). The error names the field so it can serve directly as a 400
 // body.
+//
+// A value that IS supplied must be a real, NON-nil UUID. The all-zero UUID
+// parses cleanly but is this codebase's SQL-NULL sentinel: uuidToPgxNullable
+// writes a LITERAL all-zero id (NOT NULL) for it, and every nullable id column
+// reads back through optionalUUIDString, so the row would report an owner /
+// tagset of "00000000-…" that matches no actor and no tagset — through meta and
+// the by-reference response — while the caller was told it stored the value it
+// supplied. Rejecting it keeps ONE rule across create, copy and patch:
+// supplied ⇒ valid non-nil UUID; omitted ⇒ NULL. Absence is still how a caller
+// says "no owner" (the Synapse media provider sends neither field).
 func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
 	if value == "" {
 		return nil, nil
@@ -258,6 +314,9 @@ func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
 	parsed, err := uuid.Parse(value)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s", field)
+	}
+	if parsed == uuid.Nil {
+		return nil, fmt.Errorf("%s cannot be the nil UUID", field)
 	}
 	return &parsed, nil
 }
@@ -277,7 +336,14 @@ func parseOptionalBool(value, field string) (bool, error) {
 
 // buildCreateInput validates the collected metadata fields after the upload
 // has been staged (research R4).
-func buildCreateInput(fields createFields) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
+//
+// stagedSkip is the skipImageProcessing value the file part was ACTUALLY staged
+// under, and it — not the collected field — is what lands on the input. The
+// staged decision is the only one that describes the stored bytes; re-parsing
+// the field here would create a second value for the same fact that a duplicate
+// part could drive out of agreement with reality (validateSkipAfterFile rejects
+// a contradicting duplicate, so the two can no longer diverge at all).
+func buildCreateInput(fields createFields, stagedSkip bool) (input model.CreateDocumentInput, allowedMimeTypes []string, maxFileSize int, err error) {
 	if err := validateDisplayName(fields.displayName); err != nil {
 		return input, nil, 0, err
 	}
@@ -329,11 +395,6 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, err
 	}
 
-	skipImageProcessing, err := parseOptionalBool(fields.skipImageProcessing, "skipImageProcessing")
-	if err != nil {
-		return input, nil, 0, err
-	}
-
 	allowedMimeTypes = parseAllowedMimeTypes(fields.allowedMimeTypes)
 
 	maxFileSize, err = parseMaxFileSize(fields.maxFileSize)
@@ -354,7 +415,7 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		AuthorizationID:     authorizationID,
 		TagsetID:            tagsetID,
 		ExternalReference:   externalReference,
-		SkipImageProcessing: skipImageProcessing,
+		SkipImageProcessing: stagedSkip,
 		SkipDedup:           skipDedup,
 	}
 	return input, allowedMimeTypes, maxFileSize, nil
@@ -424,13 +485,45 @@ func derefString(v *string) string {
 // UTF-8 expansion.
 const maxExternalReferenceLen = 256
 
-// validateExternalReference rejects a reference longer than the column allows.
-// ref is the already-normalized optional value (nil = no reference).
-func validateExternalReference(ref *string) error {
-	if ref != nil && len(*ref) > maxExternalReferenceLen {
-		return fmt.Errorf("externalReference exceeds maximum length of %d bytes", maxExternalReferenceLen)
+// validateStorableText rejects bytes no Postgres CHARACTER column can hold:
+// text/varchar are character data, so a value that is not valid UTF-8, or that
+// contains a NUL (U+0000, which no Postgres text value may carry at all), is
+// rejected by the server on INSERT/UPDATE. Without an up-front check that
+// rejection lands as a 500 — and on create it lands AFTER the blob has already
+// been published, leaving an orphan blob behind for a request the caller can
+// never succeed at. field names the offending input so the message is a safe
+// 400 body.
+//
+// Single-sourced across every caller-supplied text column (externalReference,
+// displayName): the rule belongs to the column type, not to one field.
+func validateStorableText(field, v string) error {
+	if !utf8.ValidString(v) {
+		return fmt.Errorf("%s must be valid UTF-8", field)
+	}
+	if strings.ContainsRune(v, 0) {
+		return fmt.Errorf("%s must not contain NUL characters", field)
 	}
 	return nil
+}
+
+// validateExternalReference rejects a reference the file."externalReference"
+// text column cannot hold. ref is the already-normalized optional value
+// (nil = no reference).
+//
+// Length is only half of it; the other half is the shared storability rule,
+// applied up front on every path that accepts a reference (create, copy,
+// patch), so malformed input is a clean 400 with no side effects.
+//
+// Both flavors are reachable: a multipart create carries arbitrary bytes, and a
+// JSON body can spell one with a \u0000 escape.
+func validateExternalReference(ref *string) error {
+	if ref == nil {
+		return nil
+	}
+	if len(*ref) > maxExternalReferenceLen {
+		return fmt.Errorf("externalReference exceeds maximum length of %d bytes", maxExternalReferenceLen)
+	}
+	return validateStorableText("externalReference", *ref)
 }
 
 // nonNilUUID maps the zero UUID — how a NULL authorizationId column reads back
@@ -517,11 +610,18 @@ func (h *DocumentHandler) stageFilePart(w http.ResponseWriter, r *http.Request, 
 }
 
 // validateSkipAfterFile enforces the verbatim-store contract guard (spec 013):
-// reject only when skipImageProcessing=true is FIRST established after the file
-// part has already been staged — the bytes may already have been
-// transcoded/rotated, so the byte-exact contract cannot be honored. A duplicate
-// part consistent with the value staged before the file (stagedSkip) is honored,
-// so it must not 400. Returns false after writing the error response.
+// the file part is staged under the skipImageProcessing value in effect at that
+// moment (stagedSkip), and that decision is irreversible — the bytes are already
+// written. So a skipImageProcessing part arriving AFTER the file may only RESTATE
+// that value; any part that disagrees with it is rejected rather than accepted
+// into a request record that contradicts what was actually stored.
+//
+//   - true after a non-verbatim stage: the bytes may already have been
+//     transcoded/rotated, so the byte-exact contract cannot be honored.
+//   - false after a verbatim stage: the bytes were stored verbatim; accepting
+//     this would report a processed store for content that was never processed.
+//
+// Returns false after writing the error response.
 func (h *DocumentHandler) validateSkipAfterFile(w http.ResponseWriter, fields createFields, staged *service.StagedUpload, stagedSkip bool, part *multipart.Part) bool {
 	if staged == nil || part.FormName() != "skipImageProcessing" {
 		return true
@@ -533,6 +633,11 @@ func (h *DocumentHandler) validateSkipAfterFile(w http.ResponseWriter, fields cr
 	}
 	if skip && !stagedSkip {
 		writeJSONError(w, http.StatusBadRequest, "skipImageProcessing must be sent before the file part")
+		return false
+	}
+	if !skip && stagedSkip {
+		writeJSONError(w, http.StatusBadRequest,
+			"skipImageProcessing contradicts the value the file part was staged under")
 		return false
 	}
 	return true
@@ -618,7 +723,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	input, allowedMimeTypes, maxFileSize, err := buildCreateInput(fields)
+	input, allowedMimeTypes, maxFileSize, err := buildCreateInput(fields, stagedSkip)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -649,10 +754,13 @@ func (h *DocumentHandler) readMetadataField(w http.ResponseWriter, fields *creat
 		return false
 	}
 	if len(b) > maxCreateFieldBytes {
-		writeJSONError(w, http.StatusBadRequest, part.FormName()+" exceeds the 16 KiB field limit")
+		writeJSONError(w, http.StatusBadRequest, sanitizeFieldName(part.FormName())+" exceeds the 16 KiB field limit")
 		return false
 	}
-	fields.set(part.FormName(), string(b))
+	if err := fields.set(part.FormName(), string(b)); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
 	return true
 }
 
@@ -720,7 +828,7 @@ func isClientStreamError(err error) bool {
 // (existing row is authoritative), matching the createDocument contract.
 func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	var body CopyDocumentRequest
-	if !decodeStrictJSON(w, r, &body) {
+	if _, ok := decodeStrictJSON(w, r, &body); !ok {
 		return
 	}
 
@@ -865,6 +973,7 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	// No field carries an effective change — either every key is a no-op
 	// explicit-null (e.g. {"temporaryLocation":null}) or sets a field to its
 	// current value (e.g. {"displayName":"<current name>"}). This is an
@@ -876,32 +985,37 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// no keys) is still a 400 above (len(present) == 0); only keys-present-but-
 	// no-change lands here. Dims come straight off the loaded row's
 	// content_metadata (populated by the sweep-dims job, not lazily here).
-	if applied == 0 {
-		newUpdateDocumentResponse(&doc).Render(w)
-		return
+	//
+	// Both outcomes render the SAME body from one tail call, so the no-write and
+	// the wrote-then-reloaded 200 can never drift in shape.
+	result := &doc
+	if applied > 0 {
+		result, err = h.Service.UpdateDocumentMetadata(r.Context(), doc, meta)
+		if err != nil {
+			h.writeUpdateError(w, err)
+			return
+		}
 	}
 
-	updated, err := h.Service.UpdateDocumentMetadata(r.Context(), doc, meta)
-	if err != nil {
-		if errors.Is(err, service.ErrConflict) {
-			writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
-			return
-		}
-		if errors.Is(err, model.ErrDuplicateKey) {
-			// PATCH never changes externalID, so the collision is not "same
-			// content": with the (externalReference, storageBucketId) index a
-			// move can collide on reference, and the authorizationId unique
-			// constraint can collide on re-attribution. Keep the message
-			// generic rather than naming the wrong cause.
-			writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference or authorization)")
-			return
-		}
+	newUpdateDocumentResponse(result).Render(w)
+}
+
+// writeUpdateError maps an UpdateDocumentMetadata failure to its HTTP response.
+func (h *DocumentHandler) writeUpdateError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrConflict):
+		writeJSONError(w, http.StatusConflict, "document was modified concurrently, retry with fresh version")
+	case errors.Is(err, model.ErrDuplicateKey):
+		// PATCH never changes externalID, so the collision is not "same
+		// content": with the (externalReference, storageBucketId) index a
+		// move can collide on reference, and the authorizationId unique
+		// constraint can collide on re-attribution. Keep the message
+		// generic rather than naming the wrong cause.
+		writeJSONError(w, http.StatusConflict, "update conflicts with an existing document in the destination bucket (duplicate reference or authorization)")
+	default:
 		h.Logger.Error("failed to update document", zap.Error(err))
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
-		return
 	}
-
-	newUpdateDocumentResponse(updated).Render(w)
 }
 
 // decodeAndValidateUpdate decodes the PATCH body, rejects a structurally empty
@@ -966,7 +1080,18 @@ func newUpdateDocumentResponse(doc *model.Document) UpdateDocumentResponse {
 // The 512-byte cap is intentionally tighter than file."displayName"
 // VARCHAR(512), which is character-based in Postgres: capping at bytes
 // guarantees any accepted value fits regardless of UTF-8 expansion.
+//
+// Storability is checked FIRST, and it is the same shared rule externalReference
+// applies — file."displayName" is character data too. Nothing below can stand in
+// for it: `for _, r := range name` DECODES an invalid byte to U+FFFD (> 0x20),
+// so an invalid-UTF-8 name sails past the control-character rule and is only
+// rejected by Postgres on INSERT — a 500 that, on create, lands after the blob
+// is published and orphans it. 013's inbound re-home sends displayName, so this
+// is reachable, and the multipart create path carries arbitrary bytes.
 func validateDisplayName(name string) error {
+	if err := validateStorableText("displayName", name); err != nil {
+		return err
+	}
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("displayName must not be empty or whitespace-only")
 	}
@@ -1061,38 +1186,24 @@ func parseDocID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "id"))
 }
 
+// maxJSONBodyBytes caps every JSON request body (copy, patch). These are small
+// metadata documents; 1 MiB is far above any legitimate one and bounds the
+// io.ReadAll below. Blob content NEVER travels on a JSON path — it is streamed
+// (multipart create, raw PUT) — so this cap is not a file-size limit.
+const maxJSONBodyBytes = 1 << 20
+
 // decodeStrictJSON decodes the request body into dst, rejecting unknown
-// fields and any trailing data after the first JSON object. It reports true
-// on success; on failure it returns false AFTER writing the 400 response
-// itself, so callers must simply return without touching w further.
+// fields and any trailing data after the first JSON object. It reports ok=true
+// on success, returning the RAW body so a caller that must distinguish "key
+// absent" from "key present and null" (the PATCH tri-state fields) can re-scan
+// it without a second decoder implementation. On failure it returns ok=false
+// AFTER writing the error response itself, so callers must simply return
+// without touching w further.
 //
 // DisallowUnknownFields is load-bearing: immutable fields (e.g. mimeType on
 // PATCH) must surface as a 400 rather than silently no-op.
-func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) bool {
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return false
-	}
-	if dec.More() {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
-		return false
-	}
-	return true
-}
-
-// decodeUpdateRequest strict-decodes the PATCH body into dst and returns the
-// set of top-level keys that were actually present, so the handler can tell
-// "field omitted" (keep) from "field explicitly null" (clear) for the
-// tri-state fields. On any malformed input it writes the 400 itself and
-// reports ok=false. Mirrors decodeStrictJSON's unknown-field / trailing-data
-// rejection.
-func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocumentRequest) (present map[string]struct{}, ok bool) {
-	// The PATCH body is a small JSON metadata patch; cap it so io.ReadAll can't
-	// buffer unbounded input. 1 MiB is far above any legitimate patch.
-	const maxPatchBodyBytes = 1 << 20
-	r.Body = http.MaxBytesReader(w, r.Body, maxPatchBodyBytes)
+func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) (raw []byte, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
@@ -1111,6 +1222,20 @@ func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocu
 	}
 	if dec.More() {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: trailing data after first object")
+		return nil, false
+	}
+	return raw, true
+}
+
+// decodeUpdateRequest strict-decodes the PATCH body into dst and returns the
+// set of top-level keys that were actually present, so the handler can tell
+// "field omitted" (keep) from "field explicitly null" (clear) for the
+// tri-state fields. On any malformed input it writes the error response itself
+// and reports ok=false. The decode/size/unknown-field/trailing-data rules are
+// decodeStrictJSON's — this only adds the key-presence scan on top.
+func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocumentRequest) (present map[string]struct{}, ok bool) {
+	raw, ok := decodeStrictJSON(w, r, dst)
+	if !ok {
 		return nil, false
 	}
 	var keys map[string]json.RawMessage
@@ -1271,9 +1396,16 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 // raw is the decoded pointer (nil = explicit JSON null); current is the row's
 // current value. clearable governs whether an explicit null is allowed:
 // authorizationId is NOT clearable (a null/nil UUID orphans the document), so
-// clearable=false rejects both an explicit null and the nil UUID. Returns the
-// resolved value, whether it is an EFFECTIVE change vs current, and a 400-safe
-// error whose message names the field.
+// clearable=false rejects an explicit null. Returns the resolved value, whether
+// it is an EFFECTIVE change vs current, and a 400-safe error naming the field.
+//
+// The nil UUID is rejected as a VALUE on BOTH fields, clearable or not. Clearing
+// is expressed with an explicit JSON null and nothing else: the all-zero UUID is
+// the adapter's SQL-NULL sentinel on the way in and reads back as "no value" on
+// the way out, so accepting it as a value would persist an id that matches no
+// policy and no actor while reporting success to a caller that clearly believed
+// it was supplying one. That is exactly the sentinel leak this branch closed on
+// create and copy, and PATCH must not reopen it.
 func applyReattributeUUID(present bool, raw *string, current *uuid.UUID, clearable bool, field string) (val *uuid.UUID, changed bool, err error) {
 	if !present {
 		return current, false, nil
@@ -1288,7 +1420,7 @@ func applyReattributeUUID(present bool, raw *string, current *uuid.UUID, clearab
 	if err != nil {
 		return current, false, fmt.Errorf("invalid %s", field)
 	}
-	if !clearable && parsed == uuid.Nil {
+	if parsed == uuid.Nil {
 		return current, false, fmt.Errorf("%s cannot be the nil UUID", field)
 	}
 	return &parsed, !equalPtr(&parsed, current), nil
