@@ -475,8 +475,18 @@ func TestCIDNormalize_ConcurrentWriterWinsAndIsCountedSkipped(t *testing.T) {
 		t.Errorf("record is %q@v%d, want the concurrent writer's %q@v6 — the user's change was lost",
 			repo.rows[0].ExternalID, repo.rows[0].Version, replacement)
 	}
-	if len(store.deletes) != 0 {
-		t.Errorf("deleted %v after losing the race; the sweep must not reclaim a blob it did not repoint away from", store.deletes)
+	// The LEGACY blob must survive — the record may still name it, and nothing
+	// entitles the sweep to reclaim a blob it did not repoint away from.
+	if !store.has(legacy) {
+		t.Error("the legacy blob was reclaimed after the sweep lost the race for its record")
+	}
+	// The blob the sweep published for a repoint that then failed is an orphan the
+	// pass created: nothing references it and nothing ever will, because the
+	// concurrent Replace stored different bytes. Leaving it would leak one blob per
+	// lost race across the whole corpus.
+	orphan := ComputeHash([]byte("the old bytes"))
+	if store.has(orphan) {
+		t.Errorf("the blob published for the lost repoint (%s) was left behind", orphan)
 	}
 	if len(sum.NotChanged) != 1 || sum.NotChanged[0].Reason != reasonConcurrentChange {
 		t.Errorf("notChanged = %+v, want one entry with reason %q", sum.NotChanged, reasonConcurrentChange)

@@ -312,6 +312,18 @@ func TestDelete_NotFound(t *testing.T) {
 // fit shapes the typed Create path would not produce.
 func createTestRow(t *testing.T, pool *pgxpool.Pool, rawContentMetadata []byte) (uuid.UUID, string, func()) {
 	t.Helper()
+	docID, _ := uuid.NewV7()
+	externalID := "backfill-test-" + docID.String()[:8]
+	cleanup := seedFileRow(t, pool, docID, externalID, false, rawContentMetadata)
+	return docID, externalID, cleanup
+}
+
+// seedFileRow inserts one `file` row with a caller-chosen externalID and
+// temporary flag, borrowing FK targets from an existing row, and returns its
+// cleanup. Shared by the dimension-backfill and legacy-name sweep tests, which
+// differ only in the two fields their predicates discriminate on.
+func seedFileRow(t *testing.T, pool *pgxpool.Pool, docID uuid.UUID, externalID string, temporary bool, rawContentMetadata []byte) func() {
+	t.Helper()
 	a := New(pool)
 
 	// Need valid FK references — pull from an existing row.
@@ -331,8 +343,6 @@ func createTestRow(t *testing.T, pool *pgxpool.Pool, rawContentMetadata []byte) 
 		t.Skipf("cannot create test auth policy: %v", err)
 	}
 
-	docID, _ := uuid.NewV7()
-	externalID := "backfill-test-" + docID.String()[:8]
 	now := time.Now()
 	doc := model.Document{
 		ID:                docID,
@@ -340,7 +350,7 @@ func createTestRow(t *testing.T, pool *pgxpool.Pool, rawContentMetadata []byte) 
 		MimeType:          "image/png",
 		Size:              123,
 		DisplayName:       "backfill-test.png",
-		TemporaryLocation: false,
+		TemporaryLocation: temporary,
 		StorageBucketID:   uuid.UUID(storageBucketID),
 		AuthorizationID:   authUUID,
 		CreatedDate:       now,
@@ -363,7 +373,7 @@ func createTestRow(t *testing.T, pool *pgxpool.Pool, rawContentMetadata []byte) 
 			t.Fatalf("seed content_metadata: %v", err)
 		}
 	}
-	return docID, externalID, func() {
+	return func() {
 		_, _ = a.Delete(context.Background(), docID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
 	}

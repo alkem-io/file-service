@@ -7,10 +7,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alkem-io/file-service/internal/config"
 	"github.com/alkem-io/file-service/internal/domain/port"
 )
 
-const reservedDir = "_sweep-reports"
+// The production constant, not a copy — a test that asserts a name is
+// collision-proof must assert it about the name production actually uses.
+const reservedDir = ReservedReportDir
 
 // A report is the only surviving record of what an irreversible migration did,
 // so it has to land in the reserved directory — never among the blobs, whose
@@ -143,5 +146,16 @@ func TestReportSink_JournalRejectsNamesThatEscapeTheDirectory(t *testing.T) {
 		if _, err := sink.AppendJournal(name, []byte("x\n")); !errors.Is(err, port.ErrInvalidKey) {
 			t.Errorf("AppendJournal(%q) err = %v, want ErrInvalidKey", name, err)
 		}
+	}
+}
+
+// config declares the reserved directory name independently, because adapters
+// depend on config and not the reverse. That makes drift possible, and drift here
+// means reports written somewhere the collision-proof argument does not cover —
+// so the two spellings are pinned to each other.
+func TestReservedReportDirMatchesConfig(t *testing.T) {
+	if got := config.LoadedSweepCIDsReportDir(); got != ReservedReportDir {
+		t.Errorf("config uses %q, storage reserves %q — reports would land outside the reservation the key rule protects",
+			got, ReservedReportDir)
 	}
 }

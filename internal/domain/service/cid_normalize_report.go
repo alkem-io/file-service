@@ -8,10 +8,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// cidReportSchemaVersion pins the shape defined by
-// specs/018-legacy-cid-normalization/contracts/run-report.schema.json. Reports
-// are retained indefinitely, so a reader may be much newer than the writer —
-// bump this only on a breaking change.
+// cidReportSchemaVersion pins the report shape. The schema itself is a
+// cross-repo artifact and lives in the workspace spec (018-legacy-cid-normalization,
+// contracts/run-report.schema.json in alkem-io/agents-hq), not in this repo — so
+// this is a version, not a path to follow. Reports are retained indefinitely and a
+// reader may be much newer than the writer; bump only on a breaking change.
 const cidReportSchemaVersion = 1
 
 // Report outcomes. "endedEarly" is not a synonym for failure: it means the pass
@@ -45,6 +46,9 @@ type cidRunReport struct {
 	Counts        cidReportCounts    `json:"counts"`
 	Changed       []cidReportChange  `json:"changed"`
 	NotNormalized []cidReportSkipped `json:"notNormalized"`
+	// DetailTruncated says the arrays above are shorter than counts, because the
+	// pass hit its retention ceiling. The journal remains complete.
+	DetailTruncated bool `json:"detailTruncated,omitempty"`
 }
 
 type cidReportCounts struct {
@@ -115,6 +119,7 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 	if sum.Aborted {
 		rep.Outcome = cidOutcomeEndedEarly
 	}
+	rep.DetailTruncated = sum.DetailTruncated
 	for _, c := range sum.Changed {
 		rep.Changed = append(rep.Changed, cidReportChange{
 			FileID:             c.FileID.String(),

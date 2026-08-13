@@ -145,14 +145,13 @@ func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
 }
 
 // legacyNamedRowToDocument maps the sweep's narrow projection. It cannot reuse
-// documentFromRow: the query selects only the five columns the sweep needs, so the
-// remaining fields are deliberately left zero rather than being invented.
+// documentFromRow: the query selects only identity plus the two compare-and-set
+// guard columns, so every other field is deliberately left zero rather than being
+// invented — nothing in the rename reads them.
 func legacyNamedRowToDocument(row queries.ListDocumentsWithLegacyExternalIDRow) model.Document {
 	return model.Document{
 		ID:         pgxToUUID(row.ID),
 		ExternalID: row.ExternalID,
-		MimeType:   row.MimeType,
-		Size:       int(row.Size),
 		Version:    int(row.Version),
 	}
 }

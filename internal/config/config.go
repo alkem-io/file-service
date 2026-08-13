@@ -75,8 +75,10 @@ const (
 	// the person running it can see and reason about it, not in ambient config.
 	defaultSweepCIDsRate = 5.0
 	// sweepCIDsReportDir is the reserved directory (under StoragePath) for run
-	// reports — see SweepCIDsConfig.ReportDir for why this name cannot collide
-	// with a blob.
+	// reports. The name is owned by the local storage adapter, which owns the key
+	// rule that makes it collision-proof; config cannot import that package
+	// (adapters depend on config, not the reverse), so the two are kept in step by
+	// TestSweepCIDsReportDirMatchesTheStorageReservation rather than by hope.
 	sweepCIDsReportDir = "_sweep-reports"
 )
 
@@ -481,3 +483,9 @@ func getenvInt(key string, fallback int) (int, error) {
 	}
 	return n, nil
 }
+
+// LoadedSweepCIDsReportDir exposes the reserved report directory name so the
+// storage adapter — which owns the key rule that makes the name collision-proof —
+// can assert the two have not drifted. Adapters depend on config, not the
+// reverse, so this is the only direction the check can run in.
+func LoadedSweepCIDsReportDir() string { return sweepCIDsReportDir }

@@ -1,0 +1,163 @@
+# One-shot legacy blob-name normalization (018-legacy-cid-normalization). Run MANUALLY to
+# re-address objects written before content addressing: their externalID is an IPFS CID, so
+# SHA3-256 of their bytes can never equal their name, file-backup-service refuses them, and they
+# are therefore UNBACKABLE — data-at-risk (alkem-io/file-service#63, bucket A).
+#
+# It is NOT part of the auto-applied deployment — apply it deliberately, and delete/recreate it to
+# re-run:
+#
+#   # ALWAYS preview first. The real pass is irreversible.
+#   kubectl -n <ns> apply -f 36-file-service-sweep-cids-job.yaml     # args: ["sweep-cids","--dry-run"]
+#   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-cids      # read wouldNormalize / wouldSkip
+#
+#   # then, after confirming the count against an independent query, edit args to drop --dry-run:
+#   #   SELECT count(*) FROM file
+#   #   WHERE "temporaryLocation" IS NOT TRUE AND "externalID" !~ '^[0-9a-f]{64}$';
+#
+# THIS MIGRATION IS IRREVERSIBLE. Each object is republished under the digest of its bytes, its row
+# is repointed with a compare-and-set, and the LEGACY BLOB IS THEN DELETED once nothing references
+# it. There is no undo. What survives is the pair of files the pass writes to
+# <LOCAL_STORAGE_PATH>/_sweep-reports/: a `.ndjson` journal appended and fsynced BEFORE each
+# reclamation, and a `.json` summary written at the end. Retain them — after the pass, they are the
+# only record of the old→new mapping.
+#
+# THREE placeholders are FAIL-CLOSED — the pod will not start / not schedule until you set them, so
+# a verbatim apply can never run the wrong build or the wrong volume:
+#   - image:      pin to the SAME SHA-tag the TARGET namespace's file-service deployment runs. Do
+#                 NOT use :latest. This matters more here than for any other job in this repo: the
+#                 sweep bakes irreversible decisions into the database, so a different build would
+#                 persist a different build's decisions permanently.
+#   - claimName:  MATCH the claimName the TARGET env's file-service deployment mounts — read it
+#                 straight off that deployment, don't guess. Known at time of writing: dev
+#                 file-storage-pvc2 (25-), test file-storage-pvc (26-), prod file-storage-pvc
+#                 (infra-ops base file-service deployment). Pointing at the wrong volume is caught
+#                 by the pre-flight (an empty store aborts the run), but only after scheduling.
+#   - args:       ships as --dry-run. Removing it is the deliberate act that makes the pass real.
+#
+# The subcommand is ABSENT from images at or before v0.2.3 — an older image exits 2 with
+# "unknown command".
+#
+# Ordering: this sweep must run BEFORE the file-backup-service backfill, or that backfill repeats
+# the acceptance mass-failure at production scale. The renamed objects are not enqueued for backup
+# by this pass (it performs no content write and the backup queue is deliberately untouched); the
+# backfill that follows enumerates the `file` table directly and picks them up.
+#
+# Storage is an NFS ReadWriteMany PVC (accessMode declared in dev-orchestration / infra-ops, not in
+# this repo), so the sweep pod can mount it on ANY node. The sweep reads and writes blobs directly
+# from the mounted volume.
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: alkemio-file-service-sweep-cids
+  # DISTINCT app label — deliberately NOT `alkemio-file-service`, so this non-serving pod is never
+  # picked up by the file-service Service selector (30-...-service.yaml selects app:
+  # alkemio-file-service). A sweep pod enrolled as a Service endpoint would refuse the in-cluster
+  # file-service traffic routed to it (it has no HTTP listener).
+  labels:
+    app: alkemio-file-service-sweep-cids
+    component: sweep-cids
+spec:
+  # ZERO retries, unlike sweep-dims. The Job controller restarting an irreversible migration from
+  # the beginning is not a recovery: the pass IS resumable, but resuming it is an operator's
+  # decision made after reading the summary, not something a backoff timer should take. Exit 1
+  # means the pass ended early, a record genuinely failed, or the run report could not be written —
+  # all of which want a person.
+  backoffLimit: 0
+  # Reap the finished Job pod after an hour so a re-run isn't blocked by the old object. The report
+  # and journal live on the PVC, not in the pod, so they outlive this.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      # The POD-template labels are what the file-service Service selects on — must NOT include
+      # app: alkemio-file-service (see the header labels comment).
+      labels:
+        app: alkemio-file-service-sweep-cids
+        component: sweep-cids
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      # Long enough for the in-flight object to finish and the report to be written. The sweep
+      # honours SIGTERM between records AND mid-copy, so a drain ends the pass cleanly rather than
+      # losing the mapping for blobs it already reclaimed.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: alkemio-file-service-sweep-cids
+          # FAIL-CLOSED PLACEHOLDER — replace with the deployment's SHA-tagged image before applying
+          # (see header). Left as-is, the pull fails loudly (ImagePullBackOff) rather than silently
+          # running :latest.
+          image: rg.nl-ams.scw.cloud/alkemio/alkemio-file-service:SET-ME-TO-DEPLOYMENT-SHA
+          imagePullPolicy: Always
+          # Ships SAFE. Drop --dry-run only when you have read the preview and intend the real,
+          # irreversible pass. --rate defaults to a conservative 5 objects/second; raise it only
+          # with a reason, and never to a value that would disturb the serving path.
+          args: ["sweep-cids", "--dry-run"]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ALKEMIO_DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_HOST
+            - name: ALKEMIO_DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: DATABASE_PORT
+            - name: ALKEMIO_DATABASE_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_USER
+            - name: ALKEMIO_DATABASE_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: POSTGRES_PASSWORD
+            - name: ALKEMIO_DATABASE_NAME
+              value: "alkemio"
+            - name: LOCAL_STORAGE_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: alkemio-config
+                  key: LOCAL_STORAGE_PATH
+            - name: STORAGE_TYPE
+              value: "local"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: TMPDIR
+              value: /tmp
+          volumeMounts:
+            - name: file-storage
+              mountPath: /storage
+            # The sweep publishes through the same staging path the upload flow uses, which writes a
+            # temp file before committing under the content hash. Root stays immutable.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # Lower than sweep-dims: this pass decodes nothing and never boots libvips. Blobs are
+              # streamed, so memory does not scale with object size.
+              cpu: 300m
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: file-storage
+          persistentVolumeClaim:
+            # FAIL-CLOSED PLACEHOLDER — set to the TARGET env's file-service PVC before applying
+            # (dev: file-storage-pvc2, test/prod: file-storage-pvc; see header). Left as-is the pod
+            # stays Pending on an unbound claim rather than mounting the wrong env's volume.
+            claimName: set-me-to-env-file-storage-pvc

@@ -311,3 +311,52 @@ func TestVerifySweepStorage(t *testing.T) {
 		}
 	}
 }
+
+// Asking a command for its usage is not a failure. flag.ContinueOnError returns
+// ErrHelp for -h/--help, which is trivially mapped to the same exit code as a
+// malformed invocation unless it is handled.
+func TestSweepCIDsHelpExitsZero(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		if got := runSweepCIDs([]string{arg}); got != 0 {
+			t.Errorf("runSweepCIDs(%q) = %d, want 0", arg, got)
+		}
+	}
+}
+
+// The rate override is parsed before anything connects, which is what makes the
+// whole validation table testable without a database.
+func TestParseSweepRate(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantValue *float64
+		wantErr   bool
+	}{
+		{raw: "", wantValue: nil},              // unset → the built-in default applies
+		{raw: "5", wantValue: floatPtr(5)},     //
+		{raw: "0.5", wantValue: floatPtr(0.5)}, //
+		{raw: "0", wantErr: true},              // never "unlimited"
+		{raw: "-1", wantErr: true},             //
+		{raw: "NaN", wantErr: true},            // every comparison against NaN is false
+		{raw: "Inf", wantErr: true},            //
+		{raw: "-Inf", wantErr: true},           //
+		{raw: "abc", wantErr: true},            // says so precisely rather than silently defaulting
+		{raw: " 5", wantErr: true},             //
+	}
+	for _, c := range cases {
+		got, err := parseSweepRate(c.raw)
+		if (err != nil) != c.wantErr {
+			t.Errorf("parseSweepRate(%q) err = %v, wantErr %v", c.raw, err, c.wantErr)
+			continue
+		}
+		switch {
+		case c.wantValue == nil && got != nil:
+			t.Errorf("parseSweepRate(%q) = %v, want nil (unset)", c.raw, *got)
+		case c.wantValue != nil && got == nil:
+			t.Errorf("parseSweepRate(%q) = nil, want %v", c.raw, *c.wantValue)
+		case c.wantValue != nil && got != nil && *got != *c.wantValue:
+			t.Errorf("parseSweepRate(%q) = %v, want %v", c.raw, *got, *c.wantValue)
+		}
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }

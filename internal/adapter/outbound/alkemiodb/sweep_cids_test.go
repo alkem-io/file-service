@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,49 +11,13 @@ import (
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
 
-// createSweepRow inserts one row with a caller-chosen externalID and temporary
-// flag — the two dimensions ListLegacyNamed's predicate discriminates on
+// createSweepRow seeds one row with a caller-chosen externalID and temporary flag
+// — the two dimensions ListLegacyNamed's predicate discriminates on
 // (018-legacy-cid-normalization).
 func createSweepRow(t *testing.T, pool *pgxpool.Pool, externalID string, temporary bool) (uuid.UUID, func()) {
 	t.Helper()
-	a := New(pool)
-
-	var storageBucketID [16]byte
-	if err := pool.QueryRow(context.Background(),
-		`SELECT "storageBucketId" FROM file WHERE "storageBucketId" IS NOT NULL LIMIT 1`,
-	).Scan(&storageBucketID); err != nil {
-		t.Skipf("no existing storage bucket FK to borrow: %v", err)
-	}
-	authUUID, _ := uuid.NewV7()
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO authorization_policy (id, "credentialRules", "privilegeRules", type, version)
-		 VALUES ($1, '[]', '[]', 'document', 1)`, authUUID,
-	); err != nil {
-		t.Skipf("cannot create test auth policy: %v", err)
-	}
-
 	docID, _ := uuid.NewV7()
-	now := time.Now()
-	doc := model.Document{
-		ID:                docID,
-		ExternalID:        externalID,
-		MimeType:          "image/png",
-		Size:              123,
-		DisplayName:       "sweep-cids-test.png",
-		TemporaryLocation: temporary,
-		StorageBucketID:   uuid.UUID(storageBucketID),
-		AuthorizationID:   authUUID,
-		CreatedDate:       now,
-		UpdatedDate:       now,
-	}
-	if _, err := a.Create(context.Background(), doc, model.ContentMetadata{}); err != nil {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
-		t.Fatalf("create sweep test row: %v", err)
-	}
-	return docID, func() {
-		_, _ = a.Delete(context.Background(), docID)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM authorization_policy WHERE id = $1`, authUUID)
-	}
+	return docID, seedFileRow(t, pool, docID, externalID, temporary, nil)
 }
 
 // listAllLegacy drains the keyset pages so a test can assert on membership
@@ -109,8 +72,8 @@ func TestListLegacyNamed_PredicateScope(t *testing.T) {
 	}
 }
 
-// Only the five columns the sweep needs are projected; the rest stay zero rather
-// than being invented by the mapper.
+// Only what the rename reads is projected; the rest stay zero rather than being
+// invented by the mapper.
 func TestListLegacyNamed_ProjectsOnlyWhatTheSweepNeeds(t *testing.T) {
 	pool := testPool(t)
 	defer pool.Close()
@@ -123,11 +86,14 @@ func TestListLegacyNamed_ProjectsOnlyWhatTheSweepNeeds(t *testing.T) {
 	if !ok {
 		t.Fatal("seeded row not returned")
 	}
-	if doc.ExternalID == "" || doc.MimeType == "" || doc.Size == 0 || doc.Version == 0 {
+	if doc.ExternalID == "" || doc.Version == 0 {
 		t.Errorf("identity/guard fields not populated: %+v", doc)
 	}
-	if doc.DisplayName != "" || !doc.CreatedDate.IsZero() {
-		t.Errorf("unprojected fields were populated: displayName=%q createdDate=%v", doc.DisplayName, doc.CreatedDate)
+	// Everything the rename does not read stays zero — including mimeType and size,
+	// which the sweep deliberately does not consult (the bytes delivered are counted
+	// from the open storage handle, not from the row).
+	if doc.MimeType != "" || doc.Size != 0 || doc.DisplayName != "" || !doc.CreatedDate.IsZero() {
+		t.Errorf("unprojected fields were populated: %+v", doc)
 	}
 }
 

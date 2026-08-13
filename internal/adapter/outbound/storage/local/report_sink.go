@@ -10,19 +10,21 @@ import (
 )
 
 // ReportSink implements port.ReportSink on the same mounted volume as the
-// blobs, but inside a RESERVED subdirectory — never among them.
-//
-// The reservation is safe by construction, not by convention: isValidExternalID
-// accepts only 32–128 alphanumeric characters, so a directory named
-// `_sweep-reports` is disqualified twice over — too short, and `_`/`-` are
-// outside the alphabet. No blob can ever be named this, and no enumeration of
-// the blob namespace can mistake a report for content.
+// blobs, but inside a RESERVED subdirectory — never among them. See
+// ReservedReportDir for why that reservation holds by construction.
 type ReportSink struct {
 	dir string
 	// logf receives non-fatal problems (a directory fsync that failed on a
 	// network mount, say). Nil is fine — the sink works without a logger.
 	logf func(format string, args ...any)
 }
+
+// ReservedReportDir is the directory name reports live under, owned here because
+// this package owns the key rule that makes it safe. isValidExternalID accepts
+// only 32-128 alphanumerics, so this name is disqualified twice over — too short,
+// and `_`/`-` are outside the alphabet — which is why no blob can ever collide
+// with it and no enumeration of the store can mistake a report for content.
+const ReservedReportDir = "_sweep-reports"
 
 // NewReportSink roots a sink at <basePath>/<reservedDir>. The directory is
 // created on first write, so a service that never sweeps never makes it.

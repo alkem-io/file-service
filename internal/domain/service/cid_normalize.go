@@ -7,10 +7,12 @@ import (
 	"io"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
 	"github.com/alkem-io/file-service/internal/domain/port"
@@ -99,6 +101,10 @@ type CIDNormalizeSummary struct {
 	// Aborted means the pass ENDED EARLY (page-scan error or shutdown signal)
 	// rather than exhausting the corpus. Distinct from "completed with failures".
 	Aborted bool
+	// DetailTruncated means the per-record arrays hit their retention ceiling, so
+	// the report lists fewer entries than the counts. The journal is complete
+	// regardless; the report says so explicitly rather than looking short.
+	DetailTruncated bool
 	// ReportFailed means the durable record of this pass could not be written.
 	// It gates the exit code: a pass that destroyed legacy blobs and then lost
 	// the mapping must not read as clean success.
@@ -111,6 +117,32 @@ type CIDNormalizeSummary struct {
 
 	Changed    []CIDNormalizeChange
 	NotChanged []CIDNormalizeNotChanged
+}
+
+// cidRetainedDetailLimit bounds how many per-record entries the summary holds.
+// The corpus size in production is unmeasured, and these arrays are copied again
+// by the report encoder at the very end of the pass — the worst moment to
+// discover the ceiling. Counts stay exact past the limit; only the per-record
+// detail stops accumulating, and it is not the durable record anyway: the
+// fsynced journal carries every mapping, line by line, as the pass runs.
+const cidRetainedDetailLimit = 20_000
+
+// recordChanged / recordNotChanged keep the counters authoritative and the
+// slices bounded, which is why the counters are not derived from len().
+func (sum *CIDNormalizeSummary) recordChanged(c CIDNormalizeChange) {
+	if len(sum.Changed) < cidRetainedDetailLimit {
+		sum.Changed = append(sum.Changed, c)
+		return
+	}
+	sum.DetailTruncated = true
+}
+
+func (sum *CIDNormalizeSummary) recordNotChanged(n CIDNormalizeNotChanged) {
+	if len(sum.NotChanged) < cidRetainedDetailLimit {
+		sum.NotChanged = append(sum.NotChanged, n)
+		return
+	}
+	sum.DetailTruncated = true
 }
 
 // CIDNormalizeOptions configures one pass.
@@ -170,6 +202,10 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 		if len(page) == 0 {
 			break
 		}
+		// A page shorter than the limit is the last one. Looping for an empty page
+		// would cost one more scan of a predicate Postgres cannot index — the
+		// regex is evaluated per row — purely to be told there is nothing left.
+		lastPage := len(page) < cidNormalizePageSize
 		for i := range page {
 			if ctx.Err() != nil {
 				sum.Aborted = true
@@ -188,13 +224,13 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 			// Pacing is per object and applies only to real passes: a dry run does
 			// no per-object store I/O worth throttling, so pacing it would turn a
 			// preview an operator runs before deciding into a long wait.
-			if err := pace.wait(ctx); err != nil {
+			if err := pace.Wait(ctx); err != nil {
 				sum.Aborted = true
 				break
 			}
 			s.normalizeOneCID(ctx, doc, &sum, run)
 		}
-		if sum.Aborted {
+		if sum.Aborted || lastPage {
 			break
 		}
 	}
@@ -219,6 +255,89 @@ type cidRun struct {
 	// journalFailed records that at least one mapping could not be made durable
 	// before its blob was reclaimed.
 	journalFailed bool
+	// published memoizes legacy name → digest within this pass. One legacy blob
+	// commonly backs several records (FR-005), and without this each of them
+	// re-reads the whole blob and re-writes it into a staging file only for
+	// Commit to discard the copy as a dedup hit — K full read+write cycles for
+	// one blob, against the shared production volume this sweep is rate-limited
+	// to protect. A legacy blob cannot change under us mid-pass: a Replace writes
+	// a NEW digest name and leaves the legacy name alone.
+	published map[string]string
+}
+
+// cidDigestMemoLimit bounds the memo so a corpus of unknown size cannot turn a
+// throughput optimization into the memory problem it was meant to avoid. Past the
+// limit the sweep simply republishes, which is correct, just slower.
+const cidDigestMemoLimit = 10_000
+
+func (r *cidRun) digestFor(legacy string) (string, bool) {
+	d, ok := r.published[legacy]
+	return d, ok
+}
+
+func (r *cidRun) rememberDigest(legacy, digest string) {
+	if len(r.published) >= cidDigestMemoLimit {
+		return
+	}
+	if r.published == nil {
+		r.published = make(map[string]string)
+	}
+	r.published[legacy] = digest
+}
+
+// cidCancellableReader makes a long blob copy responsive to shutdown. io.Copy
+// over a plain file reader cannot be interrupted, so without this a SIGTERM
+// arriving mid-blob is absorbed until the copy finishes — and if that outlasts
+// terminationGracePeriodSeconds, kubernetes SIGKILLs the pod, which is the one
+// exit path that skips the end-of-pass report.
+type cidCancellableReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *cidCancellableReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// sha3ExternalID reports whether a name is already in the current addressing
+// scheme — the same test the scan predicate applies, in Go.
+func sha3ExternalID(externalID string) bool {
+	if len(externalID) != 64 {
+		return false
+	}
+	for _, c := range externalID {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// reclaimOrphanPublish drops a blob this pass published for a record that then
+// lost its compare-and-set, when nothing references it.
+//
+// Round one left these leaked, justified by "that digest may be the legitimate
+// home of bytes other records reference". That justification is exactly right in
+// general and exactly wrong in the case it was written for: when the CAS lost to
+// a Replace, the Replace stored DIFFERENT bytes, so the blob we published is
+// referenced by nobody and never will be. The refcount decides which case this
+// is — the same rule that gates every other deletion in the service.
+func (s *FileService) reclaimOrphanPublish(ctx context.Context, published string, doc model.Document) {
+	if published == "" || published == doc.ExternalID {
+		return
+	}
+	remaining, err := s.Repo.CountByExternalID(ctx, published)
+	if err != nil || remaining > 0 {
+		return // referenced, or we cannot tell — leaving a blob costs disk, deleting a live one costs data
+	}
+	if s.cleanupOrphanedBlob(ctx, published) {
+		s.Logger.Info("sweep-cids: dropped a blob published for a record that then lost its compare-and-set",
+			zap.String("documentID", doc.ID.String()),
+			zap.String("externalID", published))
+	}
 }
 
 // previewOneCID is the dry-run per-record step. It probes for the content
@@ -261,16 +380,20 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 				zap.String("externalID", doc.ExternalID),
 				zap.Any("panic", rec))
 			sum.Failed++
-			sum.NotChanged = append(sum.NotChanged, CIDNormalizeNotChanged{
+			sum.recordNotChanged(CIDNormalizeNotChanged{
 				FileID: doc.ID, ExternalID: doc.ExternalID, Reason: reasonWriteFailed,
 				Detail: fmt.Sprintf("panic: %v", rec),
 			})
 		}
 	}()
 
-	newExternalID, ok := s.publishUnderDigest(doc, sum)
+	newExternalID, ok := run.digestFor(doc.ExternalID)
 	if !ok {
-		return
+		newExternalID, ok = s.publishUnderDigest(ctx, doc, sum)
+		if !ok {
+			return
+		}
+		run.rememberDigest(doc.ExternalID, newExternalID)
 	}
 
 	applied, err := s.Repo.NormalizeExternalID(ctx, doc.ID, doc.ExternalID, doc.Version, newExternalID)
@@ -288,14 +411,26 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 		return
 	}
 	if !applied {
-		// A concurrent Replace or promote moved externalID or version between our
-		// read and our write. It wrote a proper digest, so the record is already
-		// correct — retrying would fight a writer that fixed the problem for us.
+		// A concurrent writer moved externalID or version between our read and our
+		// write. Retrying would fight it, so this record is skipped either way — but
+		// the two cases are NOT the same, and claiming "the record is already
+		// correct" is only true for one of them:
 		//
-		// The blob we just published is deliberately NOT deleted: the store is
-		// content-addressed, so that digest may be the legitimate home of bytes
-		// other records reference. Deleting it would destroy live content.
-		s.skipCID(doc, sum, reasonConcurrentChange, "compare-and-set lost to a concurrent writer")
+		//   - a Replace wrote a proper digest, so the row is fixed and leaves the
+		//     work-list;
+		//   - a metadata PATCH bumps `version` WITHOUT touching externalID, so the
+		//     row is still legacy-named and still in scope. It is not lost — it
+		//     matches the predicate, so the next pass picks it up — but a summary
+		//     that called it "already correct" would misreport convergence.
+		//
+		// The distinction costs one read, and it is what makes a re-run's shrinking
+		// count trustworthy.
+		detail := "compare-and-set lost to a concurrent writer"
+		if current, err := s.Repo.GetByID(ctx, doc.ID); err == nil && !sha3ExternalID(current.ExternalID) {
+			detail = "compare-and-set lost to a concurrent metadata write; the record is STILL legacy-named and remains in scope for the next pass"
+		}
+		s.reclaimOrphanPublish(ctx, newExternalID, doc)
+		s.skipCID(doc, sum, reasonConcurrentChange, detail)
 		return
 	}
 
@@ -308,8 +443,8 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 	// Durable BEFORE the bytes are destroyed. Everything after this point can be
 	// reconstructed from the journal if the process dies.
 	s.journalChange(change, run)
-	change.SharedWith, change.LegacyBlob = s.reclaimLegacyBlob(ctx, doc, sum)
-	sum.Changed = append(sum.Changed, change)
+	change.SharedWith, change.LegacyBlob = s.reclaimLegacyBlob(ctx, doc, newExternalID, sum)
+	sum.recordChanged(change)
 }
 
 // publishUnderDigest streams the legacy blob into a staging write and commits
@@ -324,7 +459,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, doc model.Document, s
 // Publishing is idempotent — an existing blob under the same digest is
 // authoritative and Commit reports a dedup hit rather than an error — which is
 // what makes an interrupted pass safe to re-run.
-func (s *FileService) publishUnderDigest(doc model.Document, sum *CIDNormalizeSummary) (string, bool) {
+func (s *FileService) publishUnderDigest(ctx context.Context, doc model.Document, sum *CIDNormalizeSummary) (string, bool) {
 	rc, size, err := s.Storage.ReadStream(doc.ExternalID)
 	if err != nil {
 		switch {
@@ -349,12 +484,12 @@ func (s *FileService) publishUnderDigest(doc model.Document, sum *CIDNormalizeSu
 	}
 	defer func() { _ = rc.Close() }()
 
-	stage, err := s.Storage.OpenStage(context.Background())
+	stage, err := s.Storage.OpenStage(ctx)
 	if err != nil {
 		s.failCID(doc, sum, reasonWriteFailed, "open stage: "+err.Error())
 		return "", false
 	}
-	copied, err := io.Copy(stage, rc)
+	copied, err := io.Copy(stage, &cidCancellableReader{ctx: ctx, r: rc})
 	if err != nil {
 		_ = stage.Abort()
 		s.failCID(doc, sum, reasonReadFailed, "copy to stage: "+err.Error())
@@ -394,7 +529,25 @@ func (s *FileService) publishUnderDigest(doc model.Document, sum *CIDNormalizeSu
 // behind is an unreferenced blob, which costs disk and nothing else. Failing the
 // run for it would make a rerun the operator's only option, and a rerun cannot
 // fix it — the record no longer matches the predicate.
-func (s *FileService) reclaimLegacyBlob(ctx context.Context, doc model.Document, sum *CIDNormalizeSummary) (int, string) {
+func (s *FileService) reclaimLegacyBlob(ctx context.Context, doc model.Document, newExternalID string, sum *CIDNormalizeSummary) (int, string) {
+	// Uppercase hex is one of the legacy forms known to exist on disk (see the
+	// storage adapter's note on the key allow-list), and it matches the scan
+	// predicate because the predicate demands LOWERCASE hex. Its bytes therefore
+	// hash to the same 64 characters in the other case. On a case-sensitive volume
+	// those are two distinct files and reclaiming the old one is right; on a
+	// case-insensitive one they are the SAME file, and deleting the legacy name
+	// would unlink the blob the record was just repointed to — destroying live
+	// content in the name of tidying up. The store gives us no way to ask which
+	// kind of volume it is, so the equal-fold case is simply never reclaimed. The
+	// cost is one retained blob per uppercase-hex record; the alternative cost is
+	// data loss.
+	if strings.EqualFold(doc.ExternalID, newExternalID) {
+		s.Logger.Warn("sweep-cids: legacy name differs from its digest only by case; not reclaiming, since on a case-insensitive volume they are the same file",
+			zap.String("documentID", doc.ID.String()),
+			zap.String("legacyExternalID", doc.ExternalID),
+			zap.String("newExternalID", newExternalID))
+		return 0, legacyBlobRetained
+	}
 	remaining, err := s.Repo.CountByExternalID(ctx, doc.ExternalID)
 	if err != nil {
 		s.Logger.Warn("sweep-cids: reference count failed; leaving the legacy blob in place",
@@ -464,7 +617,7 @@ func (s *FileService) journalChange(c CIDNormalizeChange, run *cidRun) {
 
 func (s *FileService) skipCID(doc model.Document, sum *CIDNormalizeSummary, reason, detail string) {
 	sum.Skipped++
-	sum.NotChanged = append(sum.NotChanged, CIDNormalizeNotChanged{
+	sum.recordNotChanged(CIDNormalizeNotChanged{
 		FileID: doc.ID, ExternalID: doc.ExternalID, Reason: reason, Detail: detail,
 	})
 	fields := []zap.Field{
@@ -482,7 +635,7 @@ func (s *FileService) skipCID(doc model.Document, sum *CIDNormalizeSummary, reas
 
 func (s *FileService) failCID(doc model.Document, sum *CIDNormalizeSummary, reason, detail string) {
 	sum.Failed++
-	sum.NotChanged = append(sum.NotChanged, CIDNormalizeNotChanged{
+	sum.recordNotChanged(CIDNormalizeNotChanged{
 		FileID: doc.ID, ExternalID: doc.ExternalID, Reason: reason, Detail: detail,
 	})
 	s.Logger.Error("sweep-cids: record FAILED to normalize",
@@ -523,71 +676,25 @@ func (s *FileService) logCIDNormalizeSummary(sum CIDNormalizeSummary, run *cidRu
 	}
 }
 
-// pacer bounds throughput to a fixed objects/second ceiling. Each object costs a
-// blob read, a blob write and a database round-trip against SHARED PRODUCTION
-// infrastructure, so an unbounded full-corpus pass would be a self-inflicted
-// load test — the ceiling is what makes the sweep safe to run without a
-// maintenance window (FR-014, FR-015).
+// newPacer bounds throughput to a fixed objects/second ceiling. Each object costs
+// a blob read, a blob write and a database round-trip against SHARED PRODUCTION
+// infrastructure, so an unbounded full-corpus pass would be a self-inflicted load
+// test — the ceiling is what makes the sweep safe to run without a maintenance
+// window (FR-014, FR-015).
 //
-// Deliberately not a token bucket: a bucket permits a burst after any idle
-// stretch, which is precisely the shape of load this is meant to prevent.
-type pacer struct {
-	interval time.Duration
-	next     time.Time
-}
-
-// maxPacerInterval caps the wait one object can impose. float64(time.Second)/rate
-// exceeds int64 for a small enough rate, and converting an out-of-range float to
-// a Duration yields an implementation-defined value rather than an error — so
-// the bound is applied to the float, before the conversion.
-const maxPacerInterval = time.Hour
-
-func newPacer(rate float64) *pacer {
-	// Written as !(rate > 0) rather than rate <= 0 so NaN — for which every
-	// comparison is false — is caught here too, and +Inf is excluded explicitly
-	// because it divides down to a zero interval. The caller rejects both as
-	// well; this layer is what makes a malformed value impossible to read as
-	// "unlimited" even if a future caller forgets.
-	if !(rate > 0) || math.IsInf(rate, 1) {
-		rate = 1
+// burst=1 is deliberate: a larger burst would let the pass bank idle time and then
+// spend it all at once, which is precisely the shape of load this prevents.
+//
+// The rate is normalized before it reaches the limiter. The caller rejects a
+// non-positive or non-finite value, but this is the layer that makes a malformed
+// one impossible to read as "unlimited" even if a future caller forgets — round
+// one of review found exactly that hole in the hand-rolled version this replaces
+// (+Inf divided down to a zero interval).
+func newPacer(objectsPerSecond float64) *rate.Limiter {
+	// !(v > 0) rather than v <= 0 so NaN — for which every comparison is false —
+	// lands here too.
+	if !(objectsPerSecond > 0) || math.IsInf(objectsPerSecond, 1) {
+		objectsPerSecond = 1
 	}
-	nanos := float64(time.Second) / rate
-	if !(nanos < float64(maxPacerInterval)) { // also true for NaN
-		return &pacer{interval: maxPacerInterval}
-	}
-	if interval := time.Duration(nanos); interval > 0 {
-		return &pacer{interval: interval}
-	}
-	// A rate high enough to round the interval down to zero still gets a floor:
-	// a zero interval is an unbounded pass, whatever produced it. An operator who
-	// genuinely asks for a rate this high has effectively asked for no ceiling,
-	// which is their call to make explicitly — it just cannot happen by accident.
-	return &pacer{interval: time.Nanosecond}
-}
-
-// wait blocks until this object's slot, or until ctx is done.
-func (p *pacer) wait(ctx context.Context) error {
-	now := time.Now()
-	if p.next.IsZero() { // first object goes immediately
-		p.next = now.Add(p.interval)
-		return nil
-	}
-	if d := time.Until(p.next); d > 0 {
-		t := time.NewTimer(d)
-		defer t.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-		}
-		now = time.Now()
-	}
-	// Anchor the next slot on the clock, not on when this call returned, so slow
-	// objects are not double-charged; re-anchor if we have fallen behind, so the
-	// sweep never tries to "catch up" with a burst.
-	p.next = p.next.Add(p.interval)
-	if p.next.Before(now) {
-		p.next = now.Add(p.interval)
-	}
-	return nil
+	return rate.NewLimiter(rate.Limit(objectsPerSecond), 1)
 }

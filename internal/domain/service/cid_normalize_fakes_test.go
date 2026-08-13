@@ -59,6 +59,11 @@ type cidRepo struct {
 
 	normalizeApplied int
 	countCalls       int
+	normalizeCalls   int
+	// normalizeErr, when set, is what the compare-and-set returns instead of
+	// evaluating the guard — used to inject a duplicate-key or a dead database.
+	normalizeErr error
+	countErr     error
 }
 
 var _ port.DocumentRepo = (*cidRepo)(nil)
@@ -107,7 +112,6 @@ func (r *cidRepo) ListLegacyNamed(_ context.Context, after uuid.UUID, limit int3
 // still carries the externalID and version the sweep read.
 func (r *cidRepo) NormalizeExternalID(_ context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
 	r.normalizeCalls++
-	r.lastNormalize = normalizeCall{ID: id, Expected: expectedExternalID, Version: expectedVersion, New: newExternalID}
 	if r.beforeNormalize != nil {
 		r.beforeNormalize(r, id)
 	}
@@ -125,6 +129,16 @@ func (r *cidRepo) NormalizeExternalID(_ context.Context, id uuid.UUID, expectedE
 		r.afterNormalize(r, id)
 	}
 	return true, nil
+}
+
+// GetByID reads back from the same rows the CAS writes, so a test can observe what
+// a concurrent writer actually left behind rather than the embedded mock's zero value.
+func (r *cidRepo) GetByID(_ context.Context, id uuid.UUID) (model.Document, error) {
+	row := r.row(id)
+	if row == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return model.Document{ID: row.ID, ExternalID: row.ExternalID, Version: row.Version}, nil
 }
 
 // CountByExternalID counts every row naming the blob, temporary ones included —
@@ -159,6 +173,8 @@ type cidStore struct {
 
 	created []string // names published for the first time (dedup hits excluded)
 	deletes []string
+	reads   map[string]int // per-name ReadStream calls, to prove a shared blob is read once
+	stages  int            // staging writes opened
 
 	// afterCommit / afterDelete observe the instants between the sweep's three
 	// steps, which is where the "no record ever names an absent blob" invariant
@@ -170,7 +186,7 @@ type cidStore struct {
 var _ port.StoragePort = (*cidStore)(nil)
 
 func newCIDStore() *cidStore {
-	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, shortRead: map[string]int{}}
+	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, shortRead: map[string]int{}, reads: map[string]int{}}
 }
 
 func (s *cidStore) put(name string, content []byte) { s.blobs[name] = content }
@@ -199,6 +215,7 @@ func (s *cidStore) Read(externalID string) ([]byte, error) {
 }
 
 func (s *cidStore) ReadStream(externalID string) (io.ReadCloser, int64, error) {
+	s.reads[externalID]++
 	b, err := s.Read(externalID)
 	if err != nil {
 		return nil, 0, err
@@ -229,6 +246,7 @@ func (s *cidStore) OpenStage(_ context.Context) (port.StageWriter, error) {
 	if s.openStageErr != nil {
 		return nil, s.openStageErr
 	}
+	s.stages++
 	return &cidStage{store: s}, nil
 }
 

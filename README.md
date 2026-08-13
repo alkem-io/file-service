@@ -146,16 +146,45 @@ content Replace or a temporary→permanent promotion wins and the sweep skips.
   every serve-pod boot; `sweep-dims` on its next Job). Sequencing them is therefore an
   efficiency choice, not a correctness requirement — which matters, because MIME repair
   starts whenever a pod boots and no operator controls that.
-- `--rate` bounds objects/second (default: a conservative built-in). A non-positive
-  value is rejected rather than read as "unlimited".
-- Exit `1` means the pass ended early **or** a record genuinely failed; a record whose
-  content is absent is a legitimate skip and never fails the run.
+- `--rate` bounds objects/second (default: a conservative built-in `5`). Anything that is
+  not a positive, finite number is rejected rather than read as "unlimited" — `NaN` and
+  `Inf` parse successfully and would otherwise slip through.
+- **No positional arguments.** The flag parser stops at the first non-flag operand, so
+  `sweep-cids prod --dry-run` would parse cleanly with `--dry-run` silently dropped. Any
+  positional argument exits `2`.
+- Exit `1` means the pass ended early, a record genuinely failed, the run report could not
+  be written, or the content store failed the pre-flight. A record whose content is absent
+  is a legitimate skip and never fails the run.
+- A pass whose store is **missing or empty refuses to run**: an unmounted volume makes
+  every read look like permanently-absent content, which would otherwise exit `0` and brand
+  the whole corpus unrecoverable in the one durable record of the migration.
+- **Every affected object's ETag changes.** The public read path derives the validator from
+  the blob name, so renaming the cohort invalidates every cached and CDN copy of content
+  whose bytes never changed. Expect revalidation traffic proportional to how much of the
+  cohort is hot; `--rate` bounds the sweep's own load, not the cache churn that follows.
+- **The renamed objects are not enqueued for backup by this pass.** It performs no content
+  write, so it never touches the backup queue. Making them backable is the point; backing
+  them up is the `file-backup-service` backfill that runs *after* this sweep and enumerates
+  the `file` table directly. Run the sweep first — a backfill before it repeats the
+  acceptance mass-failure at production scale.
+- **One pre-existing race is narrowed, not closed.** Reclamation counts references and then
+  deletes; a copy that read its source row before the repoint can insert a row naming the
+  legacy blob inside that window. The standing fix for that class is atomic GC. The sweep
+  re-reads the count after deleting and logs loudly if a reference appeared — and the bytes
+  stay recoverable under the new digest on the journal line above.
 - Each real pass writes a JSON **run report** to `<LOCAL_STORAGE_PATH>/_sweep-reports/`,
   recording the previous and new name of every record it changed. Since the legacy blob
   is gone afterwards, this is the only way to reconstruct the mapping. The reserved
   directory name is one the store's key rules can never produce, so no enumeration of
   the store can mistake a report for content. The absolute path is the last line the
-  Job logs.
+  Job logs. Alongside it, a `.ndjson` **journal** records each mapping *before* the blob
+  it names is reclaimed, so a pass killed mid-corpus still leaves a complete record of
+  everything it destroyed. A run that cannot write either **exits 1**.
+
+An in-repo Job manifest ships at `manifests/36-file-service-sweep-cids-job.yaml`. It ships
+with `--dry-run` set and three fail-closed placeholders (image, PVC claim, and the flag
+itself), so a verbatim apply can never run the irreversible pass against the wrong build
+or the wrong volume.
 
 ## Development
 

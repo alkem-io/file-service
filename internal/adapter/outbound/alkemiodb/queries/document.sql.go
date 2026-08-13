@@ -261,7 +261,7 @@ func (q *Queries) ListDocumentsByMimeTypes(ctx context.Context, dollar_1 []strin
 }
 
 const listDocumentsWithLegacyExternalID = `-- name: ListDocumentsWithLegacyExternalID :many
-SELECT id, "externalID", "mimeType", size, version
+SELECT id, "externalID", version
 FROM file
 WHERE "temporaryLocation" IS NOT TRUE
   AND "externalID" !~ '^[0-9a-f]{64}$'
@@ -278,8 +278,6 @@ type ListDocumentsWithLegacyExternalIDParams struct {
 type ListDocumentsWithLegacyExternalIDRow struct {
 	ID         pgtype.UUID `json:"id"`
 	ExternalID string      `json:"externalID"`
-	MimeType   string      `json:"mimeType"`
-	Size       int32       `json:"size"`
 	Version    int32       `json:"version"`
 }
 
@@ -307,6 +305,11 @@ type ListDocumentsWithLegacyExternalIDRow struct {
 // pages so a multi-hour pass cannot pin a connection or hold back xmin on the shared
 // production database. Resumability is implicit — a re-run re-derives the work-list and
 // already-normalized rows no longer match.
+// Projects only what the sweep reads: identity plus the two compare-and-set guard
+// columns. It deliberately does NOT select "mimeType" or size — the rename does not
+// consult them, and the number of bytes actually delivered is taken from the open
+// storage handle rather than from the row, since a legacy row's recorded size is
+// exactly the kind of metadata this cohort's unknown history makes untrustworthy.
 func (q *Queries) ListDocumentsWithLegacyExternalID(ctx context.Context, arg ListDocumentsWithLegacyExternalIDParams) ([]ListDocumentsWithLegacyExternalIDRow, error) {
 	rows, err := q.db.Query(ctx, listDocumentsWithLegacyExternalID, arg.ID, arg.Limit)
 	if err != nil {
@@ -316,13 +319,7 @@ func (q *Queries) ListDocumentsWithLegacyExternalID(ctx context.Context, arg Lis
 	items := []ListDocumentsWithLegacyExternalIDRow{}
 	for rows.Next() {
 		var i ListDocumentsWithLegacyExternalIDRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.ExternalID,
-			&i.MimeType,
-			&i.Size,
-			&i.Version,
-		); err != nil {
+		if err := rows.Scan(&i.ID, &i.ExternalID, &i.Version); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

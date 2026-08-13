@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -295,9 +296,15 @@ func runSweepCIDs(args []string) int {
 	fs := flag.NewFlagSet("sweep-cids", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false,
 		"enumerate and report the affected count, changing nothing at all")
-	rate := fs.Float64("rate", 0,
-		"objects/second ceiling (default: the conservative built-in rate)")
+	// A string rather than a float so "unset" is representable. The empty default
+	// distinguishes "no --rate given" from "--rate 0" without inspecting which
+	// flags the parser visited, and it lets a malformed value say so precisely.
+	rate := fs.String("rate", "",
+		"objects/second ceiling, a positive finite number (default: the conservative built-in rate)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0 // asking for usage is not a failure
+		}
 		return 2 // invalid flags — same class as an unknown subcommand
 	}
 	// Go's flag parser STOPS at the first non-flag operand, so `sweep-cids prod --dry-run`
@@ -312,21 +319,14 @@ func runSweepCIDs(args []string) int {
 		return 2
 	}
 
-	// `--rate` left unset is a different thing from `--rate 0`, so the two are told apart by
-	// whether the flag was actually given.
-	rateSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "rate" {
-			rateSet = true
-		}
-	})
 	// Rejected rather than read as "unlimited": each object costs a blob read, a blob write and a
 	// DB round-trip against shared production infrastructure, so an unbounded pass is a
-	// self-inflicted load test (FR-015). Written as !(v > 0) so NaN — for which every comparison
-	// is false — is rejected too; ParseFloat accepts "NaN" and "Inf", and either would collapse
-	// the pacing interval to zero AND make the run report unencodable.
-	if rateSet && (!(*rate > 0) || math.IsInf(*rate, 0)) {
-		fmt.Fprintf(os.Stderr, "file-service: --rate must be a positive, finite number (got %v); it bounds load on shared production infrastructure and has no 'unlimited' setting\n", *rate)
+	// self-inflicted load test (FR-015). ParseFloat accepts "NaN" and "Inf"; either would stop
+	// the limiter bounding anything AND make the run report unencodable, so both are refused —
+	// !(v > 0) rather than v <= 0, because every comparison against NaN is false.
+	parsedRate, err := parseSweepRate(*rate)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "file-service: %v\n", err)
 		return 2
 	}
 
@@ -350,11 +350,11 @@ func runSweepCIDs(args []string) int {
 	}
 
 	effectiveRate := base.cfg.SweepCIDs.DefaultRate
-	if rateSet {
-		effectiveRate = *rate
+	if parsedRate != nil {
+		effectiveRate = *parsedRate
 	}
 
-	fileSvc := buildFileService(base.pool, nil, base.cfg, logger)
+	fileSvc := buildSweepCIDsService(base.pool, base.cfg, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -374,6 +374,43 @@ func runSweepCIDs(args []string) int {
 		Report: sink,
 	})
 	return cidsJobExitCode(sum)
+}
+
+// parseSweepRate turns the --rate flag into an override, or nil when it was not given.
+func parseSweepRate(raw string) (*float64, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return nil, fmt.Errorf("--rate %q is not a number", raw)
+	}
+	if !(v > 0) || math.IsInf(v, 0) {
+		return nil, fmt.Errorf("--rate must be a positive, finite number (got %v); it bounds load on shared production infrastructure and has no 'unlimited' setting", v)
+	}
+	return &v, nil
+}
+
+// buildSweepCIDsService wires only what the legacy-name sweep touches: the repository,
+// the blob store, and — when the backup producer is on — the outbox, so reclaiming a blob
+// drops its pending hints exactly as every other deletion does.
+//
+// It deliberately does NOT go through buildFileService, whose first act is to start
+// libvips and configure its streaming knobs. This sweep decodes nothing: it copies bytes
+// and renames rows. Booting an image library in a one-shot Job that will never call it
+// costs startup time and memory in a process whose whole job is to be gentle on shared
+// production infrastructure, and it makes the Job fail for reasons unrelated to its work.
+func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.Logger) *service.FileService {
+	repo := alkemiodb.NewWithLogger(pool, logger)
+	svc := &service.FileService{
+		Repo:    repo,
+		Storage: local.New(cfg.StoragePath),
+		Logger:  logger,
+	}
+	if cfg.BackupOutbox.Enabled {
+		svc.Outbox = repo
+	}
+	return svc
 }
 
 // verifySweepStorage checks the content store is actually there before an irreversible pass reads

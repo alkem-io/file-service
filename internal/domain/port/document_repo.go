@@ -18,10 +18,11 @@ type DocumentRepo interface {
 	// lowercase SHA3-256 hex digest (018-legacy-cid-normalization). `after` is the
 	// exclusive id cursor; pass uuid.Nil for the first page.
 	//
-	// Only ID, ExternalID, MimeType, Size and Version are populated — the sweep
-	// needs the identity, the bytes' whereabouts and the compare-and-set guard,
-	// nothing else. Rows still flagged temporary are excluded: in a cohort this
-	// old such a row is orphaned residue, not an upload in flight.
+	// Only ID, ExternalID and Version are populated — the identity, the bytes'
+	// whereabouts, and the compare-and-set guard. Nothing else is read by the
+	// rename, so nothing else is selected. Rows still flagged temporary are
+	// excluded: in a cohort this old such a row is orphaned residue, not an
+	// upload in flight.
 	ListLegacyNamed(ctx context.Context, after uuid.UUID, limit int32) ([]model.Document, error)
 	// NormalizeExternalID repoints one row from its legacy name to newExternalID
 	// under a compare-and-set on (id, expectedExternalID, expectedVersion), and

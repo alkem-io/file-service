@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -352,8 +353,9 @@ func TestCIDNormalize_ReportRecordsWhatBecameOfEachLegacyBlob(t *testing.T) {
 }
 
 // NaN defeats every ordinary bound because all comparisons against it are false.
-// If one reached the pacer it would collapse the interval to zero — an unbounded
-// pass against shared production storage.
+// If one reached the limiter it would stop bounding anything — round one of review
+// found exactly that hole in the hand-rolled pacer this replaces, where +Inf
+// divided down to a zero interval.
 func TestNewPacer_BoundsPathologicalRates(t *testing.T) {
 	cases := []struct {
 		name string
@@ -364,18 +366,54 @@ func TestNewPacer_BoundsPathologicalRates(t *testing.T) {
 		{"NaN", math.NaN()},
 		{"positive infinity", math.Inf(1)},
 		{"negative infinity", math.Inf(-1)},
-		{"vanishingly small (would overflow the interval)", 1e-12},
+		{"vanishingly small", 1e-12},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p := newPacer(c.rate)
-			if p.interval <= 0 {
-				t.Errorf("interval = %v for rate %v — a non-positive interval is an unbounded pass", p.interval, c.rate)
+			lim := float64(p.Limit())
+			if !(lim > 0) || math.IsInf(lim, 0) {
+				t.Errorf("limit = %v for rate %v — that is not a bound", lim, c.rate)
 			}
-			if p.interval > maxPacerInterval {
-				t.Errorf("interval = %v for rate %v, want at most %v", p.interval, c.rate, maxPacerInterval)
+			if p.Burst() != 1 {
+				t.Errorf("burst = %d, want 1 — a larger burst lets the pass bank idle time and spend it at once",
+					p.Burst())
 			}
 		})
+	}
+}
+
+// The ceiling has to actually throttle, not merely exist. Asserted as a lower
+// bound on elapsed time, so a slow machine can never make it flaky.
+func TestNewPacer_ActuallyThrottles(t *testing.T) {
+	const perSecond = 50.0
+	const objects = 5
+
+	p := newPacer(perSecond)
+	start := time.Now()
+	for i := 0; i < objects; i++ {
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	}
+	// burst=1 lets the first object through immediately; the remaining four are paced.
+	want := time.Duration(float64(objects-1) / perSecond * float64(time.Second))
+	if elapsed := time.Since(start); elapsed < want*8/10 {
+		t.Errorf("%d objects at %v/s took %v, want at least ~%v — the rate ceiling is not throttling",
+			objects, perSecond, elapsed, want)
+	}
+}
+
+// Shutdown must be honoured while waiting for a slot, not only between records.
+func TestNewPacer_WaitHonoursCancellation(t *testing.T) {
+	p := newPacer(0.01) // one object per 100s: the wait will not complete on its own
+	if err := p.Wait(context.Background()); err != nil {
+		t.Fatalf("first Wait should pass immediately (burst=1): %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.Wait(ctx); err == nil {
+		t.Error("Wait ignored a cancelled context — SIGTERM would not be honoured mid-pace")
 	}
 }
 
@@ -403,5 +441,158 @@ func TestCIDNormalize_AbsentStoreLooksExactlyLikeAConvergedCorpus(t *testing.T) 
 		if n.Reason != reasonContentAbsent {
 			t.Errorf("reason = %q, want %q", n.Reason, reasonContentAbsent)
 		}
+	}
+}
+
+// Uppercase hex is one of the legacy forms known to exist on disk, and it matches
+// the scan predicate precisely because the predicate demands LOWERCASE hex. Its
+// bytes therefore hash to the same 64 characters in the other case — the same file
+// on a case-insensitive volume, so reclaiming the legacy name would unlink the blob
+// the record was just repointed to.
+func TestCIDNormalize_NeverReclaimsANameThatDiffersOnlyByCase(t *testing.T) {
+	content := []byte("bytes whose digest differs from the legacy name only in case")
+	digest := ComputeHash(content)
+	legacy := strings.ToUpper(digest)
+
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1})
+	store := newCIDStore()
+	store.put(legacy, content)
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if sum.Normalized != 1 {
+		t.Fatalf("normalized = %d, want 1 — an uppercase-hex name is still a legacy name", sum.Normalized)
+	}
+	if repo.rows[0].ExternalID != digest {
+		t.Errorf("record names %q, want the lowercase digest %q", repo.rows[0].ExternalID, digest)
+	}
+	if len(store.deletes) != 0 {
+		t.Errorf("deleted %v — on a case-insensitive volume that is the very blob the record now names", store.deletes)
+	}
+	if sum.Changed[0].LegacyBlob != legacyBlobRetained {
+		t.Errorf("legacyBlob = %q, want %q so the report says the blob is still on disk",
+			sum.Changed[0].LegacyBlob, legacyBlobRetained)
+	}
+}
+
+// The CAS also loses to writers that bump `version` without touching `externalID` —
+// a metadata PATCH. Calling that "already correct" would misreport convergence: the
+// row is still legacy-named and still in scope.
+func TestCIDNormalize_DistinguishesAMetadataRaceFromAContentRace(t *testing.T) {
+	t.Run("content replace leaves the row correctly addressed", func(t *testing.T) {
+		repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmContentRaceContentRaceContentRa", Version: 1})
+		store := newCIDStore()
+		store.put(repo.rows[0].ExternalID, []byte("payload"))
+		repo.beforeNormalize = func(r *cidRepo, id uuid.UUID) {
+			row := r.row(id)
+			row.ExternalID = ComputeHash([]byte("what the user uploaded instead"))
+			row.Version++
+		}
+
+		sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+		if got := sum.NotChanged[0].Detail; strings.Contains(got, "STILL legacy-named") {
+			t.Errorf("detail = %q, but the concurrent write left a proper digest", got)
+		}
+	})
+
+	t.Run("metadata patch leaves the row still legacy-named", func(t *testing.T) {
+		repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmMetadataRaceMetadataRaceMetada", Version: 1})
+		store := newCIDStore()
+		store.put(repo.rows[0].ExternalID, []byte("payload"))
+		// A PATCH bumps version and touches nothing else.
+		repo.beforeNormalize = func(r *cidRepo, id uuid.UUID) { r.row(id).Version++ }
+
+		sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+		if sum.Skipped != 1 || sum.Failed != 0 {
+			t.Fatalf("skipped=%d failed=%d, want 1/0", sum.Skipped, sum.Failed)
+		}
+		if got := sum.NotChanged[0].Detail; !strings.Contains(got, "STILL legacy-named") {
+			t.Errorf("detail = %q, want it to say the record remains in scope — a summary claiming it is already correct misreports convergence", got)
+		}
+		// And it must genuinely still be in scope for the next pass.
+		page, _ := repo.ListLegacyNamed(context.Background(), uuid.Nil, 10)
+		if len(page) != 1 {
+			t.Errorf("the record left the work-list despite never being renamed")
+		}
+	})
+}
+
+// A legacy blob backing K records must be read and re-written ONCE, not K times —
+// every extra cycle is load on the shared volume the rate ceiling exists to protect.
+func TestCIDNormalize_SharedBlobIsReadAndRepublishedOnce(t *testing.T) {
+	const legacy = "QmMemoMemoMemoMemoMemoMemoMemoMem"
+	repo := newCIDRepo(
+		&cidRow{ID: cidUUID(1), ExternalID: legacy, Version: 1},
+		&cidRow{ID: cidUUID(2), ExternalID: legacy, Version: 1},
+		&cidRow{ID: cidUUID(3), ExternalID: legacy, Version: 1},
+	)
+	store := newCIDStore()
+	store.put(legacy, []byte("one blob, three records"))
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if sum.Normalized != 3 {
+		t.Fatalf("normalized = %d, want 3", sum.Normalized)
+	}
+	if store.reads[legacy] != 1 {
+		t.Errorf("read the shared legacy blob %d times, want 1 — the other reads are pure waste against a shared production volume",
+			store.reads[legacy])
+	}
+	if store.stages != 1 {
+		t.Errorf("opened %d staging writes, want 1 — the rest would be written only for Commit to discard them as dedup hits",
+			store.stages)
+	}
+}
+
+// The loop must not pay for one more scan of a predicate Postgres cannot index just
+// to be told the corpus is exhausted.
+func TestCIDNormalize_DoesNotScanPastTheLastShortPage(t *testing.T) {
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmOnePageOnePageOnePageOnePageOn", Version: 1})
+	store := newCIDStore()
+	store.put(repo.rows[0].ExternalID, []byte("payload"))
+
+	newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
+
+	if repo.listCalls != 1 {
+		t.Errorf("issued %d page scans for a single short page, want 1", repo.listCalls)
+	}
+}
+
+// A blob copy that ignores cancellation absorbs SIGTERM until it finishes; if that
+// outlasts the grace period kubernetes SIGKILLs the pod, which is the one exit path
+// that skips the end-of-pass report.
+func TestCIDNormalize_CopyHonoursCancellationMidBlob(t *testing.T) {
+	repo := newCIDRepo(&cidRow{ID: cidUUID(1), ExternalID: "QmCancelCancelCancelCancelCancel", Version: 1})
+	store := newCIDStore()
+	store.put(repo.rows[0].ExternalID, []byte("payload"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sum := newCIDSweep(repo, store).RunCIDNormalize(ctx, cidOpts(nil))
+
+	if sum.Normalized != 0 {
+		t.Errorf("normalized %d records under a cancelled context", sum.Normalized)
+	}
+	if !sum.Aborted {
+		t.Error("a cancelled pass did not report Aborted")
+	}
+}
+
+// The per-record arrays are a convenience copy; the journal is the durable record.
+// A report that lists fewer entries than its counts must say so rather than look
+// like a shorter pass than actually ran.
+func TestCIDNormalize_TruncatedDetailIsDeclared(t *testing.T) {
+	sum := CIDNormalizeSummary{}
+	for i := 0; i < cidRetainedDetailLimit+5; i++ {
+		sum.recordChanged(CIDNormalizeChange{PreviousExternalID: "Qm", NewExternalID: "ab"})
+	}
+	if len(sum.Changed) != cidRetainedDetailLimit {
+		t.Errorf("retained %d entries, want the ceiling of %d", len(sum.Changed), cidRetainedDetailLimit)
+	}
+	if !sum.DetailTruncated {
+		t.Error("hit the ceiling without declaring truncation — the report would read as a shorter pass")
 	}
 }
