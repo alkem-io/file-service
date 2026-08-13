@@ -70,48 +70,25 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 	return rowToDocument(row), nil
 }
 
-// ListLegacyNamed implements port.DocumentRepo's legacy-name scan (018). The
-// predicate and the keyset paging live in the query; this only maps the row.
-func (a *Adapter) ListLegacyNamed(ctx context.Context, after uuid.UUID, limit int32) ([]model.Document, error) {
-	rows, err := a.queries.ListDocumentsWithLegacyExternalID(ctx, queries.ListDocumentsWithLegacyExternalIDParams{
-		ID:    uuidToPgx(after),
-		Limit: limit,
-	})
-	if err != nil {
-		return nil, err
-	}
-	docs := make([]model.Document, 0, len(rows))
-	for _, row := range rows {
-		docs = append(docs, legacyNamedRowToDocument(row))
-	}
-	return docs, nil
-}
-
-// NormalizeExternalID implements port.DocumentRepo's compare-and-set rename (018).
-// Zero rows affected is NOT an error: it means a concurrent Replace or promotion
-// won the race, which the sweep treats as a skip.
+// RenameExternalID implements port.DocumentRepo's blob rename (018).
 //
 // A unique violation maps to model.ErrDuplicateKey, exactly as Create and UpdateFile
-// do. It is reachable here: the legacy row's bytes may dedup onto a digest another row
-// in the SAME bucket already carries (the same asset uploaded before and after the
-// addressing migration), and the production schema can carry a
-// (externalID, storageBucketId) uniqueness constraint this repo's DDL does not show.
-// Letting the raw driver error through would classify a permanent, rerun-proof
-// collision as a transient write failure.
-func (a *Adapter) NormalizeExternalID(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
-	rows, err := a.queries.NormalizeDocumentExternalID(ctx, queries.NormalizeDocumentExternalIDParams{
-		ID:           uuidToPgx(id),
-		ExternalID:   expectedExternalID,
-		Version:      safeInt32(expectedVersion),
+// do: the legacy blob's bytes may dedup onto a digest another row in the same bucket
+// already carries, and the production schema can carry a (externalID, storageBucketId)
+// constraint this repo's DDL does not show. Letting the raw driver error through would
+// classify a permanent, rerun-proof collision as a transient write failure.
+func (a *Adapter) RenameExternalID(ctx context.Context, oldExternalID, newExternalID string) (int64, error) {
+	rows, err := a.queries.RenameExternalID(ctx, queries.RenameExternalIDParams{
+		ExternalID:   oldExternalID,
 		ExternalID_2: newExternalID,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
-			return false, model.ErrDuplicateKey
+			return 0, model.ErrDuplicateKey
 		}
-		return false, err
+		return 0, err
 	}
-	return rows > 0, nil
+	return rows, nil
 }
 
 // FindByExternalIDAndBucket implements port.DocumentRepo's dedup lookup.

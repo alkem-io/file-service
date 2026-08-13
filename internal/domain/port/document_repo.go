@@ -13,27 +13,12 @@ type DocumentRepo interface {
 	// GetByID fetches the full document row. Returns
 	// model.ErrDocumentNotFound when no row has this id.
 	GetByID(ctx context.Context, id uuid.UUID) (model.Document, error)
-	// ListLegacyNamed returns one keyset-paged page of PERMANENT rows whose
-	// externalID is not the current content-addressing scheme — i.e. not a
-	// lowercase SHA3-256 hex digest (018-legacy-cid-normalization). `after` is the
-	// exclusive id cursor; pass uuid.Nil for the first page.
-	//
-	// Only ID, ExternalID and Version are populated — the identity, the bytes'
-	// whereabouts, and the compare-and-set guard. Nothing else is read by the
-	// rename, so nothing else is selected. Rows still flagged temporary are
-	// excluded: in a cohort this old such a row is orphaned residue, not an
-	// upload in flight.
-	ListLegacyNamed(ctx context.Context, after uuid.UUID, limit int32) ([]model.Document, error)
-	// NormalizeExternalID repoints one row from its legacy name to newExternalID
-	// under a compare-and-set on (id, expectedExternalID, expectedVersion), and
-	// bumps version. It deliberately leaves mimeType, size, content_metadata and
-	// updatedDate alone — the bytes are unchanged, so this is a rename, not an
-	// edit.
-	//
-	// The bool reports whether the write APPLIED. false with a nil error means a
-	// concurrent Replace or promotion moved the row between the sweep's read and
-	// this write; that writer wins and the sweep must skip the row, never retry.
-	NormalizeExternalID(ctx context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error)
+	// RenameExternalID repoints EVERY row naming oldExternalID to newExternalID and
+	// returns how many moved. Guarded solely on the old name: a row whose content
+	// was replaced concurrently already carries a different name, so it does not
+	// match and the user's write survives. Zero rows is not an error — it means
+	// another writer got there first.
+	RenameExternalID(ctx context.Context, oldExternalID, newExternalID string) (int64, error)
 	// FindByExternalIDAndBucket looks up the row matching a content hash
 	// within one bucket — the (externalID, storageBucketID) pair that backs
 	// per-bucket dedup. Returns model.ErrDocumentNotFound when the bucket

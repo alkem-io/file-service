@@ -50,12 +50,7 @@ type mockDocRepo struct {
 	backfillErr            error
 }
 
-func (m *mockDocRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
-	return nil, nil
-}
-func (m *mockDocRepo) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
-	return false, nil
-}
+func (m *mockDocRepo) RenameExternalID(context.Context, string, string) (int64, error) { return 0, nil }
 
 func (m *mockDocRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	m.getByIDCalls++
@@ -194,7 +189,12 @@ func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
 	}
 	return io.NopCloser(bytes.NewReader(m.data)), int64(len(m.data)), nil
 }
-func (m *mockStorage) Delete(_ string) error         { return nil }
+func (m *mockStorage) Delete(_ string) error          { return nil }
+func (m *mockStorage) Link(_, _ string) (bool, error) { return true, nil }
+func (m *mockStorage) Park(_ string) (string, error)  { return "", nil }
+func (m *mockStorage) ListLegacyNamed(_ string, _ int) ([]string, string, error) {
+	return nil, "", nil
+}
 func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
 func TestPublicHandler_Authorized(t *testing.T) {

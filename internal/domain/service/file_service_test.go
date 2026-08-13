@@ -26,6 +26,10 @@ func (f *faultyReadCloser) Close() error             { return nil }
 // --- Mocks ---
 
 type mockRepo struct {
+	// 018 blob-oriented sweep: rows the rename reports as moved.
+	renameRows   int64
+	normalizeErr error
+
 	doc           model.Document
 	getErr        error
 	findDoc       *model.Document // nil means "not found"
@@ -78,12 +82,9 @@ var _ port.DocumentRepo = (*mockRepo)(nil)
 // The 018 sweep methods exist here only to satisfy port.DocumentRepo. Every sweep
 // test drives the cidRepo fake instead, which models the real compare-and-set;
 // scripting them here as well would be scaffolding nothing reads.
-func (m *mockRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
-	return nil, nil
-}
 
-func (m *mockRepo) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
-	return false, nil
+func (m *mockRepo) RenameExternalID(context.Context, string, string) (int64, error) {
+	return m.renameRows, m.normalizeErr
 }
 
 func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -222,8 +223,11 @@ func (m *mockStorage) ReadStream(externalID string) (io.ReadCloser, int64, error
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
-func (m *mockStorage) Delete(_ string) error         { m.deleted = true; return m.deleteErr }
-func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
+func (m *mockStorage) ListLegacyNamed(string, int) ([]string, string, error) { return nil, "", nil }
+func (m *mockStorage) Link(string, string) (bool, error)                     { return true, nil }
+func (m *mockStorage) Park(string) (string, error)                           { return "", nil }
+func (m *mockStorage) Delete(_ string) error                                 { m.deleted = true; return m.deleteErr }
+func (m *mockStorage) Exists(_ string) (bool, error)                         { return m.data != nil, nil }
 
 type mockProcessor struct {
 	processErr error
@@ -591,11 +595,8 @@ type mockRepoRace struct {
 
 var _ port.DocumentRepo = (*mockRepoRace)(nil)
 
-func (m *mockRepoRace) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
-	return nil, nil
-}
-func (m *mockRepoRace) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
-	return false, nil
+func (m *mockRepoRace) RenameExternalID(context.Context, string, string) (int64, error) {
+	return 0, nil
 }
 
 func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -941,11 +942,8 @@ type copyRaceRepo struct {
 
 var _ port.DocumentRepo = (*copyRaceRepo)(nil)
 
-func (m *copyRaceRepo) ListLegacyNamed(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
-	return nil, nil
-}
-func (m *copyRaceRepo) NormalizeExternalID(_ context.Context, _ uuid.UUID, _ string, _ int, _ string) (bool, error) {
-	return false, nil
+func (m *copyRaceRepo) RenameExternalID(context.Context, string, string) (int64, error) {
+	return 0, nil
 }
 
 func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
@@ -1327,6 +1325,11 @@ type dedupMockStorage struct {
 	deleted bool
 }
 
+func (m *dedupMockStorage) ListLegacyNamed(string, int) ([]string, string, error) {
+	return nil, "", nil
+}
+func (m *dedupMockStorage) Link(string, string) (bool, error) { return true, nil }
+func (m *dedupMockStorage) Park(string) (string, error)       { return "", nil }
 func (m *dedupMockStorage) Save(content []byte) (model.StoredFile, error) {
 	hash := ComputeHash(content)
 	return model.StoredFile{ExternalID: hash, Size: len(content), Created: false}, nil

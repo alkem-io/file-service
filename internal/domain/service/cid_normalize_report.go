@@ -46,58 +46,54 @@ type cidRunReport struct {
 	Counts        cidReportCounts    `json:"counts"`
 	Changed       []cidReportChange  `json:"changed"`
 	NotNormalized []cidReportSkipped `json:"notNormalized"`
-	// DetailTruncated says the arrays above are shorter than counts, because the
-	// pass hit its retention ceiling.
-	DetailTruncated bool `json:"detailTruncated,omitempty"`
 	// MappingIncomplete says at least one old→new mapping could not be made
-	// durable. Without it a pass that lost mappings still reads `"outcome":
-	// "completed", "failed": 0` — the opposite of the exit code it returned.
+	// durable. Without it a pass that lost mappings still reads
+	// `"outcome": "completed", "failed": 0` — the opposite of its exit code.
 	MappingIncomplete bool `json:"mappingIncomplete,omitempty"`
 }
 
 type cidReportCounts struct {
-	Normalized int `json:"normalized"`
-	Skipped    int `json:"skipped"`
-	Failed     int `json:"failed"`
-	Reclaimed  int `json:"reclaimed"`
+	Normalized int   `json:"normalized"`
+	Records    int64 `json:"records"`
+	Skipped    int   `json:"skipped"`
+	Failed     int   `json:"failed"`
+	Parked     int   `json:"parked"`
+	Orphans    int   `json:"orphans"`
 }
 
 type cidReportChange struct {
-	FileID             string `json:"fileId"`
 	PreviousExternalID string `json:"previousExternalID"`
 	NewExternalID      string `json:"newExternalID"`
-	// Omitted when the reference count was never taken (sharedUnknown), so a reader
-	// can distinguish that from a counted zero. The schema does not require it.
-	SharedWith *int   `json:"sharedWith,omitempty"`
-	LegacyBlob string `json:"legacyBlob"`
+	// Records is how many rows the single UPDATE moved.
+	Records int64 `json:"records"`
+	// Parked reports whether the legacy file was moved aside. False means it is
+	// still at its original name — the equal-fold case, a late reference, or a
+	// failed move.
+	Parked bool `json:"parked"`
 }
 
-// cidJournalEntry is deliberately a SEPARATE shape from cidReportChange rather
-// than a reuse of it. A journal line is written BEFORE reclamation is attempted,
-// so neither the reference count nor the blob's fate is known yet — emitting the
-// report struct would stamp a confident `"sharedWith": 0` on every line, and a
-// reader recovering from the journal would conclude that every shared legacy blob
-// was unshared.
+// cidJournalEntry is deliberately NARROWER than cidReportChange: a journal line is
+// written before the file is parked, so the outcome is not yet known and emitting
+// the report struct would stamp a confident `"parked": false` on every line.
 type cidJournalEntry struct {
-	FileID             string `json:"fileId"`
 	PreviousExternalID string `json:"previousExternalID"`
 	NewExternalID      string `json:"newExternalID"`
+	Records            int64  `json:"records"`
 }
 
 type cidReportSkipped struct {
-	FileID     string `json:"fileId"`
 	ExternalID string `json:"externalID"`
 	Reason     string `json:"reason"`
 	Detail     string `json:"detail,omitempty"`
 }
 
-// cidJournalLine encodes one mapping as a single NDJSON line, written and
-// fsynced before the legacy blob it names is reclaimed.
+// cidJournalLine encodes one mapping as a single NDJSON line, written and fsynced
+// before the legacy file it names is parked.
 func cidJournalLine(c CIDNormalizeChange) ([]byte, error) {
 	data, err := json.Marshal(cidJournalEntry{
-		FileID:             c.FileID.String(),
 		PreviousExternalID: c.PreviousExternalID,
 		NewExternalID:      c.NewExternalID,
+		Records:            c.Records,
 	})
 	if err != nil {
 		return nil, err
@@ -123,40 +119,30 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 		Outcome:       cidOutcomeCompleted,
 		Counts: cidReportCounts{
 			Normalized: sum.Normalized,
+			Records:    sum.Records,
 			Skipped:    sum.Skipped,
 			Failed:     sum.Failed,
-			Reclaimed:  sum.Reclaimed,
+			Parked:     sum.Parked,
+			Orphans:    sum.Orphans,
 		},
-		// Never nil: the schema requires `changed` to be an array, and a JSON
-		// null would fail a reader validating a retained report.
-		Changed:       make([]cidReportChange, 0, len(sum.Changed)),
-		NotNormalized: make([]cidReportSkipped, 0, len(sum.NotChanged)),
+		// Never nil: the schema requires arrays, and a JSON null would fail a reader
+		// validating a retained report.
+		Changed:           make([]cidReportChange, 0, len(sum.Changed)),
+		NotNormalized:     make([]cidReportSkipped, 0, len(sum.NotChanged)),
+		MappingIncomplete: run.journalFailed,
 	}
 	if sum.Aborted {
 		rep.Outcome = cidOutcomeEndedEarly
 	}
-	rep.DetailTruncated = sum.DetailTruncated
-	rep.MappingIncomplete = run.journalFailed
 	for _, c := range sum.Changed {
-		rep.Changed = append(rep.Changed, cidReportChange{
-			FileID:             c.FileID.String(),
-			PreviousExternalID: c.PreviousExternalID,
-			NewExternalID:      c.NewExternalID,
-			SharedWith:         sharedWithOrNil(c.SharedWith),
-			LegacyBlob:         c.LegacyBlob,
-		})
+		rep.Changed = append(rep.Changed, cidReportChange(c))
 	}
 	for _, n := range sum.NotChanged {
-		rep.NotNormalized = append(rep.NotNormalized, cidReportSkipped{
-			FileID:     n.FileID.String(),
-			ExternalID: n.ExternalID,
-			Reason:     n.Reason,
-			Detail:     n.Detail,
-		})
+		rep.NotNormalized = append(rep.NotNormalized, cidReportSkipped(n))
 	}
 
-	// A journal line that never reached the disk is already a lost mapping, even
-	// if the report below writes cleanly.
+	// A journal line that never reached disk is already a lost mapping, even if the
+	// report below writes cleanly.
 	if run.journalFailed {
 		sum.ReportFailed = true
 	}
@@ -164,25 +150,16 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		sum.ReportFailed = true
-		s.Logger.Error("sweep-cids: could not encode the run report",
-			zap.String("journal", run.journalPath),
-			zap.String("recoverFrom", "the per-record journal, if it was written"),
-			zap.Error(err))
+		s.Logger.Error("sweep-cids: could not encode the run report", zap.Error(err))
 		return
 	}
-	name := cidReportName(sum.StartedAt)
-	path, err := run.opts.Report.WriteReport(name, data)
+	path, err := run.opts.Report.WriteReport(cidReportName(sum.StartedAt), data)
 	if err != nil {
 		sum.ReportFailed = true
 		s.Logger.Error("sweep-cids: could not write the run report",
-			zap.String("report", name),
-			zap.String("journal", run.journalPath),
-			zap.String("recoverFrom", "the per-record journal, if it was written"),
-			zap.Error(err))
+			zap.String("recoverFrom", "the per-blob journal, if it was written"), zap.Error(err))
 		return
 	}
-	// Recorded, not logged here: the path must be the LAST line of the run (FR-019),
-	// and the summary is logged after this call so it can see ReportFailed.
 	run.reportPath = path
 }
 
@@ -194,13 +171,4 @@ func (s *FileService) logCIDNormalizeReportPath(sum CIDNormalizeSummary, run *ci
 		return
 	}
 	s.Logger.Info("sweep-cids: run report written", zap.String("path", run.reportPath))
-}
-
-// sharedWithOrNil omits a reference count that was never taken rather than
-// asserting a fabricated zero about it.
-func sharedWithOrNil(n int) *int {
-	if n == sharedUnknown {
-		return nil
-	}
-	return &n
 }

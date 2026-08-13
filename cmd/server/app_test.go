@@ -223,7 +223,7 @@ func TestCIDsJobExitCode(t *testing.T) {
 		sum  service.CIDNormalizeSummary
 		want int
 	}{
-		{"clean converged pass", service.CIDNormalizeSummary{Normalized: 1053, Reclaimed: 1053}, 0},
+		{"clean converged pass", service.CIDNormalizeSummary{Normalized: 1053, Parked: 1053}, 0},
 		{"nothing left to do", service.CIDNormalizeSummary{}, 0},
 		{"normalized plus permanently-absent content", service.CIDNormalizeSummary{Normalized: 900, Skipped: 153}, 0},
 		{"only absent content left", service.CIDNormalizeSummary{Skipped: 153}, 0},

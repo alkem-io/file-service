@@ -3,12 +3,14 @@ package service
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
+
+	"go.uber.org/zap"
 
 	"github.com/google/uuid"
 
@@ -33,29 +35,15 @@ type cidRow struct {
 	Temporary  bool
 }
 
-// cidUUID makes ascending, comparable ids so keyset paging is deterministic.
-// Numbering starts at 1: id 0 is uuid.Nil, the "start of corpus" cursor, and a
-// row carrying it could never satisfy `id > $1`.
-func cidUUID(n byte) uuid.UUID {
-	var u uuid.UUID
-	u[15] = n
-	return u
-}
-
 // cidRepo is an in-memory `file` table implementing the four operations the
 // sweep uses; everything else on the port comes from the embedded mockRepo.
 type cidRepo struct {
 	mockRepo
 	rows []*cidRow
 
-	listCalls int
-	// listErrOn fails the Nth (1-based) page scan, to exercise the ended-early path.
-	listErrOn int
 	// beforeNormalize runs immediately before each compare-and-set — the seam a
 	// concurrent Replace or promote would land in.
-	beforeNormalize func(r *cidRepo, id uuid.UUID)
-	// afterNormalize runs immediately after a compare-and-set applied.
-	afterNormalize func(r *cidRepo, id uuid.UUID)
+	beforeNormalize func(r *cidRepo, externalID string)
 
 	normalizeApplied int
 	countCalls       int
@@ -76,69 +64,28 @@ func newCIDRepo(rows ...*cidRow) *cidRepo {
 	return r
 }
 
-func (r *cidRepo) row(id uuid.UUID) *cidRow {
-	for _, row := range r.rows {
-		if row.ID == id {
-			return row
-		}
-	}
-	return nil
-}
-
-// ListLegacyNamed applies the same predicate as the SQL: permanent rows whose
-// externalID is not a SHA3-256 hex name, keyset-paged by id.
-func (r *cidRepo) ListLegacyNamed(_ context.Context, after uuid.UUID, limit int32) ([]model.Document, error) {
-	r.listCalls++
-	if r.listErrOn != 0 && r.listCalls == r.listErrOn {
-		return nil, errors.New("page scan failed")
-	}
-	var page []model.Document
-	for _, row := range r.rows {
-		if bytes.Compare(row.ID[:], after[:]) <= 0 {
-			continue
-		}
-		if row.Temporary || sha3HexName.MatchString(row.ExternalID) {
-			continue
-		}
-		page = append(page, model.Document{ID: row.ID, ExternalID: row.ExternalID, Version: row.Version})
-		if len(page) == int(limit) {
-			break
-		}
-	}
-	return page, nil
-}
-
-// NormalizeExternalID is a real compare-and-set: it applies only while the row
-// still carries the externalID and version the sweep read.
-func (r *cidRepo) NormalizeExternalID(_ context.Context, id uuid.UUID, expectedExternalID string, expectedVersion int, newExternalID string) (bool, error) {
+// RenameExternalID moves EVERY row naming oldExternalID, in one shot, and reports
+// how many. Guarded solely on the old name — a row whose content was replaced
+// concurrently already carries a different name and simply does not match.
+func (r *cidRepo) RenameExternalID(_ context.Context, oldExternalID, newExternalID string) (int64, error) {
 	r.normalizeCalls++
 	if r.beforeNormalize != nil {
-		r.beforeNormalize(r, id)
+		r.beforeNormalize(r, oldExternalID)
 	}
 	if r.normalizeErr != nil {
-		return false, r.normalizeErr
+		return 0, r.normalizeErr
 	}
-	row := r.row(id)
-	if row == nil || row.ExternalID != expectedExternalID || row.Version != expectedVersion {
-		return false, nil
+	var moved int64
+	for _, row := range r.rows {
+		if row.ExternalID == oldExternalID {
+			row.ExternalID = newExternalID
+			moved++
+		}
 	}
-	row.ExternalID = newExternalID
-	row.Version++
-	r.normalizeApplied++
-	if r.afterNormalize != nil {
-		r.afterNormalize(r, id)
+	if moved > 0 {
+		r.normalizeApplied++
 	}
-	return true, nil
-}
-
-// GetByID reads back from the same rows the CAS writes, so a test can observe what
-// a concurrent writer actually left behind rather than the embedded mock's zero value.
-func (r *cidRepo) GetByID(_ context.Context, id uuid.UUID) (model.Document, error) {
-	row := r.row(id)
-	if row == nil {
-		return model.Document{}, model.ErrDocumentNotFound
-	}
-	return model.Document{ID: row.ID, ExternalID: row.ExternalID, Version: row.Version}, nil
+	return moved, nil
 }
 
 // CountByExternalID counts every row naming the blob, temporary ones included —
@@ -170,6 +117,11 @@ type cidStore struct {
 	// shortRead makes ReadStream report the blob's true size but hand back only
 	// the first N bytes, ending in a clean EOF — the NFS fault io.Copy cannot see.
 	shortRead map[string]int
+	listErr   error
+	linkErr   error
+	parkErr   error
+	// parked holds what Park moved aside; nothing is ever destroyed.
+	parked map[string][]byte
 
 	created []string // names published for the first time (dedup hits excluded)
 	deletes []string
@@ -248,6 +200,58 @@ func (s *cidStore) Delete(externalID string) error {
 }
 
 func (s *cidStore) Exists(externalID string) (bool, error) { return s.has(externalID), nil }
+
+// ListLegacyNamed enumerates names on the store that are not the current scheme —
+// the sweep's actual work-list, which includes blobs no row references.
+func (s *cidStore) ListLegacyNamed(after string, limit int) ([]string, string, error) {
+	if s.listErr != nil {
+		return nil, "", s.listErr
+	}
+	var names []string
+	for n := range s.blobs {
+		if !sha3HexName.MatchString(n) && n > after && !strings.HasPrefix(n, "_") {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > limit {
+		names = names[:limit]
+	}
+	next := ""
+	if len(names) > 0 {
+		next = names[len(names)-1]
+	}
+	return names, next, nil
+}
+
+func (s *cidStore) Link(existing, newName string) (bool, error) {
+	if s.linkErr != nil {
+		return false, s.linkErr
+	}
+	if s.has(newName) {
+		return false, nil // dedup hit
+	}
+	s.blobs[newName] = s.blobs[existing]
+	s.created = append(s.created, newName)
+	return true, nil
+}
+
+// Park moves the file aside instead of destroying it — the property that makes the
+// migration reversible.
+func (s *cidStore) Park(externalID string) (string, error) {
+	if s.parkErr != nil {
+		return "", s.parkErr
+	}
+	if !s.has(externalID) {
+		return "", nil
+	}
+	if s.parked == nil {
+		s.parked = map[string][]byte{}
+	}
+	s.parked[externalID] = s.blobs[externalID]
+	delete(s.blobs, externalID)
+	return "/mnt/storage/_parked/" + externalID, nil
+}
 
 func (s *cidStore) OpenStage(_ context.Context) (port.StageWriter, error) {
 	if s.openStageErr != nil {
@@ -328,3 +332,10 @@ func (s *cidSink) AppendJournal(name string, line []byte) (string, error) {
 	}
 	return "/mnt/storage/_sweep-reports/" + name, nil
 }
+
+func testLogger() *zap.Logger { return zap.NewNop() }
+
+// upperHex produces the uppercase form of a digest — in scope for the sweep,
+// because the scan predicate demands LOWERCASE hex, and the case where the legacy
+// name and the digest are the same file on a case-insensitive volume.
+func upperHex(s string) string { return strings.ToUpper(s) }

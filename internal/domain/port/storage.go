@@ -38,6 +38,28 @@ type StoragePort interface {
 	// (false, nil) is a definitive "not there"; a non-nil error means the
 	// backend could not answer.
 	Exists(externalID string) (bool, error)
+	// ListLegacyNamed returns one page of blob names on the store that are NOT the
+	// current content-addressing scheme, plus a cursor for the next page ("" when
+	// exhausted). Reserved sidecar directories are never included.
+	//
+	// The store, not the database, is the authority on what needs migrating: a
+	// database scan sees only names some row references, so an UNREFERENCED legacy
+	// blob would sit on the volume forever and "zero legacy-named blobs remain"
+	// could never be satisfied.
+	ListLegacyNamed(after string, limit int) (names []string, next string, err error)
+	// Link publishes existing bytes under a second name, without copying them.
+	// Returns false if the target already exists — which is not an error on a
+	// content-addressed store, just a dedup hit.
+	Link(existing, newName string) (created bool, err error)
+	// Park moves a blob out of the content namespace into a reserved sidecar
+	// directory, returning where it went. It is the non-destructive alternative to
+	// Delete for a migration: the bytes remain on the volume, so a rename that
+	// turns out to be wrong is recoverable by moving the file back, and an operator
+	// clears the parked directory only once the result has been verified.
+	//
+	// Idempotent in the way that matters: parking a name that is already absent is
+	// not an error, so a re-run after an interruption is safe.
+	Park(externalID string) (string, error)
 	// OpenStage begins a streaming ingestion into not-yet-published storage
 	// (spec 020). Nothing is observable as a permanent object until Commit.
 	OpenStage(ctx context.Context) (StageWriter, error)

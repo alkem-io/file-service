@@ -16,6 +16,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -115,6 +118,92 @@ func (a *Adapter) Delete(externalID string) error {
 
 // Exists stats the blob path without opening it. (false, nil) is a
 // definitive "not there"; any other stat failure is returned as an error.
+// sha3HexName matches the current content-addressing scheme: lowercase SHA3-256
+// hex. Anything else on the volume is legacy-named and in scope for the sweep.
+var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ListLegacyNamed walks the flat blob namespace and returns names that are not the
+// current scheme. Sorted, so the cursor is a stable resume point across runs.
+// Reserved sidecar directories are excluded by taking files only at depth 1 and
+// skipping `_`/`.` prefixes — the same rule that makes those names unreachable as
+// blobs.
+func (a *Adapter) ListLegacyNamed(after string, limit int) ([]string, string, error) {
+	entries, err := os.ReadDir(a.basePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("list %s: %w", a.basePath, err)
+	}
+	names := make([]string, 0, limit)
+	next := ""
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") || sha3HexName.MatchString(n) {
+			continue
+		}
+		if n <= after {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if len(names) > limit {
+		names = names[:limit]
+	}
+	if len(names) > 0 {
+		next = names[len(names)-1]
+	}
+	return names, next, nil
+}
+
+// Link publishes existing bytes under a second name without copying them. A
+// no-overwrite hard link, so a target that already exists is reported as a dedup
+// hit rather than clobbered.
+func (a *Adapter) Link(existing, newName string) (bool, error) {
+	if !isValidExternalID(existing) || !isValidExternalID(newName) {
+		return false, fmt.Errorf("link %q -> %q: %w", existing, newName, port.ErrInvalidKey)
+	}
+	if err := os.Link(a.filePath(existing), a.filePath(newName)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil // dedup hit: the bytes are already published
+		}
+		return false, fmt.Errorf("link %s -> %s: %w", existing, newName, err)
+	}
+	return true, nil
+}
+
+// ReservedParkedDir holds blobs a migration moved aside. Same construction as
+// ReservedReportDir: isValidExternalID accepts only 32-128 alphanumerics, so this
+// name is disqualified twice over — too short, and `_` is outside the alphabet.
+const ReservedParkedDir = "_parked"
+
+// Park moves a blob into ReservedParkedDir instead of unlinking it. os.Rename
+// within one filesystem is atomic and copies no data. Parking a name that is
+// already absent is not an error, so a re-run after an interruption is safe.
+func (a *Adapter) Park(externalID string) (string, error) {
+	if !isValidExternalID(externalID) {
+		return "", fmt.Errorf("park %q: %w", externalID, port.ErrInvalidKey)
+	}
+	src := a.filePath(externalID)
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	dir := filepath.Join(a.basePath, ReservedParkedDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", fmt.Errorf("create parked dir %s: %w", dir, err)
+	}
+	dst := filepath.Join(dir, externalID)
+	if err := os.Rename(src, dst); err != nil {
+		return "", fmt.Errorf("park %s: %w", externalID, err)
+	}
+	return dst, nil
+}
+
+// Exists reports whether a blob is present without reading its bytes.
 func (a *Adapter) Exists(externalID string) (bool, error) {
 	if !isValidExternalID(externalID) {
 		return false, fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)
