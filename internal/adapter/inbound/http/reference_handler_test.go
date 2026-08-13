@@ -791,6 +791,37 @@ func TestCreateAndCopy_ZeroUUIDOptionalIdsAre400(t *testing.T) {
 	}
 }
 
+// The nil-UUID rule covers the REQUIRED storageBucketId too. It parses cleanly
+// and matches no bucket, so accepting it defers the rejection to a Postgres
+// foreign-key violation — a 500 that lands AFTER the blob has been published,
+// orphaning it for a request the caller can never succeed at. Hence the assert
+// that no blob was committed.
+func TestCreate_NilUUIDStorageBucketIdIs400WithoutPublishing(t *testing.T) {
+	h, repo, storage := newDocHandler()
+	body, ct := buildCreateBody(t, [][2]string{
+		{"displayName", "m.bin"},
+		{"storageBucketId", uuid.Nil.String()},
+		{"authorizationId", uuid.New().String()},
+	}, true, []byte("hello"))
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a nil-UUID storageBucketId, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.ID != uuid.Nil {
+		t.Error("rejected create must not have written a row")
+	}
+	if len(storage.stages) != 1 || storage.stages[0].committed {
+		t.Errorf("rejected create published a blob (orphan): stages=%d", len(storage.stages))
+	}
+}
+
 // The counterpart the rejection above must not swallow: OMITTING createdBy /
 // tagsetId is still how a caller says "no owner / no tagset" (the Synapse media
 // provider sends neither), and must stay a 201 that stores NULL.

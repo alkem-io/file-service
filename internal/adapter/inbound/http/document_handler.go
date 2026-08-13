@@ -426,6 +426,26 @@ func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
 	return &parsed, nil
 }
 
+// parseRequiredUUID parses a REQUIRED UUID field. Unlike parseOptionalUUID there
+// is no "absent" case, but the VALUE rule is the same one this API applies
+// everywhere: a supplied id must be a real, NON-nil UUID.
+//
+// The all-zero UUID parses cleanly and is this codebase's SQL-NULL sentinel, so
+// accepting it here just defers the rejection to a Postgres foreign-key
+// violation — a 500 instead of a 400, and on create one that lands AFTER the
+// blob has been published, orphaning it for a request the caller can never
+// succeed at. The error names the field so it can serve directly as a 400 body.
+func parseRequiredUUID(value, field string) (uuid.UUID, error) {
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid %s", field)
+	}
+	if parsed == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("%s cannot be the nil UUID", field)
+	}
+	return parsed, nil
+}
+
 // parseOptionalBool parses an optional boolean form field: empty means
 // false. The error names the field so it can serve directly as a 400 body.
 func parseOptionalBool(value, field string) (bool, error) {
@@ -453,9 +473,9 @@ func buildCreateInput(fields createFields, stagedSkip bool) (input model.CreateD
 		return input, nil, 0, err
 	}
 
-	storageBucketID, err := uuid.Parse(fields.storageBucketID)
+	storageBucketID, err := parseRequiredUUID(fields.storageBucketID, "storageBucketId")
 	if err != nil {
-		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
+		return input, nil, 0, err
 	}
 
 	// authorizationId is OPTIONAL by ABSENCE ONLY. The Synapse media storage
@@ -471,12 +491,9 @@ func buildCreateInput(fields createFields, stagedSkip bool) (input model.CreateD
 	// clearly believes it is supplying a policy.
 	var authorizationID uuid.UUID
 	if fields.authorizationIDPresent {
-		authorizationID, err = uuid.Parse(fields.authorizationID)
+		authorizationID, err = parseRequiredUUID(fields.authorizationID, "authorizationId")
 		if err != nil {
-			return input, nil, 0, fmt.Errorf("invalid authorizationId")
-		}
-		if authorizationID == uuid.Nil {
-			return input, nil, 0, fmt.Errorf("authorizationId cannot be the nil UUID")
+			return input, nil, 0, err
 		}
 	}
 
@@ -947,18 +964,14 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid destinationBucketId")
 		return
 	}
-	authID, err := uuid.Parse(body.AuthorizationID)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
-		return
-	}
 	// authorizationId is REQUIRED on copy — a re-share materializes a row the
-	// server has already minted a policy for. The zero UUID parses cleanly but
-	// is the adapter's SQL-NULL sentinel, so accepting it would silently
+	// server has already minted a policy for — so the nil UUID is rejected with
+	// it: it is the adapter's SQL-NULL sentinel, and accepting it would silently
 	// materialize a policy-less row through an endpoint that has no staging
-	// semantics. Reject it explicitly rather than storing NULL.
-	if authID == uuid.Nil {
-		writeJSONError(w, http.StatusBadRequest, "authorizationId cannot be the nil UUID")
+	// semantics.
+	authID, err := parseRequiredUUID(body.AuthorizationID, "authorizationId")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
