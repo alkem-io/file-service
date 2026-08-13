@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"syscall"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -158,7 +157,12 @@ func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
 		}
 		for _, e := range entries {
 			n := e.Name()
-			if e.IsDir() || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") || sha3HexName.MatchString(n) {
+			// IsBlobName, not just "not a sidecar": the storage-checkup job leaves
+			// files_list.txt and table_entries.txt in this directory after an eviction,
+			// and those are neither dot-prefixed nor 64-hex. Enumerating them makes the
+			// sweep WARN "needs manual repair" about another job's temp files and
+			// inflates the dry-run count an operator approves the pass against.
+			if e.IsDir() || !IsBlobName(n) || sha3HexName.MatchString(n) {
 				continue
 			}
 			names = append(names, n)
@@ -186,7 +190,7 @@ func (a *Adapter) Link(existing, newName string) (bool, error) {
 }
 
 // ReservedParkedDir holds blobs a migration moved aside. Same construction as
-// ReservedReportDir: isValidExternalID accepts only 32-128 alphanumerics, so this
+// ReservedReportDir: IsBlobName accepts only 32-128 alphanumerics, so this
 // name is disqualified twice over — too short, and `_` is outside the alphabet.
 const ReservedParkedDir = "_parked"
 
@@ -242,8 +246,14 @@ func (a *Adapter) filePath(externalID string) string {
 // enumeration ignores.
 //
 // It rejects path-traversal characters and is *deliberately* permissive about hash
-// encoding: any alphanumeric (ASCII) name of 32–128 characters, which admits both
-// current SHA3-256 hex names and the legacy CIDs this store still holds.
+// encoding: any alphanumeric (ASCII) name of 32–128 characters. Real names on disk
+// include CIDv0 base58btc (`Qm…`), CIDv1 base32 (`bafy…`), uppercase hex, and current
+// SHA3-256 hex.
+//
+// DO NOT re-tighten this to exact formats. It was widened by PR #13 ("Accept legacy
+// IPFS CID externalIDs in storage validator") because narrowing it broke production
+// reads. That cost is now higher, not lower: this is exported and the sweep's
+// pre-flight is a second caller.
 func IsBlobName(id string) bool {
 	if len(id) < 32 || len(id) > 128 {
 		return false

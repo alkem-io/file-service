@@ -392,9 +392,16 @@ func parseSweepRate(raw string) (*float64, error) {
 	return &v, nil
 }
 
-// buildSweepCIDsService wires only what the legacy-name sweep touches: the repository,
-// the blob store, and — when the backup producer is on — the outbox, so reclaiming a blob
-// drops its pending hints exactly as every other deletion does.
+// buildSweepCIDsService wires only what the legacy-name sweep touches: the repository
+// and the blob store.
+//
+// The backup outbox is deliberately NOT wired. An earlier version did, with a comment
+// claiming reclamation dropped pending hints "exactly as every other deletion does" —
+// it did not: the sweep never calls DeletePendingByHash, and since it PARKS rather than
+// deletes, there is nothing to clean up after. A pending hint naming a parked legacy
+// name resolves to nothing and is handled by the consumer's existing 404-skip backstop.
+// Dead wiring plus a comment asserting behaviour that does not exist is worse than
+// neither, because an operator sets production config on the strength of it.
 //
 // It deliberately does NOT go through buildFileService, whose first act is to start
 // libvips and configure its streaming knobs. This sweep decodes nothing: it copies bytes
@@ -407,9 +414,6 @@ func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.L
 		Repo:    repo,
 		Storage: local.New(cfg.StoragePath),
 		Logger:  logger,
-	}
-	if cfg.BackupOutbox.Enabled {
-		svc.Outbox = repo
 	}
 	return svc
 }
@@ -489,7 +493,10 @@ func verifySweepStorage(path string) error {
 // was destroyed; a pass that migrated cleanly and then lost that record has left the operator with
 // an irreversible change and no audit trail, which must not read as success.
 func cidsJobExitCode(sum service.CIDNormalizeSummary) int {
-	if sum.Aborted || sum.Failed > 0 || sum.ReportFailed {
+	// Truncated gates the exit code too: the pass stopped short of the corpus, so
+	// exiting 0 would tell the Job controller — and the operator — that there is
+	// nothing left to do.
+	if sum.Aborted || sum.Failed > 0 || sum.ReportFailed || sum.Truncated {
 		return 1
 	}
 	return 0

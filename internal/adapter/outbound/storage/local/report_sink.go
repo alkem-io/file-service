@@ -26,7 +26,7 @@ type ReportSink struct {
 }
 
 // ReservedReportDir is the directory name reports live under, owned here because
-// this package owns the key rule that makes it safe. isValidExternalID accepts
+// this package owns the key rule that makes it safe. IsBlobName accepts
 // only 32-128 alphanumerics, so this name is disqualified twice over — too short,
 // and `_`/`-` are outside the alphabet — which is why no blob can ever collide
 // with it and no enumeration of the store can mistake a report for content.

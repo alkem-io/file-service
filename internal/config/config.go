@@ -78,7 +78,7 @@ const (
 	// reports. The name is owned by the local storage adapter, which owns the key
 	// rule that makes it collision-proof; config cannot import that package
 	// (adapters depend on config, not the reverse), so the two are kept in step by
-	// TestSweepCIDsReportDirMatchesTheStorageReservation rather than by hope.
+	// TestReservedReportDirMatchesConfig rather than by hope.
 	sweepCIDsReportDir = "_sweep-reports"
 )
 

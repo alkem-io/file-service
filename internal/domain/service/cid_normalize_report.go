@@ -54,6 +54,10 @@ type cidRunReport struct {
 	// durable. Without it a pass that lost mappings still reads
 	// `"outcome": "completed", "failed": 0` — the opposite of its exit code.
 	MappingIncomplete bool `json:"mappingIncomplete,omitempty"`
+	// Truncated says the pass hit its per-pass ceiling and legacy names REMAIN.
+	// Without it the retained report — which outlives the Job's logs — reads as a
+	// drained corpus, which is the operator's terminating condition.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type cidReportCounts struct {
@@ -135,6 +139,7 @@ func (s *FileService) writeCIDNormalizeReport(sum *CIDNormalizeSummary, run *cid
 		NotNormalized:     make([]cidReportSkipped, 0, len(sum.NotChanged)),
 		ParkedOrphans:     append([]string{}, sum.ParkedOrphans...),
 		MappingIncomplete: run.journalFailed,
+		Truncated:         sum.Truncated,
 	}
 	if sum.Aborted {
 		rep.Outcome = cidOutcomeEndedEarly

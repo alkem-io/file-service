@@ -151,21 +151,26 @@ type CIDNormalizeOptions struct {
 //
 // Resumable with no stored cursor: renaming a blob removes it from the predicate.
 func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOptions) CIDNormalizeSummary {
-	sum := CIDNormalizeSummary{DryRun: opts.DryRun, Rate: opts.Rate, StartedAt: time.Now().UTC()}
-	run := &cidRun{opts: opts, journal: cidJournalName(sum.StartedAt)}
 	pace := newPacer(opts.Rate)
+	// The rate ACTUALLY enforced, not the one requested: newPacer floors a rate low
+	// enough to exceed the per-object cap, and recording the request would put a
+	// throughput figure that was never in effect into the permanent audit trail.
+	sum := CIDNormalizeSummary{DryRun: opts.DryRun, Rate: float64(pace.Limit()), StartedAt: time.Now().UTC()}
+	run := &cidRun{opts: opts, journal: cidJournalName(sum.StartedAt)}
 
 	// One walk of the store, up to a bounded number of matches. Legacy names are rare
 	// in a large corpus, so paging would re-enumerate everything to find a handful.
 	work, err := s.Storage.ListLegacyNamed(cidNormalizeMaxPerPass)
-	if err != nil {
+	if err != nil { //nolint:nestif // the error path deliberately falls through to the report
 		// A scan error is NOT an empty corpus: an unmounted volume must not read as a
 		// fully-swept store.
 		s.Logger.Error("sweep-cids: store scan failed; nothing was touched", zap.Error(err))
 		sum.Aborted = true
-		sum.FinishedAt = time.Now().UTC()
-		s.logCIDNormalizeSummary(sum)
-		return sum
+		// Falls through to the report block rather than returning: README, CLAUDE.md
+		// and the Job manifest all promise a real pass ALWAYS writes the .json, and an
+		// aborted pass is the one an operator most needs an artifact for — the Job's
+		// logs expire with its TTL, the report does not.
+		work = nil
 	}
 	if len(work) == cidNormalizeMaxPerPass {
 		// Truncated, not drained. Saying so matters: "no work left" is the operator's
@@ -285,7 +290,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		// The link we made is now referenced by nothing and, being valid 64-hex, is
 		// invisible to every future pass — the same permanent invisible orphan the
 		// records == 0 branch removes. Drop it here too.
-		s.unlinkUnreferencedPublish(legacy, digest, created)
+		s.unlinkUnreferencedPublish(digest, created)
 		s.failCID(legacy, sum, reasonWriteFailed, "rename: "+err.Error())
 		return
 	}
@@ -311,7 +316,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		// DIGEST name is invisible to this sweep on any future run (it no longer
 		// matches the scan) and indistinguishable from live content, so leaving one
 		// converts a visible, sweepable problem into a permanent invisible one.
-		s.unlinkUnreferencedPublish(legacy, digest, created)
+		s.unlinkUnreferencedPublish(digest, created)
 		s.parkLegacy(legacy, "", 0, sum, run, true)
 		return
 	}
@@ -339,7 +344,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 // of code and a relink that can itself fail. What actually makes this safe is that
 // the bytes are about to be parked, not destroyed: if an upload does dedup onto
 // this digest in the window, restoring it is moving one file back out of _parked.
-func (s *FileService) unlinkUnreferencedPublish(legacy, digest string, created bool) {
+func (s *FileService) unlinkUnreferencedPublish(digest string, created bool) {
 	if !created {
 		return
 	}
@@ -347,7 +352,6 @@ func (s *FileService) unlinkUnreferencedPublish(legacy, digest string, created b
 		s.Logger.Warn("sweep-cids: could not remove a link published for an unreferenced blob",
 			zap.String("externalID", digest), zap.Error(err))
 	}
-	_ = legacy
 }
 
 // parkLegacy records the mapping durably, then moves the legacy file aside.

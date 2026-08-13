@@ -8,7 +8,7 @@
 #
 #   # ALWAYS preview first. The real pass is irreversible.
 #   kubectl -n <ns> apply -f 36-file-service-sweep-cids-job.yaml     # args: ["sweep-cids","--dry-run"]
-#   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-cids      # read wouldNormalize / wouldSkip
+#   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-cids      # read wouldNormalize (there is deliberately no wouldSkip)
 #
 #   # then, after confirming the count against an independent query, edit args to drop --dry-run:
 #   #   SELECT count(*) FROM file
@@ -143,23 +143,17 @@ spec:
               value: "local"
             - name: LOG_LEVEL
               value: "info"
-            # MUST match the file-service Deployment in the target environment.
-            # Left unset it defaults to false, svc.Outbox stays nil, and reclamation
-            # silently skips DeletePendingByHash — so pending backup hints survive
-            # the bytes they point at. Those hints are real: PromoteWithOutbox
-            # enqueues externalID verbatim, so a promoted legacy-named row leaves a
-            # pending row carrying a CID. Bounded by the consumer's 404-skip
-            # backstop, but it makes the sweep behave differently from what
-            # buildSweepCIDsService documents and what its test asserts.
-            - name: FILE_BACKUP_OUTBOX_ENABLED
-              value: "true"
+            # NOTE: FILE_BACKUP_OUTBOX_ENABLED is deliberately NOT set here. The sweep does
+            # not touch the backup outbox — it parks files rather than deleting them, so there
+            # are no hints to clean up, and a pending hint naming a parked name is handled by
+            # the consumer's 404-skip backstop. An earlier version of this manifest instructed
+            # setting it; that instruction was wrong.
             - name: TMPDIR
               value: /tmp
           volumeMounts:
             - name: file-storage
               mountPath: /storage
-            # The sweep publishes through the same staging path the upload flow uses, which writes a
-            # temp file before committing under the content hash. Root stays immutable.
+                        # temp file before committing under the content hash. Root stays immutable.
             - name: tmp
               mountPath: /tmp
           resources:
@@ -177,11 +171,10 @@ spec:
         # not here, and nothing in the sweep path reads TMPDIR (libvips is never
         # started). This sizeLimit therefore bounds nothing that matters.
         #
-        # The real capacity requirement is on the content PVC: headroom for a full
-        # second copy of the largest blob being processed, since publish-then-
-        # reclaim means both copies exist at once. Size the run against that — an
-        # operator planning from the 64Mi below hits ENOSPC and every record fails
-        # as read_failed.
+        # CAPACITY: no headroom is needed for a second copy. The new name is produced by
+        # os.Link (a directory entry, not data blocks) and parking is os.Rename within the
+        # same volume, so the pass moves no bytes. The lasting cost is that `_parked/`
+        # retains the whole legacy cohort until an operator clears it.
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
