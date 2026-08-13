@@ -28,6 +28,22 @@ import (
 // The current content-addressing scheme, as the fakes see it. Pinned to the real
 // adapter's rule by TestFakeSchemeMatchesTheAdapter — a fake that classifies names
 // differently from production tests nothing.
+// IsBlobName mirrors the adapter's key rule for the fakes.
+func IsBlobName(n string) bool {
+	if len(n) < 32 || len(n) > 128 {
+		return false
+	}
+	for _, c := range n {
+		isDigit := c >= '0' && c <= '9'
+		isLower := c >= 'a' && c <= 'z'
+		isUpper := c >= 'A' && c <= 'Z'
+		if !isDigit && !isLower && !isUpper {
+			return false
+		}
+	}
+	return true
+}
+
 var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // cidRow is one row of the `file` table, restricted to the columns the sweep
@@ -224,26 +240,34 @@ func (s *cidStore) Exists(externalID string) (bool, error) { return s.has(extern
 
 // ListLegacyNamed enumerates names on the store that are not the current scheme —
 // the sweep's actual work-list, which includes blobs no row references.
-func (s *cidStore) ListLegacyNamed(limit int) ([]string, error) {
+func (s *cidStore) ListLegacyNamed(limit int) ([]string, []string, error) {
 	// The port makes limit > 0 a precondition; a fake that quietly accepts a bad one
 	// lets a caller ship a violation the real adapter would have refused.
 	if limit <= 0 {
-		return nil, fmt.Errorf("limit must be positive, got %d", limit)
+		return nil, nil, fmt.Errorf("limit must be positive, got %d", limit)
 	}
 	if s.listErr != nil {
-		return nil, s.listErr
+		return nil, nil, s.listErr
 	}
-	var names []string
+	var names, unaddressable []string
 	for n := range s.blobs {
-		if !sha3HexName.MatchString(n) && !strings.HasPrefix(n, "_") {
+		switch {
+		case sha3HexName.MatchString(n) || strings.HasPrefix(n, "_"):
+		case !IsBlobName(n):
+			// Mirrors the adapter: a name the store cannot address is surfaced, not
+			// dropped. The fake filtered differently, so tests exercised a work-list
+			// production never produces.
+			unaddressable = append(unaddressable, n)
+		default:
 			names = append(names, n)
 		}
 	}
+	sort.Strings(unaddressable)
 	sort.Strings(names) // map order is random; tests need a stable work-list
 	if len(names) > limit {
 		names = names[:limit]
 	}
-	return names, nil
+	return names, unaddressable, nil
 }
 
 func (s *cidStore) Link(existing, newName string) (bool, error) {
@@ -262,6 +286,8 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 // migration reversible.
 // SameFile models inode identity: on a case-insensitive volume two spellings are one
 // file, on a case-sensitive one they are two — which a map alone cannot express.
+func (s *cidStore) HasContent() (bool, error) { return len(s.blobs) > 0, nil }
+
 func (s *cidStore) SizeOf(externalID string) (int64, error) {
 	k := s.resolve(externalID)
 	if k == "" {

@@ -59,11 +59,25 @@ type StoragePort interface {
 	// Returning fewer than limit means the walk completed. Returning exactly limit
 	// means it was truncated and a further run has more to do — callers MUST NOT
 	// read that as a drained corpus.
-	ListLegacyNamed(limit int) ([]string, error)
+	// Returns `unaddressable` alongside: names present on the store that the key
+	// rules refuse, so they can never be fetched or migrated. They MUST NOT be
+	// silently dropped — they are unbackable data-at-risk, exactly the population the
+	// sweep exists for, and omitting them lets a pass report a converged corpus while
+	// they sit on disk.
+	ListLegacyNamed(limit int) (names, unaddressable []string, err error)
 	// Link publishes existing bytes under a second name, without copying them.
 	// Returns false if the target already exists — which is not an error on a
 	// content-addressed store, just a dedup hit.
 	Link(existing, newName string) (created bool, err error)
+	// HasContent reports whether the store is usable and holds at least one blob.
+	//
+	// It is the sweep's pre-flight: an unmounted volume makes every read look like
+	// "this content is permanently gone", so a pass would touch nothing, exit 0, and
+	// write a report branding the whole corpus unrecoverable. The store answers it
+	// because only the store knows what a blob looks like — asking in cmd meant a
+	// second copy of that rule, which could drift into a pre-flight that passes on
+	// entries the scan ignores.
+	HasContent() (bool, error)
 	// SizeOf returns a blob's size without reading it — enough to tell a dedup hit
 	// onto good content from one onto a truncated file.
 	SizeOf(externalID string) (int64, error)

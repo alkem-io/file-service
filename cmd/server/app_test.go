@@ -330,7 +330,7 @@ func TestVerifySweepStorage(t *testing.T) {
 		{"not a directory", notADir, true},
 	}
 	for _, c := range cases {
-		err := verifySweepStorage(c.path)
+		err := verifySweepStorage(local.New(c.path), c.path)
 		if (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v, wantErr = %v", c.name, err, c.wantErr)
 		}
@@ -399,7 +399,7 @@ func TestVerifySweepStorage_IgnoresNonBlobEntries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(onlyReports, ".stage-123"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySweepStorage(onlyReports); err == nil {
+	if err := verifySweepStorage(local.New(onlyReports), onlyReports); err == nil {
 		t.Error("a store holding only a reports directory and a staging temp passed the pre-flight — every read would then look like permanently-absent content")
 	}
 
@@ -410,7 +410,7 @@ func TestVerifySweepStorage_IgnoresNonBlobEntries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(withBlob, strings.Repeat("a", 64)), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySweepStorage(withBlob); err != nil {
+	if err := verifySweepStorage(local.New(withBlob), withBlob); err != nil {
 		t.Errorf("a store holding a real blob failed the pre-flight: %v", err)
 	}
 }

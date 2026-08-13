@@ -572,7 +572,7 @@ func TestReadStreamRejectsDirectory(t *testing.T) {
 func TestListLegacyNamed_RejectsNonPositiveLimit(t *testing.T) {
 	a := New(t.TempDir())
 	for _, limit := range []int{0, -1} {
-		names, err := a.ListLegacyNamed(limit)
+		names, _, err := a.ListLegacyNamed(limit)
 		if err == nil {
 			t.Errorf("ListLegacyNamed(%d) returned %d names and no error; want a refusal", limit, len(names))
 		}

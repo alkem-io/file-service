@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
@@ -131,29 +132,29 @@ var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // Reserved sidecar directories are excluded by taking files only at depth 1 and
 // skipping `_`/`.` prefixes — the same rule that makes those names unreachable as
 // blob keys.
-func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
+func (a *Adapter) ListLegacyNamed(limit int) ([]string, []string, error) {
 	// Rejected before opening the directory: the `len(names) == limit` check below
 	// can never trip for a non-positive limit, so the walk would retain every match
 	// in the corpus — precisely the unbounded growth this one-pass form replaced.
 	if limit <= 0 {
-		return nil, fmt.Errorf("list legacy names: limit must be positive, got %d", limit)
+		return nil, nil, fmt.Errorf("list legacy names: limit must be positive, got %d", limit)
 	}
 	d, err := os.Open(a.basePath)
 	if err != nil {
 		// A missing root is NOT an empty corpus. Reporting it as one lets an
 		// unmounted volume read as a fully-swept store.
-		return nil, fmt.Errorf("open %s: %w", a.basePath, err)
+		return nil, nil, fmt.Errorf("open %s: %w", a.basePath, err)
 	}
 	defer func() { _ = d.Close() }()
 
-	var names []string
+	var names, unaddressable []string
 	for {
 		entries, err := d.ReadDir(512)
 		if errors.Is(err, io.EOF) {
-			return names, nil
+			return names, unaddressable, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("scan %s: %w", a.basePath, err)
+			return nil, nil, fmt.Errorf("scan %s: %w", a.basePath, err)
 		}
 		for _, e := range entries {
 			n := e.Name()
@@ -162,12 +163,22 @@ func (a *Adapter) ListLegacyNamed(limit int) ([]string, error) {
 			// and those are neither dot-prefixed nor 64-hex. Enumerating them makes the
 			// sweep WARN "needs manual repair" about another job's temp files and
 			// inflates the dry-run count an operator approves the pass against.
-			if e.IsDir() || !IsBlobName(n) || sha3HexName.MatchString(n) {
+			if e.IsDir() || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") {
+				continue // reserved sidecar directories
+			}
+			if sha3HexName.MatchString(n) {
+				continue // already the current scheme
+			}
+			if !IsBlobName(n) {
+				// The store cannot address this name, so the sweep can never fetch it —
+				// but dropping it silently is how a pass reports "converged" over content
+				// still on disk. Surfaced instead, for the caller to report.
+				unaddressable = append(unaddressable, n)
 				continue
 			}
 			names = append(names, n)
 			if len(names) == limit {
-				return names, nil
+				return names, unaddressable, nil
 			}
 		}
 	}
@@ -187,6 +198,41 @@ func (a *Adapter) Link(existing, newName string) (bool, error) {
 		return false, fmt.Errorf("link %s -> %s: %w", existing, newName, err)
 	}
 	return true, nil
+}
+
+// HasContent reports whether the root is a usable directory holding at least one
+// blob. It stops at the first one rather than enumerating: this is a yes/no question,
+// and the store it is asked about may hold hundreds of thousands of entries.
+func (a *Adapter) HasContent() (bool, error) {
+	info, err := os.Stat(a.basePath)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", a.basePath, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", a.basePath)
+	}
+	d, err := os.Open(a.basePath)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", a.basePath, err)
+	}
+	defer func() { _ = d.Close() }()
+	for {
+		names, err := d.Readdirnames(64)
+		for _, n := range names {
+			// A BLOB, not merely "not a sidecar". The reserved directories and another
+			// job's leftover temp files share this flat namespace, so counting entries
+			// would let a store that lost every blob pass on the strength of them.
+			if IsBlobName(n) {
+				return true, nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read %s: %w", a.basePath, err)
+		}
+	}
 }
 
 // SizeOf stats a blob without opening it.

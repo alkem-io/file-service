@@ -163,7 +163,7 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 
 	// One walk of the store, up to a bounded number of matches. Legacy names are rare
 	// in a large corpus, so paging would re-enumerate everything to find a handful.
-	work, err := s.Storage.ListLegacyNamed(cidNormalizeMaxPerPass)
+	work, unaddressable, err := s.Storage.ListLegacyNamed(cidNormalizeMaxPerPass)
 	if err != nil { //nolint:nestif // the error path deliberately falls through to the report
 		// A scan error is NOT an empty corpus: an unmounted volume must not read as a
 		// fully-swept store.
@@ -174,6 +174,13 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 		// aborted pass is the one an operator most needs an artifact for — the Job's
 		// logs expire with its TTL, the report does not.
 		work = nil
+	}
+	// Names the store itself cannot address. They are on disk, unbackable, and the
+	// sweep can never fetch them — so they are counted and reported rather than
+	// dropped, or a pass reports a converged corpus over content that is still there.
+	for _, n := range unaddressable {
+		s.skipCID(n, &sum, reasonUnaddressableName,
+			"the store's key rules refuse this name, so its bytes cannot be fetched; it needs manual repair before any sweep can migrate it")
 	}
 	if len(work) == cidNormalizeMaxPerPass {
 		// Truncated, not drained. Saying so matters: "no work left" is the operator's

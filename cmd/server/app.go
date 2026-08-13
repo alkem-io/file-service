@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -344,7 +343,8 @@ func runSweepCIDs(args []string) int {
 	// the one durable record of the migration. The storage adapter deliberately does not tell an
 	// absent blob from an absent store ("that judgement belongs to the caller that knows what
 	// SHOULD exist"); this is that caller making it, once, before touching anything.
-	if err := verifySweepStorage(base.cfg.StoragePath); err != nil {
+	fileSvc := buildSweepCIDsService(base.pool, base.cfg, logger)
+	if err := verifySweepStorage(fileSvc.Storage, base.cfg.StoragePath); err != nil {
 		logger.Error("sweep-cids: refusing to run — the content store is not usable",
 			zap.String("path", base.cfg.StoragePath), zap.Error(err))
 		return 1
@@ -354,8 +354,6 @@ func runSweepCIDs(args []string) int {
 	if parsedRate != nil {
 		effectiveRate = *parsedRate
 	}
-
-	fileSvc := buildSweepCIDsService(base.pool, base.cfg, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -421,77 +419,27 @@ func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.L
 // verifySweepStorage checks the content store is actually there before an irreversible pass reads
 // "absent" as a fact about the data. A non-empty directory is the bar: an empty one is either an
 // unmounted volume or a store with nothing to sweep, and the sweep has no business guessing which.
-func verifySweepStorage(path string) error {
-	if path == "" {
-		return errors.New("LOCAL_STORAGE_PATH is empty")
-	}
-	info, err := os.Stat(path)
+// verifySweepStorage asks the STORE whether it is usable and populated, rather than
+// walking the directory here. An unmounted volume makes every read look like "this
+// content is permanently gone", so the pass would touch nothing, exit 0, and write a
+// report branding the whole corpus unrecoverable.
+//
+// This used to re-implement the adapter's chunked walk and blob classification in
+// cmd/. Two copies of "what counts as content" is the duplication CLAUDE.md forbids,
+// and it could drift into a pre-flight that passes on entries the scan ignores — it
+// also hardcoded local-filesystem semantics into a check that must outlive the local
+// backend.
+func verifySweepStorage(store port.StoragePort, path string) error {
+	populated, err := store.HasContent()
 	if err != nil {
-		return fmt.Errorf("stat: %w", err)
+		return err
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", path)
+	if !populated {
+		return fmt.Errorf("%s holds no content — an unmounted volume looks exactly like a corpus whose blobs are all gone, and this sweep cannot tell them apart from the inside", path)
 	}
-	// #nosec G304 -- path is the operator-configured storage root this sweep is
-	// pointed at; opening it is the entire purpose of the check.
-	d, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open: %w", err)
-	}
-	defer func() { _ = d.Close() }()
-
-	// Read in small batches rather than os.ReadDir, which enumerates, allocates and
-	// SORTS every blob in a flat content store to answer a yes/no question.
-	//
-	// Only real blobs count. The sink's own reserved directory and any staging
-	// temporaries live in this same flat namespace, so counting entries would let a
-	// store that has lost every blob pass the check on the strength of the
-	// directory a previous run created.
-	for {
-		names, err := d.Readdirnames(64)
-		for _, n := range names {
-			// Identify a BLOB, not merely "an entry that is not a sidecar". The previous
-			// test admitted anything non-dot and non-reserved, so a single stray file left
-			// on the volume root satisfied the pre-flight over a store with zero blobs —
-			// and that is not hypothetical: infra-ops' storage-checkup job writes
-			// files_list.txt and table_entries.txt into this exact directory and only
-			// removes them in its last step, so an evicted checkup pod leaves them behind
-			// permanently.
-			if !local.IsBlobName(n) {
-				continue
-			}
-			return nil // a real blob: the volume is mounted and populated
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return fmt.Errorf("read: %w", err)
-		}
-		if len(names) == 0 {
-			break
-		}
-	}
-	return fmt.Errorf("%s holds no content — an unmounted volume looks exactly like a corpus whose blobs are all gone, and this sweep cannot tell them apart from the inside", path)
+	return nil
 }
 
-// cidsJobExitCode maps a sweep outcome to a k8s Job exit code — extracted so the retry policy is
-// unit-testable, mirroring dimsJobExitCode and file-backup-service's backfillVerdict.
-//
-// Exit 1 when the pass ENDED EARLY (page-scan error or a shutdown signal), or when an in-scope
-// object GENUINELY FAILED — both are cases where a rerun can make progress.
-//
-// Skips never gate the exit code, and here that is a hard requirement rather than a judgement call
-// (FR-017). The dominant skip is a record whose blob is absent — the 2026-06-30 NFS data-loss
-// cohort owned by alkemio#1995. Nothing this sweep can do restores those bytes, so they will skip
-// on EVERY future run: counting them as failure would mean the migration can never report success
-// and the operator never reaches a terminating condition. The logged normalized/skipped/failed
-// summary and the retained run report are where the detail lives.
-//
-// A failed report ALSO gates the exit code. The pass reclaims each legacy blob in the same run
-// that renames it, so the report and its per-record journal are the only surviving record of what
-// was destroyed; a pass that migrated cleanly and then lost that record has left the operator with
-// an irreversible change and no audit trail, which must not read as success.
 func cidsJobExitCode(sum service.CIDNormalizeSummary) int {
 	// Truncated gates the exit code too: the pass stopped short of the corpus, so
 	// exiting 0 would tell the Job controller — and the operator — that there is
