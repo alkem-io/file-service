@@ -56,24 +56,6 @@ components:
         tagsetId:
           type: string
       type: object
-    http.DocumentMetaBatchRequest:
-      properties:
-        ids:
-          items:
-            type: string
-          type: array
-      required:
-        - ids
-      type: object
-    http.DocumentMetaBatchResponse:
-      properties:
-        files:
-          items:
-            $ref: '#/components/schemas/http.DocumentMetaResponse'
-          type: array
-      required:
-        - files
-      type: object
     http.DocumentMetaResponse:
       properties:
         authorizationId:
@@ -461,65 +443,6 @@ paths:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
       summary: Copy handles POST /internal/file/copy.
-      tags:
-        - /internal
-  /internal/file/meta-batch:
-    post:
-      description: |-
-        GetMetaBatch handles POST /internal/file/meta-batch — the batched form of
-        GET /internal/file/{id}/meta. It answers with the SAME per-document shape
-        (documentMetaResponse, one owner) so a batched read can never describe a
-        document differently from a single read, and it resolves the whole id set in
-        ONE database round-trip.
-
-        Request: {"ids": ["<uuid>", ...]} — non-empty, at most 100 elements, every
-        element a valid UUID; duplicates are de-duplicated and each document is
-        returned at most once. A body violating any of those is a 400.
-
-        PARTIAL RESULTS ARE NORMAL AND ARE A 200: an id that resolves to no row is
-        simply omitted from `files`. A document may be deleted between the caller's
-        read and this batch, and one such id must not fail the other 99. Response
-        order is unspecified — the caller maps by `id`.
-
-        This is metadata only: it never touches blob content.
-
-        The path is kebab-case because every other collection-level custom operation
-        in this API is (`/internal/file/copy`, `/internal/file/by-reference`).
-      operationId: DocumentHandler.GetMetaBatch
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/http.DocumentMetaBatchRequest'
-        required: true
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/http.DocumentMetaBatchResponse'
-          description: OK
-        "400":
-          content:
-            application/json; charset=utf-8:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Bad Request
-        "413":
-          content:
-            application/json; charset=utf-8:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Request Entity Too Large
-        "500":
-          content:
-            application/json; charset=utf-8:
-              schema:
-                $ref: '#/components/schemas/http.errorResponse'
-          description: Internal Server Error
-      summary: |-
-        GetMetaBatch handles POST /internal/file/meta-batch — the batched form of
-        GET /internal/file/{id}/meta.
       tags:
         - /internal
   /internal/file/{id}:

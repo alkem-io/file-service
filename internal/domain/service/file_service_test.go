@@ -112,9 +112,6 @@ var _ port.DocumentRepo = (*mockRepo)(nil)
 func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.doc, m.getErr
 }
-func (m *mockRepo) GetByIDs(_ context.Context, _ []uuid.UUID) ([]model.Document, error) {
-	return nil, nil
-}
 func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {
 	m.findCalls++
 	m.lastFindExt = externalID
@@ -646,9 +643,6 @@ var _ port.DocumentRepo = (*mockRepoRace)(nil)
 func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, nil
 }
-func (m *mockRepoRace) GetByIDs(_ context.Context, _ []uuid.UUID) ([]model.Document, error) {
-	return nil, nil
-}
 func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return m.find()
 }
@@ -1000,9 +994,6 @@ var _ port.DocumentRepo = (*copyRaceRepo)(nil)
 
 func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
 	return m.source, nil
-}
-func (m *copyRaceRepo) GetByIDs(_ context.Context, _ []uuid.UUID) ([]model.Document, error) {
-	return nil, nil
 }
 func (m *copyRaceRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound

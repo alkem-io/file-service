@@ -178,10 +178,6 @@ func rowToDocument(row queries.GetDocumentByIDRow) model.Document {
 	return documentFromRow(documentRow(row))
 }
 
-func batchRowToDocument(row queries.GetDocumentsByIDsRow) model.Document {
-	return documentFromRow(documentRow(row))
-}
-
 func findRowToDocument(row queries.FindDocumentByExternalIDAndBucketRow) model.Document {
 	return documentFromRow(documentRow(row))
 }

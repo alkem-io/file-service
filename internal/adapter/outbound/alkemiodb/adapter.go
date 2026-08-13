@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/file-service/internal/adapter/outbound/alkemiodb/queries"
@@ -69,26 +68,6 @@ func (a *Adapter) GetByID(ctx context.Context, id uuid.UUID) (model.Document, er
 		return model.Document{}, err
 	}
 	return rowToDocument(row), nil
-}
-
-// GetByIDs implements port.DocumentRepo's batch lookup: ONE `id = ANY($1)`
-// query for the whole id set, never a loop of GetByID. Ids with no row are
-// absent from the result — the SQL filters, so a partial result is a normal
-// success and there is no pgx.ErrNoRows to translate.
-func (a *Adapter) GetByIDs(ctx context.Context, ids []uuid.UUID) ([]model.Document, error) {
-	pgIDs := make([]pgtype.UUID, 0, len(ids))
-	for _, id := range ids {
-		pgIDs = append(pgIDs, uuidToPgx(id))
-	}
-	rows, err := a.queries.GetDocumentsByIDs(ctx, pgIDs)
-	if err != nil {
-		return nil, err
-	}
-	docs := make([]model.Document, 0, len(rows))
-	for _, r := range rows {
-		docs = append(docs, batchRowToDocument(r))
-	}
-	return docs, nil
 }
 
 // FindByExternalIDAndBucket implements port.DocumentRepo's dedup lookup.

@@ -248,32 +248,15 @@ func TestRouter_InternalNoAuth(t *testing.T) {
 	}
 }
 
-// TestRouter_MetaBatchCoexistsWithNeighbours guards the one genuinely risky thing about
-// POST /internal/file/meta-batch: it is a static segment living in the same subtree as the
-// parameterized /file/{id}/meta and the static /file/copy, so it must neither shadow the
-// parameterized sibling nor be shadowed by it — an assumption about the router, therefore
+// TestRouter_StaticAndParameterizedSiblingsCoexist guards the genuinely risky thing about the
+// /internal/file subtree: static segments (`/file/copy`) live alongside the parameterized
+// /file/{id}/meta, so neither may shadow the other — an assumption about the router, therefore
 // asserted rather than assumed.
 //
-// Each of the three routes is identified by BEHAVIOUR, not just by "not 404": the batch body
-// is deliberately sent to /file/copy too, where Copy's strict decode must reject `ids` as an
-// unknown field. If the router ever collapsed the two, that request would answer 200 instead.
-func TestRouter_MetaBatchCoexistsWithNeighbours(t *testing.T) {
+// Each route is identified by BEHAVIOUR, not just by "not 404": the body carrying an unknown
+// `ids` field is sent to /file/copy, where Copy's strict decode must reject it.
+func TestRouter_StaticAndParameterizedSiblingsCoexist(t *testing.T) {
 	batchBody := `{"ids":["` + uuid.New().String() + `"]}`
-
-	t.Run("MetaBatch", func(t *testing.T) {
-		r := testRouter()
-		req := httptest.NewRequest(http.MethodPost, "/internal/file/meta-batch", strings.NewReader(batchBody))
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("POST /internal/file/meta-batch = %d, want 200: %s", rr.Code, rr.Body.String())
-		}
-		if !strings.Contains(rr.Body.String(), `"files"`) {
-			t.Errorf("body = %s, want the batch response shape", rr.Body.String())
-		}
-	})
 
 	// The parameterized sibling must still resolve — a literal segment registered next to
 	// {id} must not shadow it.
@@ -302,19 +285,6 @@ func TestRouter_MetaBatchCoexistsWithNeighbours(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("POST /internal/file/copy with a batch body = %d, want 400 (Copy rejects the unknown `ids` field): %s",
 				rr.Code, rr.Body.String())
-		}
-	})
-
-	// The batch route is POST-only; a GET must be a 405 from the SAME path node, not a match
-	// against one of the GET routes in this subtree.
-	t.Run("GetOnBatchPathIs405", func(t *testing.T) {
-		r := testRouter()
-		req := httptest.NewRequest(http.MethodGet, "/internal/file/meta-batch", nil)
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("GET /internal/file/meta-batch = %d, want 405: %s", rr.Code, rr.Body.String())
 		}
 	})
 }

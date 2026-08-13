@@ -153,39 +153,6 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// DocumentMetaBatchRequest is the body for POST /internal/file/meta-batch.
-// IDs is a bounded, non-empty list of document ids; every element must be a
-// valid UUID. Duplicates are de-duplicated server-side.
-//
-// Deliberately NO `apispec:"format=uuid"` tag here, unlike the other
-// UUID-valued body fields: the generator applies a field tag to the FIELD's
-// schema, which for a slice is the ARRAY — it emitted `format: uuid` next to
-// `type: array` rather than inside `items`, an inert keyword in the wrong
-// place. apispec v0.4.25 has no items-level tag, so the UUID requirement is
-// stated in the handler's doc comment (which IS published, as the operation
-// description) instead of mis-declared here.
-type DocumentMetaBatchRequest struct {
-	IDs []string `json:"ids"`
-}
-
-// DocumentMetaBatchResponse is returned by POST /internal/file/meta-batch —
-// the batched form of GET /internal/file/{id}/meta, reusing that endpoint's
-// exact per-document shape.
-//
-// Files is a PARTIAL result by design: an id that resolves to no row is simply
-// absent (a document may be deleted between the caller's read and this batch),
-// which is a 200, not an error. Order is unspecified; the caller maps by id.
-type DocumentMetaBatchResponse struct {
-	Files []DocumentMetaResponse `json:"files"`
-}
-
-// Render writes the response as JSON with HTTP 200.
-func (r DocumentMetaBatchResponse) Render(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(r)
-}
-
 // UpdateDocumentRequest is the body for PATCH /internal/file/:id — the
 // "move + re-attribute" primitive. All fields are optional; at least one must
 // be present. Omitted fields retain their current value. mimeType, externalID,
