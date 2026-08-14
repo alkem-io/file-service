@@ -166,13 +166,25 @@ func TestReservedReportDirMatchesConfig(t *testing.T) {
 // because reading the file back in the same process proves neither.
 func TestReportSink_JournalFlushesTheDirectoryEntryOnce(t *testing.T) {
 	sink := NewReportSink(t.TempDir(), reservedDir)
+
+	// The regression was ensureDir setting the flag syncDirOnce guards on, which made
+	// the fsync unreachable. Asserting only the FINAL state cannot catch that — both
+	// flags end up true either way. So assert the two separately, in order: creating
+	// the directory must NOT mark it synced.
+	if err := sink.ensureDir(); err != nil {
+		t.Fatalf("ensureDir: %v", err)
+	}
+	if !sink.dirCreated {
+		t.Error("ensureDir did not record that the directory exists")
+	}
+	if sink.dirSynced {
+		t.Fatal("ensureDir marked the directory SYNCED — syncDirOnce then returns early and the flush never runs, which is the regression this test exists for")
+	}
+
 	if _, err := sink.AppendJournal("run.ndjson", []byte("{}\n")); err != nil {
 		t.Fatalf("first append: %v", err)
 	}
 	if !sink.dirSynced {
 		t.Error("the first append never flushed the directory entry — a crash loses the journal's NAME, and with it every mapping inside")
-	}
-	if !sink.dirCreated {
-		t.Error("dirCreated not set after MkdirAll")
 	}
 }

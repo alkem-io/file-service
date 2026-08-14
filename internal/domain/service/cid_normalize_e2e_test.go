@@ -43,17 +43,28 @@ func digestOf(b []byte) string {
 
 func e2ePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
+	// Skipping is only honest when nobody ASKED for a database. CI sets
+	// TEST_DATABASE_URL, so an unreachable one there means the service container
+	// broke — and skipping would turn this into a green job asserting nothing, which
+	// is the exact failure this file's header is about.
+	dsn, required := os.LookupEnv("TEST_DATABASE_URL")
 	if dsn == "" {
+		required = false
 		dsn = "postgres://synapse:synapse@localhost:5432/alkemio?sslmode=disable" //nolint:gosec // test credentials
+	}
+	fail := t.Skipf
+	if required {
+		fail = t.Fatalf
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
-		t.Skipf("no test database: %v", err)
+		fail("test database: %v", err)
+		return nil
 	}
 	if err := pool.Ping(context.Background()); err != nil {
 		pool.Close()
-		t.Skipf("test database unreachable: %v", err)
+		fail("test database unreachable: %v", err)
+		return nil
 	}
 	return pool
 }

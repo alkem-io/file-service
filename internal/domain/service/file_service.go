@@ -57,8 +57,9 @@ type FileService struct {
 	Auth    port.AuthPort
 	Storage port.StoragePort
 	// LegacyStore is the one-off migration surface (018). Nil on every serving path —
-	// only the sweep-cids subcommand sets it, which is why those seven methods do not
-	// sit on StoragePort where every consumer and every backend would inherit them.
+	// only the sweep-cids subcommand sets it, which is why those methods live here
+	// rather than on StoragePort, where every consumer and every backend would inherit
+	// them.
 	LegacyStore port.LegacyBlobStore
 	Processor   port.ImageProcessor
 	Logger      *zap.Logger

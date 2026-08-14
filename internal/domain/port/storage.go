@@ -69,7 +69,7 @@ type StageWriter interface {
 // LegacyBlobStore is the one-off migration surface: everything `sweep-cids` needs and
 // nothing else does.
 //
-// It is a SEPARATE port for the same reason ReportSink is. These seven methods have
+// It is a SEPARATE port for the same reason ReportSink is. These methods have
 // exactly one caller, and putting them on StoragePort made every serving-path consumer
 // depend on them and every future backend implement them — for a migration that
 // converges and goes away. SameFile is a POSIX inode concept with no object-store

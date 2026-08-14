@@ -228,12 +228,17 @@ func (a *Adapter) HasContent() (bool, error) {
 	}
 	defer func() { _ = d.Close() }()
 	for {
-		names, err := d.Readdirnames(64)
-		for _, n := range names {
+		// ReadDir, not Readdirnames: names alone carry no entry type, so a DIRECTORY
+		// whose name happens to pass IsBlobName would satisfy this check while
+		// ListLegacyNamed — which does check IsDir — skips it. The two walks must
+		// agree on what content is, or the pre-flight passes over a store the scan
+		// then finds empty.
+		entries, err := d.ReadDir(64)
+		for _, e := range entries {
 			// A BLOB, not merely "not a sidecar". The reserved directories and another
 			// job's leftover temp files share this flat namespace, so counting entries
 			// would let a store that lost every blob pass on the strength of them.
-			if IsBlobName(n) {
+			if !e.IsDir() && IsBlobName(e.Name()) {
 				return true, nil
 			}
 		}
