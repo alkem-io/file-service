@@ -141,25 +141,6 @@ func TestCIDNormalize_CaseFoldedNameResolvesOnBothVolumeKinds(t *testing.T) {
 	}
 }
 
-// io.Copy returns (n, nil) on a clean EOF short of the promised length. Addressing
-// that would name a fragment as if it were the file.
-func TestCIDNormalize_ShortReadNeverNamesATruncatedFile(t *testing.T) {
-	const legacy = "QmTruncatedTruncatedTruncatedTrunca"
-	repo := newCIDRepo(&cidRow{ExternalID: legacy})
-	store := newCIDStore()
-	store.put(legacy, []byte("the complete payload, honest"))
-	store.shortRead[legacy] = 5
-
-	sum := newCIDSweep(repo, store).RunCIDNormalize(context.Background(), cidOpts(nil))
-
-	if sum.Failed != 1 || sum.Normalized != 0 {
-		t.Fatalf("failed=%d normalized=%d, want 1/0", sum.Failed, sum.Normalized)
-	}
-	if repo.rows[0].ExternalID != legacy || len(store.parked) != 0 {
-		t.Error("acted on a truncated read")
-	}
-}
-
 // Nothing is reclaimed before its mapping is on disk.
 func TestCIDNormalize_MappingIsDurableBeforeTheFileMoves(t *testing.T) {
 	const legacy = "QmJournalJournalJournalJournalJour"

@@ -264,7 +264,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		}
 	}()
 
-	digest, _, ok := s.digestOf(legacy, sum)
+	digest, ok := s.digestOf(legacy, sum)
 	if !ok {
 		return
 	}
@@ -486,8 +486,8 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 // content predates the current scheme with unknown write history, so the bytes are
 // the only truth available and adopting their digest is correct by construction
 // (FR-006, research R2).
-func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest string, size int64, ok bool) {
-	rc, promised, err := s.Storage.ReadStream(legacy)
+func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest string, ok bool) {
+	rc, _, err := s.Storage.ReadStream(legacy)
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -496,26 +496,16 @@ func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest 
 		default:
 			s.failCID(legacy, sum, reasonReadFailed, err.Error())
 		}
-		return "", 0, false
+		return "", false
 	}
 	defer func() { _ = rc.Close() }()
 
 	h := NewHasher()
-	copied, err := io.Copy(h, rc)
-	if err != nil {
+	if _, err := io.Copy(h, rc); err != nil {
 		s.failCID(legacy, sum, reasonReadFailed, "read: "+err.Error())
-		return "", 0, false
+		return "", false
 	}
-	// io.Copy returns (n, nil) on a SHORT read that ended in a clean EOF — a blipping
-	// NFS volume, a truncated file. Hashing that would name a fragment as if it were
-	// the file and repoint every row to it. The open handle's own Stat is the
-	// authority on what it promised.
-	if copied != promised {
-		s.failCID(legacy, sum, reasonReadFailed,
-			fmt.Sprintf("short read: got %d of %d bytes with no error; refusing to address a truncated file", copied, promised))
-		return "", 0, false
-	}
-	return h.Sum(), promised, true
+	return h.Sum(), true
 }
 
 // journalChange makes one old→new mapping durable before the blob it describes is

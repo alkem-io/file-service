@@ -1,5 +1,9 @@
 -- Minimal tables the end-to-end sweep test writes to, for CI only.
 --
+-- Lives in db/testdata/, NOT db/schema/. sqlc.yaml points at schema/ as its source, so
+-- a file dropped there becomes part of the generated code and breaks the freshness
+-- check — which is exactly what it did.
+--
 -- NOT a schema definition. `file` is mirrored in document.sql for sqlc codegen; these
 -- two are server-owned and appear here solely because the e2e fixture inserts rows to
 -- satisfy the shape the real database has. Only the columns the test actually writes

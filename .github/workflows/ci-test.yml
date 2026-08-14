@@ -51,7 +51,7 @@ jobs:
           PGPASSWORD: synapse
         run: |
           set -euo pipefail
-          psql -h localhost -U synapse -d alkemio -v ON_ERROR_STOP=1 -f db/schema/ci-e2e-fixtures.sql
+          psql -h localhost -U synapse -d alkemio -v ON_ERROR_STOP=1 -f db/testdata/ci-e2e-fixtures.sql
           psql -h localhost -U synapse -d alkemio -v ON_ERROR_STOP=1 -f db/schema/document.sql
       - name: make test-e2e
         env:

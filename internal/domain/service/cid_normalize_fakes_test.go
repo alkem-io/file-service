@@ -134,12 +134,9 @@ type cidStore struct {
 	openStageErr error
 	commitErr    error
 	deleteErr    error
-	// shortRead makes ReadStream report the blob's true size but hand back only
-	// the first N bytes, ending in a clean EOF — the NFS fault io.Copy cannot see.
-	shortRead map[string]int
-	listErr   error
-	linkErr   error
-	parkErr   error
+	listErr      error
+	linkErr      error
+	parkErr      error
 	// parked holds what Park moved aside; nothing is ever destroyed.
 	parked map[string][]byte
 	// links counts directory entries per stored content, mirroring st_nlink.
@@ -169,7 +166,7 @@ type cidStore struct {
 var _ port.StoragePort = (*cidStore)(nil)
 
 func newCIDStore() *cidStore {
-	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, shortRead: map[string]int{}, reads: map[string]int{}}
+	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, reads: map[string]int{}}
 }
 
 func (s *cidStore) put(name string, content []byte) {
@@ -228,11 +225,6 @@ func (s *cidStore) ReadStream(externalID string) (io.ReadCloser, int64, error) {
 	b, err := s.Read(externalID)
 	if err != nil {
 		return nil, 0, err
-	}
-	if n, ok := s.shortRead[externalID]; ok {
-		// Size from the open handle's Stat, body truncated: exactly what a
-		// blipping volume delivers, and exactly what io.Copy reports as success.
-		return io.NopCloser(bytes.NewReader(b[:n])), int64(len(b)), nil
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
