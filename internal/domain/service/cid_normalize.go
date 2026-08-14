@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -21,15 +20,11 @@ import (
 // change the outcome, so they must never fail the run or the operator has no
 // terminating condition. The last two are FAILURES, where a re-run can help.
 // Reasons a legacy blob was not normalized, fixed by
-// contracts/run-report.schema.json. content_absent, unaddressable_name and
-// already_addressed are SKIPS — a re-run cannot change the outcome, so they must never
+// contracts/run-report.schema.json. unaddressable_name and already_addressed are SKIPS — a re-run cannot change the outcome, so they must never
 // fail the run or the operator has no terminating condition. read_failed and
 // write_failed are FAILURES, where a re-run can help. The split, not the raw count,
 // drives the exit code.
 const (
-	// reasonContentAbsent: no blob on the store under this name. The 2026-06-30
-	// NFS data-loss cohort (alkemio#1995), unfixable here — a skip, forever.
-	reasonContentAbsent = "content_absent"
 	// reasonUnaddressableName: the store's key rules refuse the name, so its bytes
 	// can never be fetched. Also unfixable by re-running (the name must be repaired
 	// first), but logged at WARN because — unlike the absent cohort — it is not an
@@ -445,18 +440,10 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 		}
 	}
 	path, err := s.LegacyStore.Park(legacy)
-	switch {
-	case err == nil && path == "":
-		// The name was already gone — a concurrent delete, a second sweep pod, or an
-		// interrupted prior run. Booking this as a park would stamp `parked: true`
-		// into the durable report for bytes that are not in the parked directory, and
-		// an operator reversing the migration would look for them and find nothing.
-		s.Logger.Info("sweep-cids: the legacy file was already gone; nothing parked",
-			zap.String("externalID", legacy))
-	case err != nil:
+	if err != nil {
 		s.Logger.Warn("sweep-cids: could not park the legacy file; it remains at its original name",
 			zap.String("externalID", legacy), zap.Error(err))
-	default:
+	} else {
 		change.Parked = true
 		sum.Parked++
 		s.Logger.Info("sweep-cids: parked", zap.String("externalID", legacy), zap.String("path", path))
@@ -489,13 +476,7 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest string, ok bool) {
 	rc, _, err := s.Storage.ReadStream(legacy)
 	if err != nil {
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			// Raced with another writer removing it, or the store moved underneath us.
-			s.skipCID(legacy, sum, reasonContentAbsent, "the file vanished between the scan and the read")
-		default:
-			s.failCID(legacy, sum, reasonReadFailed, err.Error())
-		}
+		s.failCID(legacy, sum, reasonReadFailed, err.Error())
 		return "", false
 	}
 	defer func() { _ = rc.Close() }()
