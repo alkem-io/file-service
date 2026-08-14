@@ -303,14 +303,6 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 // file, on a case-sensitive one they are two — which a map alone cannot express.
 func (s *cidStore) HasContent() (bool, error) { return len(s.blobs) > 0, nil }
 
-func (s *cidStore) SizeOf(externalID string) (int64, error) {
-	k := s.resolve(externalID)
-	if k == "" {
-		return 0, os.ErrNotExist
-	}
-	return int64(len(s.blobs[k])), nil
-}
-
 // ParkingWouldOrphan models the three situations: an alias (one entry, resolves to
 // the same content), a hard link this pass made (two entries), and two distinct files.
 func (s *cidStore) ParkingWouldOrphan(name, other string) (bool, error) {

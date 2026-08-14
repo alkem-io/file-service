@@ -118,9 +118,6 @@ type LegacyBlobStore interface {
 	// second copy of that rule, which could drift into a pre-flight that passes on
 	// entries the scan ignores.
 	HasContent() (bool, error)
-	// SizeOf returns a blob's size without reading it — enough to tell a dedup hit
-	// onto good content from one onto a truncated file.
-	SizeOf(externalID string) (int64, error)
 	// ParkingWouldOrphan reports whether removing `name` would leave `other`
 	// unresolvable — the only question the sweep actually has before it parks a
 	// legacy name, and one neither spelling nor inode identity answers alone.

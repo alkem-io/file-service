@@ -246,18 +246,6 @@ func (a *Adapter) HasContent() (bool, error) {
 	}
 }
 
-// SizeOf stats a blob without opening it.
-func (a *Adapter) SizeOf(externalID string) (int64, error) {
-	if !IsBlobName(externalID) {
-		return 0, fmt.Errorf("size %q: %w", externalID, port.ErrInvalidKey)
-	}
-	fi, err := os.Stat(a.filePath(externalID))
-	if err != nil {
-		return 0, err
-	}
-	return fi.Size(), nil
-}
-
 // ParkingWouldOrphan reports whether removing `name` would leave `other`
 // unresolvable: true only when they are the same inode reached through a single
 // directory entry — the case-insensitive alias. A hard link (same inode, two entries)

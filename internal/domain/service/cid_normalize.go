@@ -264,7 +264,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		}
 	}()
 
-	digest, size, ok := s.digestOf(legacy, sum)
+	digest, _, ok := s.digestOf(legacy, sum)
 	if !ok {
 		return
 	}
@@ -286,10 +286,6 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
 		return
 	}
-	if !s.dedupTargetIsIntact(legacy, digest, size, created, sum) {
-		return
-	}
-
 	// Ask the FILESYSTEM the question that actually matters: would parking this name
 	// remove the content?
 	//
@@ -633,27 +629,4 @@ func newPacer(blobsPerSecond float64) *rate.Limiter {
 		blobsPerSecond = floor
 	}
 	return rate.NewLimiter(rate.Limit(blobsPerSecond), 1)
-}
-
-// dedupTargetIsIntact checks a blob that was ALREADY at the digest before this pass.
-// Nothing else looks at it: Link reports a dedup hit and moves on. If that file is
-// truncated or empty — the NFS fault the short-read guard exists for — repointing
-// every row onto it and then parking the good copy serves corrupt content and reports
-// a clean success. The size just measured makes the check free.
-func (s *FileService) dedupTargetIsIntact(legacy, digest string, size int64, created bool, sum *CIDNormalizeSummary) bool {
-	if created {
-		return true // we made it from bytes we just hashed
-	}
-	existing, err := s.LegacyStore.SizeOf(digest)
-	if err != nil {
-		s.failCID(legacy, sum, reasonReadFailed, "size of existing blob: "+err.Error())
-		return false
-	}
-	if existing != size {
-		s.failCID(legacy, sum, reasonWriteFailed, fmt.Sprintf(
-			"a blob already at %s is %d bytes but this content is %d; refusing to repoint rows onto it",
-			digest, existing, size))
-		return false
-	}
-	return true
 }
