@@ -20,6 +20,12 @@ import (
 // contracts/run-report.schema.json. The first two are SKIPS — a re-run cannot
 // change the outcome, so they must never fail the run or the operator has no
 // terminating condition. The last two are FAILURES, where a re-run can help.
+// Reasons a legacy blob was not normalized, fixed by
+// contracts/run-report.schema.json. content_absent, unaddressable_name and
+// already_addressed are SKIPS — a re-run cannot change the outcome, so they must never
+// fail the run or the operator has no terminating condition. read_failed and
+// write_failed are FAILURES, where a re-run can help. The split, not the raw count,
+// drives the exit code.
 const (
 	// reasonContentAbsent: no blob on the store under this name. The 2026-06-30
 	// NFS data-loss cohort (alkemio#1995), unfixable here — a skip, forever.
@@ -284,16 +290,22 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 		return
 	}
 
-	// Ask the FILESYSTEM, not the spelling. `!created && EqualFold` was wrong in one
-	// direction that matters: on a case-sensitive volume both spellings can genuinely
-	// exist, so Link finds the target present (created=false), EqualFold says "same
-	// file", and the legacy one is never parked — leaving it in the content namespace
-	// forever and putting "zero legacy-named blobs remain" permanently out of reach.
+	// Ask the FILESYSTEM the question that actually matters: would parking this name
+	// remove the content?
+	//
+	// It would, on a case-INSENSITIVE volume, where the legacy spelling and the digest
+	// are one directory entry. It would NOT once this pass has hard-linked them, where
+	// there are two. `os.SameFile` says "same file" to both, which is why the earlier
+	// version left the legacy name unparked forever on any pass that was interrupted
+	// after Link — the digest entry made every later run think it was an alias.
+	//
+	// Link count separates them, and it is only asked when Link found the target
+	// already present: a link this pass just created always leaves two entries.
 	sameFile := false
 	if !created {
 		var err error
-		if sameFile, err = s.LegacyStore.SameFile(legacy, digest); err != nil {
-			s.failCID(legacy, sum, reasonReadFailed, "same-file check: "+err.Error())
+		if sameFile, err = s.LegacyStore.ParkingWouldOrphan(legacy, digest); err != nil {
+			s.failCID(legacy, sum, reasonReadFailed, "park-safety check: "+err.Error())
 			return
 		}
 	}
@@ -485,11 +497,6 @@ func (s *FileService) digestOf(legacy string, sum *CIDNormalizeSummary) (digest 
 		case errors.Is(err, os.ErrNotExist):
 			// Raced with another writer removing it, or the store moved underneath us.
 			s.skipCID(legacy, sum, reasonContentAbsent, "the file vanished between the scan and the read")
-		case errors.Is(err, port.ErrInvalidKey):
-			// The scan takes anything that is not the current scheme, so it can offer a
-			// name the store itself refuses to address. Unfixable by re-running.
-			s.skipCID(legacy, sum, reasonUnaddressableName,
-				"the store's key rules refuse this name, so its bytes cannot be fetched: "+err.Error())
 		default:
 			s.failCID(legacy, sum, reasonReadFailed, err.Error())
 		}

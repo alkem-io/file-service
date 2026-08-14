@@ -30,7 +30,13 @@ test-vips:
 # they assert what the code was written to do — so two defects reached a clean lint, a
 # clean race-enabled suite and five review rounds before a manual run found them.
 test-e2e:
+	# The service-package end-to-end sweep AND the alkemiodb tests that need a real
+	# database. The latter were the point of the exercise and were still skipping in
+	# CI: testPool calls t.Skipf when no database is reachable, so TestRenameExternalID
+	# — guarding the single UPDATE this whole migration turns on, where "an argument
+	# swap compiles" — passed without running on every PR.
 	$(GO) test -tags e2e $(GOFLAGS) ./internal/domain/service/ -run EndToEnd -v
+	$(GO) test $(GOFLAGS) ./internal/adapter/outbound/alkemiodb/ -v -run 'TestRename|TestListLegacy|TestPark|TestLink'
 
 lint:
 	golangci-lint run

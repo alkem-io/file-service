@@ -62,7 +62,7 @@ func (s *ReportSink) Dir() string { return s.dir }
 // but is short" is the worst possible failure. Rename is atomic within a
 // directory, so the final name only ever appears once the bytes are durable.
 func (s *ReportSink) WriteReport(name string, data []byte) (string, error) {
-	path, err := s.pathFor(name)
+	path, err := s.pathFor("write report", name)
 	if err != nil {
 		return "", err
 	}
@@ -101,7 +101,7 @@ func (s *ReportSink) WriteReport(name string, data []byte) (string, error) {
 // AppendJournal appends line to <dir>/<name>, fsyncing before it returns, so a
 // mapping recorded here outlives the process that recorded it.
 func (s *ReportSink) AppendJournal(name string, line []byte) (string, error) {
-	path, err := s.pathFor(name)
+	path, err := s.pathFor("append journal", name)
 	if err != nil {
 		return "", err
 	}
@@ -178,13 +178,13 @@ func (s *ReportSink) abs(path string) string {
 }
 
 // pathFor validates the caller's name and resolves it inside the reserved dir.
-func (s *ReportSink) pathFor(name string) (string, error) {
+func (s *ReportSink) pathFor(what, name string) (string, error) {
 	// "." and ".." survive filepath.Base unchanged, and Join would resolve ".."
 	// to the parent — outside the reserved directory — so they are rejected by
 	// name rather than left to fail on whatever the filesystem happens to do.
 	if name == "" || name == "." || name == ".." ||
 		name != filepath.Base(name) || strings.ContainsRune(name, os.PathSeparator) {
-		return "", fmt.Errorf("write report %q: %w", name, port.ErrInvalidKey)
+		return "", fmt.Errorf("%s %q: %w", what, name, port.ErrInvalidKey)
 	}
 	return filepath.Join(s.dir, name), nil
 }

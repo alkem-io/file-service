@@ -121,15 +121,20 @@ type LegacyBlobStore interface {
 	// SizeOf returns a blob's size without reading it — enough to tell a dedup hit
 	// onto good content from one onto a truncated file.
 	SizeOf(externalID string) (int64, error)
-	// SameFile reports whether two names resolve to the SAME underlying file.
+	// ParkingWouldOrphan reports whether removing `name` would leave `other`
+	// unresolvable — the only question the sweep actually has before it parks a
+	// legacy name, and one neither spelling nor inode identity answers alone.
 	//
-	// No string comparison can answer this. An uppercase-hex name and its lowercase
-	// digest are one file on a case-insensitive volume and two on a case-sensitive
-	// one — and on a case-sensitive volume both may genuinely exist, in which case
-	// EqualFold says "same" about two distinct files and the old one is never
-	// reclaimed. Only the filesystem knows; implementations compare identity, not
-	// names.
-	SameFile(a, b string) (bool, error)
+	// Three situations, all reachable, that must not be conflated:
+	//
+	//   - case-INSENSITIVE volume: the two spellings are ONE directory entry. Removing
+	//     it removes the content. → true
+	//   - this pass hard-linked them: same inode, TWO entries. → false
+	//   - two genuinely distinct files with identical bytes: different inodes. → false
+	//
+	// `os.SameFile` alone says "same" to the first two; link count alone says "sole
+	// entry" to the first and third. Only both together separate all three.
+	ParkingWouldOrphan(name, other string) (bool, error)
 	// Park moves a blob out of the content namespace into a reserved sidecar
 	// directory, returning where it went. It is the non-destructive alternative to
 	// Delete for a migration: the bytes remain on the volume, so a rename that

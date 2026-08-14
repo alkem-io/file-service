@@ -10,9 +10,11 @@
 #   kubectl -n <ns> apply -f 36-file-service-sweep-cids-job.yaml     # args: ["sweep-cids","--dry-run"]
 #   kubectl -n <ns> logs -f job/alkemio-file-service-sweep-cids      # read wouldNormalize (there is deliberately no wouldSkip)
 #
-#   # then, after confirming the count against an independent query, edit args to drop --dry-run:
-#   #   SELECT count(*) FROM file
-#   #   WHERE "temporaryLocation" IS NOT TRUE AND "externalID" !~ '^[0-9a-f]{64}$';
+#   # then, after reading wouldNormalize, edit args to drop --dry-run.
+#   # Do NOT reconcile it against a row count: wouldNormalize counts BLOBS on the store,
+#   # a SELECT over `file` counts ROWS (many per blob) and misses the unreferenced blobs
+#   # this sweep also processes. On the corpus this exists for they cannot agree, so a
+#   # correct preview looks wrong. contracts/sweep-cids-cli.md is authoritative.
 #
 # NOTHING IS DELETED. Each blob is hard-linked under the digest of its bytes, ONE
 # `UPDATE ... WHERE "externalID" = <legacy>` moves every row naming it, and the legacy file is then

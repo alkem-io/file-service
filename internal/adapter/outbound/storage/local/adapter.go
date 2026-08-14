@@ -115,8 +115,6 @@ func (a *Adapter) Delete(externalID string) error {
 	return nil
 }
 
-// Exists stats the blob path without opening it. (false, nil) is a
-// definitive "not there"; any other stat failure is returned as an error.
 // sha3HexName matches the current content-addressing scheme: lowercase SHA3-256
 // hex. Anything else on the volume is legacy-named and in scope for the sweep.
 var sha3HexName = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -170,10 +168,23 @@ func (a *Adapter) ListLegacyNamed(limit int) ([]string, []string, error) {
 				continue // already the current scheme
 			}
 			if !IsBlobName(n) {
-				// The store cannot address this name, so the sweep can never fetch it —
-				// but dropping it silently is how a pass reports "converged" over content
-				// still on disk. Surfaced instead, for the caller to report.
-				unaddressable = append(unaddressable, n)
+				// A name the store cannot address. Two very different populations land
+				// here and only one is the sweep's business:
+				//
+				//   - another job's leftover working files. The storage-checkup job
+				//     writes files_list.txt and table_entries.txt into this exact
+				//     directory and removes them only in its last step, so an evicted
+				//     pod leaves them permanently. Reporting those as unbackable
+				//     data-at-risk needing manual repair is a false alarm on every
+				//     volume that job has touched.
+				//   - a genuinely odd legacy name. Unbackable, on disk, and the thing
+				//     the sweep exists to surface.
+				//
+				// A dot is the discriminator that costs nothing: no content-addressed
+				// name has ever contained one, and every one of those temp files does.
+				if !strings.Contains(n, ".") && len(unaddressable) < limit {
+					unaddressable = append(unaddressable, n)
+				}
 				continue
 			}
 			names = append(names, n)
@@ -247,26 +258,33 @@ func (a *Adapter) SizeOf(externalID string) (int64, error) {
 	return fi.Size(), nil
 }
 
-// SameFile reports whether two names resolve to the same underlying file, by inode
-// identity rather than by spelling. os.SameFile is the only thing that can answer it:
-// on a case-insensitive volume two spellings share one inode; on a case-sensitive one
-// they are separate files that may both exist.
-func (a *Adapter) SameFile(x, y string) (bool, error) {
-	if !IsBlobName(x) || !IsBlobName(y) {
-		return false, fmt.Errorf("same-file %q/%q: %w", x, y, port.ErrInvalidKey)
+// ParkingWouldOrphan reports whether removing `name` would leave `other`
+// unresolvable: true only when they are the same inode reached through a single
+// directory entry — the case-insensitive alias. A hard link (same inode, two entries)
+// and two distinct files both survive the removal.
+func (a *Adapter) ParkingWouldOrphan(name, other string) (bool, error) {
+	if !IsBlobName(name) || !IsBlobName(other) {
+		return false, fmt.Errorf("park check %q/%q: %w", name, other, port.ErrInvalidKey)
 	}
-	xi, err := os.Stat(a.filePath(x))
+	ni, err := os.Stat(a.filePath(name))
 	if err != nil {
 		return false, err
 	}
-	yi, err := os.Stat(a.filePath(y))
+	oi, err := os.Stat(a.filePath(other))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil // y is not there at all, so they cannot be one file
+			return false, nil // nothing at the other name to orphan
 		}
 		return false, err
 	}
-	return os.SameFile(xi, yi), nil
+	if !os.SameFile(ni, oi) {
+		return false, nil // distinct files; removing one leaves the other
+	}
+	st, ok := ni.Sys().(*syscall.Stat_t)
+	if !ok {
+		return true, nil // unknown platform: assume the unsafe case, which only retains a blob
+	}
+	return st.Nlink <= 1, nil
 }
 
 // ReservedParkedDir holds blobs a migration moved aside. Same construction as
@@ -301,7 +319,9 @@ func (a *Adapter) Park(externalID string) (string, error) {
 	return dst, nil
 }
 
-// Exists reports whether a blob is present without reading its bytes.
+// Exists stats the blob path without opening it. (false, nil) is a definitive "not
+// there"; any other stat failure is returned as an error — the distinction callers
+// rely on to avoid reading an NFS outage as a missing blob.
 func (a *Adapter) Exists(externalID string) (bool, error) {
 	if !IsBlobName(externalID) {
 		return false, fmt.Errorf("%q: %w", externalID, port.ErrInvalidKey)

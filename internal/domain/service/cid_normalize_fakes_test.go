@@ -142,6 +142,8 @@ type cidStore struct {
 	parkErr   error
 	// parked holds what Park moved aside; nothing is ever destroyed.
 	parked map[string][]byte
+	// links counts directory entries per stored content, mirroring st_nlink.
+	links map[string]int
 	// caseInsensitive models APFS/SMB/Azure Files, where two names differing only by
 	// case ARE one file. A plain map is case-SENSITIVE, so without this the fakes can
 	// only ever exercise one of the two volume kinds — which is how a data-loss path
@@ -170,7 +172,18 @@ func newCIDStore() *cidStore {
 	return &cidStore{blobs: map[string][]byte{}, readErr: map[string]error{}, shortRead: map[string]int{}, reads: map[string]int{}}
 }
 
-func (s *cidStore) put(name string, content []byte) { s.blobs[name] = content }
+func (s *cidStore) put(name string, content []byte) {
+	s.blobs[name] = content
+	s.link(name, 1)
+}
+
+// link records an entry count, tolerating a zero-value cidStore built as a literal.
+func (s *cidStore) link(name string, n int) {
+	if s.links == nil {
+		s.links = map[string]int{}
+	}
+	s.links[name] = n
+}
 
 func (s *cidStore) has(name string) bool { return s.resolve(name) != "" }
 
@@ -278,6 +291,8 @@ func (s *cidStore) Link(existing, newName string) (bool, error) {
 		return false, nil // dedup hit — on a case-insensitive volume, the same file
 	}
 	s.blobs[newName] = s.blobs[existing]
+	s.link(newName, 1)
+	s.link(existing, s.links[existing]+1) // a second entry for the same content
 	s.created = append(s.created, newName)
 	return true, nil
 }
@@ -296,9 +311,17 @@ func (s *cidStore) SizeOf(externalID string) (int64, error) {
 	return int64(len(s.blobs[k])), nil
 }
 
-func (s *cidStore) SameFile(x, y string) (bool, error) {
-	kx, ky := s.resolve(x), s.resolve(y)
-	return kx != "" && kx == ky, nil
+// ParkingWouldOrphan models the three situations: an alias (one entry, resolves to
+// the same content), a hard link this pass made (two entries), and two distinct files.
+func (s *cidStore) ParkingWouldOrphan(name, other string) (bool, error) {
+	kn, ko := s.resolve(name), s.resolve(other)
+	if kn == "" || ko == "" {
+		return false, nil
+	}
+	if kn != ko {
+		return false, nil // distinct entries
+	}
+	return s.links[kn] <= 1, nil
 }
 
 func (s *cidStore) Park(externalID string) (string, error) {
