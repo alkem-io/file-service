@@ -17,3 +17,43 @@ jobs:
       openapi-make-target: openapi
       extra-suite-tags: vips
       extra-suite-apt: libvips-dev
+
+  # The end-to-end sweep test drives the migration through its REAL adapters against a
+  # real Postgres and a real directory. It is tag-gated (`e2e`) because it needs a
+  # database, which is why it did not run here — and it is the suite that caught two
+  # defects the fake-based tests could not, because those fakes share the
+  # implementation's blind spots. A suite that only runs when someone remembers to run
+  # it protects nothing.
+  e2e:
+    name: End-to-end sweep (real adapters + Postgres)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: synapse
+          POSTGRES_PASSWORD: synapse
+          POSTGRES_DB: alkemio
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U synapse -d alkemio"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Create the tables the fixture writes to
+        env:
+          PGPASSWORD: synapse
+        run: |
+          set -euo pipefail
+          psql -h localhost -U synapse -d alkemio -v ON_ERROR_STOP=1 -f db/schema/ci-e2e-fixtures.sql
+          psql -h localhost -U synapse -d alkemio -v ON_ERROR_STOP=1 -f db/schema/document.sql
+      - name: make test-e2e
+        env:
+          TEST_DATABASE_URL: postgres://synapse:synapse@localhost:5432/alkemio?sslmode=disable
+        run: make test-e2e
