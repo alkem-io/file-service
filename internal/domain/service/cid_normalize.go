@@ -163,7 +163,7 @@ func (s *FileService) RunCIDNormalize(ctx context.Context, opts CIDNormalizeOpti
 
 	// One walk of the store, up to a bounded number of matches. Legacy names are rare
 	// in a large corpus, so paging would re-enumerate everything to find a handful.
-	work, unaddressable, err := s.Storage.ListLegacyNamed(cidNormalizeMaxPerPass)
+	work, unaddressable, err := s.LegacyStore.ListLegacyNamed(cidNormalizeMaxPerPass)
 	if err != nil { //nolint:nestif // the error path deliberately falls through to the report
 		// A scan error is NOT an empty corpus: an unmounted volume must not read as a
 		// fully-swept store.
@@ -275,7 +275,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 	//   created == true   → it made a second name, so they ARE two files
 	//   created == false  → the target already resolved to existing content, either a
 	//                       genuine dedup hit or the same file under a folded name
-	created, err := s.Storage.Link(legacy, digest)
+	created, err := s.LegacyStore.Link(legacy, digest)
 	if err != nil {
 		s.failCID(legacy, sum, reasonWriteFailed, "link: "+err.Error())
 		return
@@ -292,7 +292,7 @@ func (s *FileService) normalizeOneCID(ctx context.Context, legacy string, sum *C
 	sameFile := false
 	if !created {
 		var err error
-		if sameFile, err = s.Storage.SameFile(legacy, digest); err != nil {
+		if sameFile, err = s.LegacyStore.SameFile(legacy, digest); err != nil {
 			s.failCID(legacy, sum, reasonReadFailed, "same-file check: "+err.Error())
 			return
 		}
@@ -436,7 +436,7 @@ func (s *FileService) parkLegacy(legacy, digest string, records int64, sum *CIDN
 			return
 		}
 	}
-	path, err := s.Storage.Park(legacy)
+	path, err := s.LegacyStore.Park(legacy)
 	switch {
 	case err == nil && path == "":
 		// The name was already gone — a concurrent delete, a second sweep pod, or an
@@ -637,7 +637,7 @@ func (s *FileService) dedupTargetIsIntact(legacy, digest string, size int64, cre
 	if created {
 		return true // we made it from bytes we just hashed
 	}
-	existing, err := s.Storage.SizeOf(digest)
+	existing, err := s.LegacyStore.SizeOf(digest)
 	if err != nil {
 		s.failCID(legacy, sum, reasonReadFailed, "size of existing blob: "+err.Error())
 		return false

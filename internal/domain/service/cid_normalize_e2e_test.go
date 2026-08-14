@@ -129,9 +129,10 @@ func TestSweepCIDsEndToEnd(t *testing.T) {
 	seedRow(t, pool, bucket, singleCID)
 
 	svc := &service.FileService{
-		Repo:    alkemiodb.New(pool),
-		Storage: local.New(store),
-		Logger:  zap.NewNop(),
+		Repo:        alkemiodb.New(pool),
+		Storage:     local.New(store),
+		LegacyStore: local.New(store),
+		Logger:      zap.NewNop(),
 	}
 	sink := local.NewReportSink(store, local.ReservedReportDir)
 	opts := service.CIDNormalizeOptions{Rate: 10_000, Report: sink}

@@ -53,11 +53,15 @@ func processResultToContentMetadata(r port.ProcessResult, mimeType string) model
 
 // FileService orchestrates file and document operations.
 type FileService struct {
-	Repo      port.DocumentRepo
-	Auth      port.AuthPort
-	Storage   port.StoragePort
-	Processor port.ImageProcessor
-	Logger    *zap.Logger
+	Repo    port.DocumentRepo
+	Auth    port.AuthPort
+	Storage port.StoragePort
+	// LegacyStore is the one-off migration surface (018). Nil on every serving path —
+	// only the sweep-cids subcommand sets it, which is why those seven methods do not
+	// sit on StoragePort where every consumer and every backend would inherit them.
+	LegacyStore port.LegacyBlobStore
+	Processor   port.ImageProcessor
+	Logger      *zap.Logger
 	// Outbox, when non-nil, makes create/replace of a NON-temporary object also commit a
 	// backup-outbox row in the same transaction (008-continuous-file-backup FR-001). nil = the
 	// producer is off (flag default) and the plain Repo path runs — no behaviour change.

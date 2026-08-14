@@ -189,14 +189,8 @@ func (m *mockStorage) ReadStream(_ string) (io.ReadCloser, int64, error) {
 	}
 	return io.NopCloser(bytes.NewReader(m.data)), int64(len(m.data)), nil
 }
-func (m *mockStorage) Delete(_ string) error                             { return nil }
-func (m *mockStorage) Link(_, _ string) (bool, error)                    { return true, nil }
-func (m *mockStorage) HasContent() (bool, error)                         { return true, nil }
-func (m *mockStorage) SizeOf(_ string) (int64, error)                    { return 0, nil }
-func (m *mockStorage) SameFile(_, _ string) (bool, error)                { return false, nil }
-func (m *mockStorage) Park(_ string) (string, error)                     { return "", nil }
-func (m *mockStorage) ListLegacyNamed(_ int) ([]string, []string, error) { return nil, nil, nil }
-func (m *mockStorage) Exists(_ string) (bool, error)                     { return m.data != nil, nil }
+func (m *mockStorage) Delete(_ string) error         { return nil }
+func (m *mockStorage) Exists(_ string) (bool, error) { return m.data != nil, nil }
 
 func TestPublicHandler_Authorized(t *testing.T) {
 	docID := uuid.New()

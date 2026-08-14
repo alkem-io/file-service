@@ -10,7 +10,7 @@ import (
 const cidTestRate = 10_000
 
 func newCIDSweep(repo *cidRepo, store *cidStore) *FileService {
-	return &FileService{Repo: repo, Storage: store, Logger: testLogger()}
+	return &FileService{Repo: repo, Storage: store, LegacyStore: store, Logger: testLogger()}
 }
 
 func cidOpts(sink *cidSink) CIDNormalizeOptions {

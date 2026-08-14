@@ -344,7 +344,7 @@ func runSweepCIDs(args []string) int {
 	// absent blob from an absent store ("that judgement belongs to the caller that knows what
 	// SHOULD exist"); this is that caller making it, once, before touching anything.
 	fileSvc := buildSweepCIDsService(base.pool, base.cfg, logger)
-	if err := verifySweepStorage(fileSvc.Storage, base.cfg.StoragePath); err != nil {
+	if err := verifySweepStorage(fileSvc.LegacyStore, base.cfg.StoragePath); err != nil {
 		logger.Error("sweep-cids: refusing to run — the content store is not usable",
 			zap.String("path", base.cfg.StoragePath), zap.Error(err))
 		return 1
@@ -408,12 +408,14 @@ func parseSweepRate(raw string) (*float64, error) {
 // production infrastructure, and it makes the Job fail for reasons unrelated to its work.
 func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.Logger) *service.FileService {
 	repo := alkemiodb.NewWithLogger(pool, logger)
-	svc := &service.FileService{
+	store := local.New(cfg.StoragePath)
+	return &service.FileService{
 		Repo:    repo,
-		Storage: local.New(cfg.StoragePath),
-		Logger:  logger,
+		Storage: store,
+		// The same adapter satisfies both ports; only the sweep needs the second.
+		LegacyStore: store,
+		Logger:      logger,
 	}
-	return svc
 }
 
 // verifySweepStorage checks the content store is actually there before an irreversible pass reads
@@ -429,7 +431,7 @@ func buildSweepCIDsService(pool *pgxpool.Pool, cfg *config.Config, logger *zap.L
 // and it could drift into a pre-flight that passes on entries the scan ignores — it
 // also hardcoded local-filesystem semantics into a check that must outlive the local
 // backend.
-func verifySweepStorage(store port.StoragePort, path string) error {
+func verifySweepStorage(store port.LegacyBlobStore, path string) error {
 	populated, err := store.HasContent()
 	if err != nil {
 		return err

@@ -38,6 +38,46 @@ type StoragePort interface {
 	// (false, nil) is a definitive "not there"; a non-nil error means the
 	// backend could not answer.
 	Exists(externalID string) (bool, error)
+	// OpenStage begins a streaming ingestion into not-yet-published storage
+	// (spec 020). Nothing is observable as a permanent object until Commit.
+	OpenStage(ctx context.Context) (StageWriter, error)
+}
+
+// StageWriter is a per-upload staging artifact. It hashes internally while
+// bytes are written; Commit finalizes the content identity and performs the
+// backend-specific publish (FS: no-overwrite hard link, with O_EXCL-copy
+// fallback; an object store would complete a multipart upload and copy to
+// the content-addressed key — the contract assumes no rename primitive).
+type StageWriter interface {
+	io.Writer
+	// Commit publishes the staged content under its content hash and
+	// returns the stored identity. Created=false signals a dedup hit (the
+	// blob already existed); the staging artifact is destroyed either way.
+	Commit() (model.StoredFile, error)
+	// Abort destroys the staging artifact. Idempotent; safe after a failed
+	// Commit and after a successful one (no-op then).
+	Abort() error
+	// StagedReaderAt exposes the bytes written so far for random-access
+	// inspection before Commit (e.g. reading a zip central directory). Valid
+	// only after writes complete and before Commit/Abort. The local FS backend
+	// returns the staging temp file; an object-store backend would satisfy this
+	// with ranged reads of the staged object (zip.NewReader uses ReadAt on the
+	// tail, so ranged GETs suffice).
+	StagedReaderAt() (io.ReaderAt, int64, error)
+}
+
+// LegacyBlobStore is the one-off migration surface: everything `sweep-cids` needs and
+// nothing else does.
+//
+// It is a SEPARATE port for the same reason ReportSink is. These seven methods have
+// exactly one caller, and putting them on StoragePort made every serving-path consumer
+// depend on them and every future backend implement them — for a migration that
+// converges and goes away. SameFile is a POSIX inode concept with no object-store
+// analogue and Park hardcodes a sidecar-directory model, so an S3 backend would be
+// writing stubs to satisfy an interface it has no business satisfying.
+//
+// local.Adapter satisfies both, so the wiring costs nothing.
+type LegacyBlobStore interface {
 	// ListLegacyNamed walks the blob namespace ONCE and returns the names that are
 	// not the current content-addressing scheme, up to limit. Reserved sidecar
 	// directories are never included.
@@ -101,30 +141,4 @@ type StoragePort interface {
 	// empty path as "nothing moved" rather than as a completed park, or they will
 	// report bytes as recoverable that are not in the parked directory.
 	Park(externalID string) (string, error)
-	// OpenStage begins a streaming ingestion into not-yet-published storage
-	// (spec 020). Nothing is observable as a permanent object until Commit.
-	OpenStage(ctx context.Context) (StageWriter, error)
-}
-
-// StageWriter is a per-upload staging artifact. It hashes internally while
-// bytes are written; Commit finalizes the content identity and performs the
-// backend-specific publish (FS: no-overwrite hard link, with O_EXCL-copy
-// fallback; an object store would complete a multipart upload and copy to
-// the content-addressed key — the contract assumes no rename primitive).
-type StageWriter interface {
-	io.Writer
-	// Commit publishes the staged content under its content hash and
-	// returns the stored identity. Created=false signals a dedup hit (the
-	// blob already existed); the staging artifact is destroyed either way.
-	Commit() (model.StoredFile, error)
-	// Abort destroys the staging artifact. Idempotent; safe after a failed
-	// Commit and after a successful one (no-op then).
-	Abort() error
-	// StagedReaderAt exposes the bytes written so far for random-access
-	// inspection before Commit (e.g. reading a zip central directory). Valid
-	// only after writes complete and before Commit/Abort. The local FS backend
-	// returns the staging temp file; an object-store backend would satisfy this
-	// with ranged reads of the staged object (zip.NewReader uses ReadAt on the
-	// tail, so ranged GETs suffice).
-	StagedReaderAt() (io.ReaderAt, int64, error)
 }
