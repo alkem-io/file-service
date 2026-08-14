@@ -146,7 +146,8 @@ was replaced already carries a different name and simply does not match.
 - **Reversible.** Nothing is deleted — legacy files are moved to
   `<LOCAL_STORAGE_PATH>/_parked/`. A rename that turns out to be wrong is repaired by
   moving one file back. Clear that directory by hand only once the result is verified;
-  it is expected to be full afterwards. **Caveat:** `_parked/` and `_sweep-reports/`
+  it is expected to be full afterwards, and it costs no disk: parking is a rename of a
+  hard link, so a parked entry and the live blob are one file with two names. **Caveat:** `_parked/` and `_sweep-reports/`
   both live under the storage root that infra-ops' file-storage cleanup Job deletes
   recursively — see `alkem-io/infrastructure-operations#2566`. That ticket, not the
   reserved-name rule, is what keeps them alive.

@@ -175,7 +175,9 @@ spec:
         # CAPACITY: no headroom is needed for a second copy. The new name is produced by
         # os.Link (a directory entry, not data blocks) and parking is os.Rename within the
         # same volume, so the pass moves no bytes. The lasting cost is that `_parked/`
-        # retains the whole legacy cohort until an operator clears it.
+        # holds HARD LINKS to the live blobs, not copies — measured: same inode, link
+        # count 2 — so retaining it costs no disk at all. Clearing it frees nothing and
+        # only discards the old names.
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
