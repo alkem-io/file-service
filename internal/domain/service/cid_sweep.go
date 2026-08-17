@@ -117,7 +117,7 @@ func (s *CIDSweeper) migrateCandidate(
 	result.ReferencesUpdated += updated
 
 	if err := s.finalizeAliases(ctx, prepared.ObsoleteAliases, target); err != nil {
-		return err
+		return fmt.Errorf("references already updated; obsolete alias finalization requires operator follow-up: %w", err)
 	}
 
 	if prepared.Created {
@@ -157,6 +157,7 @@ func exactUpdateAliases(source, target string, aliases []port.CIDAlias) ([]strin
 
 func (s *CIDSweeper) finalizeAliases(ctx context.Context, aliases []port.CIDStorageAlias, target string) error {
 	seen := make(map[string]struct{}, len(aliases))
+	var errs []error
 	for _, alias := range aliases {
 		if _, exists := seen[alias.Name]; exists {
 			continue
@@ -164,16 +165,18 @@ func (s *CIDSweeper) finalizeAliases(ctx context.Context, aliases []port.CIDStor
 		seen[alias.Name] = struct{}{}
 		remaining, err := s.Repo.CountCIDAliasReferences(ctx, alias.Name)
 		if err != nil {
-			return fmt.Errorf("count references for obsolete alias %s: %w", alias.Name, err)
+			errs = append(errs, fmt.Errorf("count references for obsolete alias %s: %w", alias.Name, err))
+			continue
 		}
 		if remaining != 0 {
-			return fmt.Errorf("obsolete alias %s still has %d references", alias.Name, remaining)
+			errs = append(errs, fmt.Errorf("obsolete alias %s still has %d references", alias.Name, remaining))
+			continue
 		}
 		if err := s.Storage.FinalizeCIDAlias(ctx, alias, target); err != nil {
-			return fmt.Errorf("finalize obsolete alias %s: %w", alias.Name, err)
+			errs = append(errs, fmt.Errorf("finalize obsolete alias %s: %w", alias.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func hashCIDSource(ctx context.Context, reader io.ReadCloser) (string, error) {

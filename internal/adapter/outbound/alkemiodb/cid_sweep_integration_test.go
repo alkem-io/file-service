@@ -66,12 +66,11 @@ func TestCIDMigrationAdapter_RealPostgresPreservesNonAddressColumns(t *testing.T
 		size, version          int
 		temporary              bool
 		bucket, auth           uuid.UUID
-		created, updated       time.Time
 		metadata               string
 	}
-	got := persistedRow{gotExternalID, gotMIME, gotName, gotSize, gotVersion, gotTemporary, gotBucket, gotAuth, gotCreated, gotUpdated, string(gotMetadata)}
-	want := persistedRow{target, "text/plain", "legacy.txt", 0, 7, true, bucketID, authID, now, now, `{"kept": true}`}
-	if got != want {
+	got := persistedRow{gotExternalID, gotMIME, gotName, gotSize, gotVersion, gotTemporary, gotBucket, gotAuth, string(gotMetadata)}
+	want := persistedRow{target, "text/plain", "legacy.txt", 0, 7, true, bucketID, authID, `{"kept": true}`}
+	if got != want || !gotCreated.Equal(now) || !gotUpdated.Equal(now) {
 		t.Fatalf("unexpected persisted row: externalID=%q mime=%q size=%d name=%q temporary=%v bucket=%s auth=%s version=%d created=%s updated=%s metadata=%s",
 			gotExternalID, gotMIME, gotSize, gotName, gotTemporary, gotBucket, gotAuth,
 			gotVersion, gotCreated, gotUpdated, gotMetadata)

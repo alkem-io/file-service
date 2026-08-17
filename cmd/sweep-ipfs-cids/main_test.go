@@ -42,6 +42,9 @@ func TestRunWith_ExitCodesAndTerminalSummary(t *testing.T) {
 			if tt.result.FailedSourceBlobs == 1 && !strings.Contains(stdout.String(), `"event":"cid_sweep_failure"`) {
 				t.Fatalf("stdout lacks failure event: %q", stdout.String())
 			}
+			if tt.runErr != nil && !strings.Contains(stdout.String(), `"event":"cid_sweep_abort"`) {
+				t.Fatalf("stdout lacks abort event: %q", stdout.String())
+			}
 			if !tt.wantCalled && stderr.Len() == 0 {
 				t.Fatal("invalid invocation must explain the error")
 			}

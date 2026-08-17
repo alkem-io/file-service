@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"strings"
@@ -349,6 +350,49 @@ func TestCIDSweeper_DatabaseGroupFailureDoesNotStopLaterCID(t *testing.T) {
 	}
 	if repo.refs[cidA] != 1 || repo.refs[cidB] != 0 || repo.refs[targetB] != 1 {
 		t.Fatalf("unexpected references: %v", repo.refs)
+	}
+}
+
+func TestCIDSweeper_AggregatesAliasFinalizationFailuresAfterReferenceUpdate(t *testing.T) {
+	cid := testCID("o")
+	content := []byte("post-update alias failures")
+	aliasA, aliasB := "legacyAliasA", "legacyAliasB"
+	repo := &sweepRepoFake{
+		candidates: []port.CIDCandidate{{ExternalID: cid}},
+		aliases:    map[string][]port.CIDAlias{},
+		refs:       map[string]int64{cid: 1},
+		updateErr:  map[string]error{},
+	}
+	events := []string{}
+	storage := &sweepStorageFake{
+		content: map[string][]byte{cid: content},
+		preparations: map[string]port.CIDTargetPreparation{cid: {
+			Created:         true,
+			ObsoleteAliases: []port.CIDStorageAlias{{Name: aliasA}, {Name: aliasB}},
+		}},
+		prepareErr: map[string]error{},
+		events:     &events,
+		beforeFinish: func(alias port.CIDStorageAlias) error {
+			return fmt.Errorf("forced failure for %s", alias.Name)
+		},
+	}
+
+	result, err := (&CIDSweeper{Repo: repo, Storage: storage}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ReferencesUpdated != 1 || result.FailedSourceBlobs != 1 {
+		t.Fatalf("post-update failure not accounted for: %+v", result)
+	}
+	if len(result.Failures) != 1 ||
+		!strings.Contains(result.Failures[0].Reason, "references already updated; obsolete alias finalization requires operator follow-up") ||
+		!strings.Contains(result.Failures[0].Reason, aliasA) ||
+		!strings.Contains(result.Failures[0].Reason, aliasB) {
+		t.Fatalf("failure lacks aggregated operator detail: %+v", result.Failures)
+	}
+	wantEvents := []string{"open:" + cid, "prepare:" + cid, "finalize:" + aliasA, "finalize:" + aliasB}
+	if strings.Join(events, "|") != strings.Join(wantEvents, "|") {
+		t.Fatalf("finalization stopped early: got %v, want %v", events, wantEvents)
 	}
 }
 
