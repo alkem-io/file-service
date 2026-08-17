@@ -1,12 +1,17 @@
-.PHONY: build build-stub docker test test-vips lint generate sqlc-generate openapi setup-hooks run clean
+.PHONY: build build-sweep build-stub docker test test-vips lint generate sqlc-generate openapi setup-hooks run clean
 
 BINARY := file-service
+SWEEP_BINARY := sweep-ipfs-cids
 GO := go
 GOFLAGS := -race
 
 build:
 	mkdir -p bin/
 	$(GO) build -tags vips -o bin/$(BINARY) ./cmd/server/
+
+build-sweep:
+	mkdir -p bin/
+	$(GO) build -o bin/$(SWEEP_BINARY) ./cmd/sweep-ipfs-cids/
 
 build-stub:
 	mkdir -p bin/
