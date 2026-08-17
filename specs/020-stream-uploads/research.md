@@ -178,6 +178,12 @@ the point.
 
 ## R8 — Fork consumption and pinning
 
+> **Superseded 2026-08-13.** The streaming work was upstreamed
+> (davidbyttow/govips#539 + #540). The `replace` directive is gone; `go.mod` now
+> requires `github.com/davidbyttow/govips/v2` directly at a master pseudo-version
+> (the streaming API is not yet in a tagged release). The decision below records
+> the original arrangement; the knob wiring and stub-build notes still hold.
+
 **Decision**: `go.mod` gains
 `replace github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 <pseudo-version of 10498ea>`.
 The fork deliberately keeps the upstream module path (`module

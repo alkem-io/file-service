@@ -3,7 +3,7 @@ module github.com/alkem-io/file-service
 go 1.26.1
 
 require (
-	github.com/davidbyttow/govips/v2 v2.18.0
+	github.com/davidbyttow/govips/v2 v2.18.1-0.20260808163446-115936532956
 	github.com/gabriel-vasile/mimetype v1.4.13
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/google/uuid v1.6.0
@@ -36,5 +36,3 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
-
-replace github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e
