@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.25
+# syntax=docker/dockerfile:1.26
 
 ARG GO_VERSION=1.26
 ARG ALPINE_VERSION=3.24
@@ -28,8 +28,10 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build (CGO_ENABLED=1 for libvips, native per-platform build)
-RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-service ./cmd/server/
+# Build the serving binary and the separately removable one-off sweep binary.
+# The image entrypoint remains the serving binary below.
+RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-service ./cmd/server/ \
+    && CGO_ENABLED=1 go build -trimpath -ldflags "-s -w" -o /bin/sweep-ipfs-cids ./cmd/sweep-ipfs-cids/
 
 # Runtime Stage — Alpine for lightweight runtime with vips
 FROM alpine:${ALPINE_VERSION}
@@ -44,6 +46,7 @@ WORKDIR /app
 
 COPY --from=builder /wait /wait
 COPY --from=builder /bin/file-service /bin/file-service
+COPY --from=builder /bin/sweep-ipfs-cids /bin/sweep-ipfs-cids
 
 RUN mkdir /storage && chown nonroot:nonroot /storage
 VOLUME /storage
