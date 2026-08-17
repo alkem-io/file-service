@@ -1,5 +1,7 @@
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op h1:Z/MZK75wC/NSrkgqeNIa7jexam9uWzhLmFTSCPI/kn0=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
+github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya8AIOHIbWf7NGvO34QpLGclyf7nXj8=
+github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e h1:JmkerRVsVAWdQeyvZhMYRJIzV59RVGfvQuAh2WDEfvg=
 github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e/go.mod h1:8+nst5zfMoats12PgmmAPh6p5OfjDaXK0BXMFl/vOcM=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
@@ -29,6 +31,8 @@ github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo
 github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/klauspost/compress v1.18.6 h1:2jupLlAwFm95+YDR+NwD2MEfFO9d4z4Prjl1XXDjuao=
 github.com/klauspost/compress v1.18.6/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
+github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
+github.com/klauspost/compress v1.19.2/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/minio/highwayhash v1.0.4 h1:asJizugGgchQod2ja9NJlGOWq4s7KsAWr5XUc9Clgl4=
 github.com/minio/highwayhash v1.0.4/go.mod h1:GGYsuwP/fPD6Y9hMiXuapVvlIUEhFhMTh0rxU3ik1LQ=
 github.com/nats-io/jwt/v2 v2.8.2 h1:XXRgB60MSTnqsRwejQurVDs/hcv2dkt+86GjI+I/bMc=
@@ -37,6 +41,8 @@ github.com/nats-io/nats-server/v2 v2.14.2 h1:Q7dRhCY03Y00rETFW3KV+KGaCIajlDfWgWU
 github.com/nats-io/nats-server/v2 v2.14.2/go.mod h1:lWpb1bSpRELZfRdlMkdz8E7lbXKKyNe8RIn0vvepIHs=
 github.com/nats-io/nats-server/v2 v2.14.3 h1:+xjydPt7rkit67G+04TN0mcO2n+8nveZE7tK/PPV53A=
 github.com/nats-io/nats-server/v2 v2.14.3/go.mod h1:5IlCtBzfwyzQzPMjmoJ9W2/LKmnJRtNyuOs/OT+NHDY=
+github.com/nats-io/nats-server/v2 v2.14.5 h1:M6yeo/Xb7khi97RSEVELof3DForDqmYza3P4tHCPFWw=
+github.com/nats-io/nats-server/v2 v2.14.5/go.mod h1:1D3iocrisKvWaD1B/imqarTqmaGrWMqALMLbEDo3v7Q=
 github.com/nats-io/nats.go v1.52.0 h1:n3avV4VBsCgsdwh71TppsTwtv+QdPs7ntSKM8qJLGsc=
 github.com/nats-io/nats.go v1.52.0/go.mod h1:26HypzazeOkyO3/mqd1zZd53STJN0EjCYF9Uy2ZOBno=
 github.com/nats-io/nkeys v0.4.16 h1:rd5oAuLOb8mnAycB0xleuEBNS1pVVnN0fv/FF34Eypg=
