@@ -202,6 +202,19 @@ func parseOptionalUUID(value, field string) (*uuid.UUID, error) {
 	return &parsed, nil
 }
 
+// parseCreateAuthorizationID accepts omission as uuid.Nil (the domain's
+// explicit SQL-NULL signal) but rejects an explicitly supplied all-zero UUID.
+func parseCreateAuthorizationID(value string) (uuid.UUID, error) {
+	if value == "" {
+		return uuid.Nil, nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil || parsed == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("invalid authorizationId")
+	}
+	return parsed, nil
+}
+
 // parseOptionalBool parses an optional boolean form field: empty means
 // false. The error names the field so it can serve directly as a 400 body.
 func parseOptionalBool(value, field string) (bool, error) {
@@ -227,9 +240,9 @@ func buildCreateInput(fields createFields) (input model.CreateDocumentInput, all
 		return input, nil, 0, fmt.Errorf("invalid storageBucketId")
 	}
 
-	authorizationID, err := uuid.Parse(fields.authorizationID)
+	authorizationID, err := parseCreateAuthorizationID(fields.authorizationID)
 	if err != nil {
-		return input, nil, 0, fmt.Errorf("invalid authorizationId")
+		return input, nil, 0, err
 	}
 
 	tagsetID, err := parseOptionalUUID(fields.tagsetID, "tagsetId")
@@ -416,8 +429,8 @@ func (h *DocumentHandler) readMetadataField(w http.ResponseWriter, fields *creat
 
 // writeCompleteUploadError maps a CompleteUpload failure to its HTTP
 // response and outcome counter (spec 020 FR-008): bucket-policy rejections
-// (size, MIME) are 413/415, a SkipDedup content collision is 409, anything
-// else is a logged 500.
+// (size, MIME) are 413/415, uniqueness conflicts are 409, anything else is
+// a logged 500.
 func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrPayloadTooLarge):
@@ -427,7 +440,7 @@ func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err er
 		IngestOutcomes.Add("rejected_bucket_policy", 1)
 		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, service.ErrConflict):
-		writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
+		writeJSONError(w, http.StatusConflict, "document conflicts with an existing row")
 	default:
 		IngestOutcomes.Add("failed_mid_stream", 1)
 		h.Logger.Error("failed to create document", zap.Error(err))
@@ -529,12 +542,12 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	doc, err := h.Service.CopyDocument(r.Context(), sourceID, input)
 	if err != nil {
 		switch {
+		case errors.Is(err, service.ErrInvalidAuthorizationID):
+			writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "source document not found")
 		case errors.Is(err, service.ErrConflict):
-			// Reachable only when SkipDedup=true and the destination bucket
-			// already has a row with this content under the unique index.
-			writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the destination bucket")
+			writeJSONError(w, http.StatusConflict, "copy conflicts with an existing row")
 		default:
 			h.Logger.Error("failed to copy document", zap.Error(err))
 			writeJSONError(w, http.StatusInternalServerError, "internal error")
