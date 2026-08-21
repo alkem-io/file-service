@@ -162,7 +162,7 @@ func (a *Adapter) DeletePendingByHash(ctx context.Context, externalID string) (i
 // though: a persistently failing NOTIFY (e.g. a permissions issue) should be visible rather than
 // silently dropped.
 func (a *Adapter) notifyBackup(ctx context.Context) {
-	if _, err := a.pool.Exec(ctx, "NOTIFY file_backup_outbox"); err != nil {
+	if err := a.queries.NotifyBackupOutbox(ctx); err != nil {
 		a.logger.Warn("backup-outbox NOTIFY failed (best-effort; the consumer's poll floor still drains)",
 			zap.Error(err))
 	}
