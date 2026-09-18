@@ -117,10 +117,11 @@ func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, 
 
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
-// rules). A unique violation surfaces as a *model.DuplicateKeyError — which
-// matches the model.ErrDuplicateKey sentinel AND names the violated index — so
-// the service resolves the collision by the index that actually raised it
-// rather than by probing.
+// rules). Any unique violation — a content index, the (externalReference,
+// storageBucketId) index, or the authorizationId/tagsetId uniques — surfaces as
+// a *model.DuplicateKeyError, which matches the model.ErrDuplicateKey sentinel
+// AND names the violated index, so the service resolves the collision by the
+// index that actually raised it rather than by probing.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -151,8 +152,10 @@ func createDocumentParams(doc model.Document, raw []byte) queries.CreateDocument
 		StorageBucketId:   uuidToPgx(doc.StorageBucketID),
 		// authorizationId is nullable: a provider staging store (matrix_media
 		// bucket) has no server-minted authorization, so a zero UUID must map to
-		// SQL NULL rather than colliding on UNIQUE("authorizationId").
-		AuthorizationId:   uuidValueToPgxNullable(doc.AuthorizationID),
+		// SQL NULL. The all-zero UUID would FK-violate against a policy that does
+		// not exist and would collide on UNIQUE("authorizationId") across every
+		// staging row; NULL does neither.
+		AuthorizationId:   uuidToPgxNullableNil(doc.AuthorizationID),
 		TagsetId:          uuidToPgxNullable(doc.TagsetID),
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),

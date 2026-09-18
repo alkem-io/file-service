@@ -802,8 +802,8 @@ func (h *DocumentHandler) readMetadataField(w http.ResponseWriter, fields *creat
 
 // writeCompleteUploadError maps a CompleteUpload failure to its HTTP
 // response and outcome counter (spec 020 FR-008): bucket-policy rejections
-// (size, MIME) are 413/415, a SkipDedup content collision is 409, anything
-// else is a logged 500.
+// (size, MIME) are 413/415, uniqueness conflicts are 409, anything else is
+// a logged 500.
 func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrPayloadTooLarge):
@@ -813,7 +813,7 @@ func (h *DocumentHandler) writeCompleteUploadError(w http.ResponseWriter, err er
 		IngestOutcomes.Add("rejected_bucket_policy", 1)
 		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, service.ErrConflict):
-		writeJSONError(w, http.StatusConflict, "skipDedup requested but a row with this content already exists in the bucket")
+		writeJSONError(w, http.StatusConflict, "document conflicts with an existing row")
 	default:
 		IngestOutcomes.Add("failed_mid_stream", 1)
 		h.Logger.Error("failed to create document", zap.Error(err))
@@ -864,7 +864,7 @@ func isClientStreamError(err error) bool {
 // (existing row is authoritative), matching the createDocument contract.
 func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	var body CopyDocumentRequest
-	if _, ok := decodeStrictJSON(w, r, &body); !ok {
+	if _, ok := decodeStrictJSON(w, r, &body, maxJSONBodyBytes); !ok {
 		return
 	}
 
@@ -923,12 +923,15 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	doc, err := h.Service.CopyDocument(r.Context(), sourceID, input)
 	if err != nil {
 		switch {
+		case errors.Is(err, service.ErrInvalidAuthorizationID):
+			writeJSONError(w, http.StatusBadRequest, "invalid authorizationId")
 		case errors.Is(err, model.ErrDocumentNotFound):
 			writeJSONError(w, http.StatusNotFound, "source document not found")
 		case errors.Is(err, service.ErrConflict):
 			// A unique-constraint collision in the destination bucket: a
-			// SkipDedup=true content collision, or a reference-bearing copy that
-			// collides on the partial UNIQUE(externalReference, storageBucketId).
+			// SkipDedup=true content collision, a reference-bearing copy that
+			// collides on the partial UNIQUE(externalReference, storageBucketId),
+			// or an authorizationId/tagsetId the destination row cannot take.
 			writeJSONError(w, http.StatusConflict, "a conflicting document already exists (unique constraint)")
 		default:
 			h.Logger.Error("failed to copy document", zap.Error(err))
@@ -1218,10 +1221,12 @@ func parseDocID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "id"))
 }
 
-// maxJSONBodyBytes caps every JSON request body (copy, patch). These are small
-// metadata documents; 1 MiB is far above any legitimate one and bounds the
-// io.ReadAll below. Blob content NEVER travels on a JSON path — it is streamed
-// (multipart create, raw PUT) — so this cap is not a file-size limit.
+// maxJSONBodyBytes is the DEFAULT cap for a JSON request body (copy, patch).
+// These are small metadata documents; 1 MiB is far above any legitimate one and
+// bounds the io.ReadAll below. Blob content NEVER travels on a JSON path — it is
+// streamed (multipart create, raw PUT) — so this cap is not a file-size limit.
+// An endpoint whose legitimate bodies are far smaller passes its own, tighter
+// limit (see maxContentBatchRequestBytes).
 const maxJSONBodyBytes = 1 << 20
 
 // decodeStrictJSON decodes the request body into dst, rejecting unknown
@@ -1232,15 +1237,25 @@ const maxJSONBodyBytes = 1 << 20
 // AFTER writing the error response itself, so callers must simply return
 // without touching w further.
 //
+// limitBytes is the caller's body cap, enforced BEFORE the decoder allocates.
+// The 413 message deliberately does NOT interpolate it, for two reasons: the
+// helper is shared by endpoints with different caps, so a single naming would
+// be wrong for one of them; and the message must stay a LITERAL. apispec's
+// helper-expansion pass types a response body from the first writeJSONError
+// reachable from a handler, and a non-literal message there makes it publish
+// the message parameter as the body type — which is what produced the dangling
+// $refs on the copy 404/409/500 responses before fix(013) 3918de8. Keep every
+// message on this path literal, or `make openapi` silently regresses.
+//
 // DisallowUnknownFields is load-bearing: immutable fields (e.g. mimeType on
 // PATCH) must surface as a 400 rather than silently no-op.
-func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) (raw []byte, ok bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T, limitBytes int64) (raw []byte, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limitBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the 1 MiB limit")
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return nil, false
 		}
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -1266,7 +1281,7 @@ func decodeStrictJSON[T any](w http.ResponseWriter, r *http.Request, dst *T) (ra
 // and reports ok=false. The decode/size/unknown-field/trailing-data rules are
 // decodeStrictJSON's — this only adds the key-presence scan on top.
 func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocumentRequest) (present map[string]struct{}, ok bool) {
-	raw, ok := decodeStrictJSON(w, r, dst)
+	raw, ok := decodeStrictJSON(w, r, dst, maxJSONBodyBytes)
 	if !ok {
 		return nil, false
 	}

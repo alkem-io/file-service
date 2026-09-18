@@ -2,7 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestComputeHash_NodeJSCompatibility(t *testing.T) {
@@ -85,5 +90,62 @@ func TestNewHasher_MatchesComputeHash(t *testing.T) {
 		if got := h2.Sum(); got != want {
 			t.Errorf("input %d segmented writes: %s != %s", i, got, want)
 		}
+	}
+}
+
+func TestHashReadCloser_MatchesComputeHash(t *testing.T) {
+	content := bytes.Repeat([]byte("streamed-content"), 4096)
+	got, err := HashReadCloser(context.Background(), io.NopCloser(bytes.NewReader(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := ComputeHash(content); got != want {
+		t.Fatalf("HashReadCloser = %s, want %s", got, want)
+	}
+}
+
+type cancellationBlockingReader struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newCancellationBlockingReader() *cancellationBlockingReader {
+	return &cancellationBlockingReader{
+		started: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (r *cancellationBlockingReader) Read([]byte) (int, error) {
+	r.startOnce.Do(func() { close(r.started) })
+	<-r.closed
+	return 0, errors.New("reader closed")
+}
+
+func (r *cancellationBlockingReader) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
+}
+
+func TestHashReadCloser_CancellationClosesBlockedReader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := newCancellationBlockingReader()
+	done := make(chan error, 1)
+	go func() {
+		_, err := HashReadCloser(ctx, reader)
+		done <- err
+	}()
+
+	<-reader.started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HashReadCloser error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HashReadCloser did not stop after cancellation")
 	}
 }

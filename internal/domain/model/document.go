@@ -84,8 +84,11 @@ type CreateDocumentInput struct {
 	CreatedBy         *uuid.UUID
 	TemporaryLocation bool
 	StorageBucketID   uuid.UUID
-	AuthorizationID   uuid.UUID
-	TagsetID          *uuid.UUID
+	// AuthorizationID is optional for internal create callers. uuid.Nil
+	// persists as SQL NULL; a real UUID references an authorization policy.
+	// CopyDocumentInput intentionally remains required.
+	AuthorizationID uuid.UUID
+	TagsetID        *uuid.UUID
 
 	// ExternalReference is the opaque caller reference persisted on the new
 	// row (the Synapse media_id for Matrix media). Nil leaves it unset.

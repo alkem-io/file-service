@@ -213,12 +213,17 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	// file-service boundary. Its authorizationId column is NULL, which reads
 	// back as the zero UUID; handing that to CheckPrivilege would delegate the
 	// readability of a policy-less document to whatever the auth-evaluation
-	// service does with a policy id that does not exist. Staging documents (the
-	// Synapse media provider's matrix_media store) are not publicly servable —
-	// the server mints the real policy on inbound re-home, and only then does a
-	// privilege evaluation mean anything. Answered with the same 403 as any
-	// other denial so the response does not distinguish "policy-less" from
-	// "not permitted".
+	// service does with a policy id that does not exist.
+	//
+	// Two distinct classes of row land here, and neither is publicly servable:
+	//   - internal collaboration snapshots, which are governed by the owning
+	//     document and read only through the internal content endpoints;
+	//   - staging documents (the Synapse media provider's matrix_media store) —
+	//     the server mints the real policy on inbound re-home, and only then
+	//     does a privilege evaluation mean anything.
+	//
+	// Answered with the same 403 as any other denial so the response does not
+	// distinguish "policy-less" from "not permitted".
 	if doc.AuthorizationID == uuid.Nil {
 		writeJSONError(w, http.StatusForbidden, "insufficient privileges")
 		return

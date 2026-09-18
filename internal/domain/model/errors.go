@@ -5,10 +5,12 @@ import "errors"
 // ErrDocumentNotFound is returned when a document cannot be found in the repository.
 var ErrDocumentNotFound = errors.New("document not found")
 
-// ErrDuplicateKey is the sentinel every unique-constraint violation matches
-// under errors.Is. Adapters return the richer *DuplicateKeyError below, which
-// additionally identifies WHICH index was violated; a caller that only needs
-// "was this a duplicate?" keeps matching this sentinel.
+// ErrDuplicateKey is the sentinel every file-table unique-constraint violation
+// matches under errors.Is. Adapters return the richer *DuplicateKeyError below,
+// which additionally identifies WHICH index was violated — a content index, the
+// (externalReference, storageBucketId) index, or the authorizationId/tagsetId
+// uniques — so the service resolves the collision by name instead of probing. A
+// caller that only needs "was this a duplicate?" keeps matching this sentinel.
 var ErrDuplicateKey = errors.New("duplicate key")
 
 // UniqueConstraint identifies which unique index a write collided on.

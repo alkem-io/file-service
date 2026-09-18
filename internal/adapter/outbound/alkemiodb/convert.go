@@ -69,13 +69,19 @@ func uuidToPgxNullable(id *uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: *id, Valid: true}
 }
 
-// uuidValueToPgxNullable maps the zero UUID — the codebase's NULL sentinel (see
-// pgxToUUID, which reads a NULL column back as uuid.Nil) — to a SQL NULL. Used
-// for authorizationId on create: a document stored without a server-minted
-// authorization (the matrix_media staging store, auth-minted later on re-home)
-// must write NULL, not the all-zero UUID, which would collide on the
-// UNIQUE("authorizationId") index across every provider store.
-func uuidValueToPgxNullable(id uuid.UUID) pgtype.UUID {
+// uuidToPgxNullableNil maps the zero UUID — the codebase's NULL sentinel (see
+// pgxToUUID, which reads a NULL column back as uuid.Nil) — to SQL NULL, and
+// every real UUID to a valid pgx UUID. Create and CreateWithOutbox both go
+// through createDocumentParams, so this is the single nullable-authorization
+// mapping for both write paths.
+//
+// It exists for authorizationId on create: a document stored without a
+// server-minted authorization (the matrix_media staging store, minted later on
+// re-home) must write NULL, not the all-zero UUID. The all-zero UUID would be a
+// real value — it would FK-violate against a policy that does not exist, and it
+// would collide on the UNIQUE("authorizationId") index across every provider
+// store, whereas a nullable UNIQUE column permits any number of NULL rows.
+func uuidToPgxNullableNil(id uuid.UUID) pgtype.UUID {
 	if id == uuid.Nil {
 		return pgtype.UUID{Valid: false}
 	}

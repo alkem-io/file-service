@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"crypto/sha3"
 	"encoding/hex"
 	"hash"
+	"io"
 )
 
 // Hasher computes the content identity (hex SHA3-256) incrementally — the
@@ -30,4 +32,56 @@ func ComputeHash(content []byte) string {
 	h := NewHasher()
 	_, _ = h.Write(content)
 	return h.Sum()
+}
+
+// HashReadCloser streams a content hash while honoring cancellation. Closing
+// the reader on cancellation interrupts a blocked filesystem read; the context
+// reader also stops between successful reads. The function owns and closes the
+// supplied reader on every path.
+func HashReadCloser(ctx context.Context, reader io.ReadCloser) (string, error) {
+	hasher := NewHasher()
+	copyDone := make(chan struct{})
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		select {
+		case <-ctx.Done():
+			_ = reader.Close()
+		case <-copyDone:
+		}
+	}()
+
+	_, copyErr := io.Copy(hasher, contextReader{ctx: ctx, reader: reader})
+	close(copyDone)
+	<-closeDone
+	closeErr := reader.Close()
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return hasher.Sum(), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if err == nil {
+		if ctxErr := r.ctx.Err(); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
 }
