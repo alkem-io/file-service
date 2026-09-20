@@ -96,8 +96,9 @@ var (
 
 // writeCreate persists a new document — via the transactional outbox path (a backup-outbox row
 // in the same commit, FR-001) when the producer is on and the object is non-temporary, else the
-// original non-transactional Repo.Create. Both return model.ErrDuplicateKey on any unique
-// violation; insertDocument classifies it after the write.
+// original non-transactional Repo.Create. Both surface any unique violation as a
+// *model.DuplicateKeyError naming the index that raised it (it still matches the
+// model.ErrDuplicateKey sentinel); insertDocument branches on that classification.
 func (s *FileService) writeCreate(ctx context.Context, doc model.Document, meta model.ContentMetadata) error {
 	if s.Outbox != nil && !doc.TemporaryLocation {
 		_, err := s.Outbox.CreateWithOutbox(ctx, doc, meta, s.priorityForMime(doc.MimeType))
@@ -218,7 +219,7 @@ func (s *FileService) readOneContent(ctx context.Context, id uuid.UUID, remainin
 // (validation order is a documented consequence of the multipart field
 // order, research R4). Observable outcomes are identical.
 func (s *FileService) CreateDocument(ctx context.Context, input model.CreateDocumentInput, content []byte, declaredMIME string, allowedMimeTypes []string, maxFileSize int) (*model.Document, error) {
-	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME)
+	su, err := s.StageUpload(ctx, bytes.NewReader(content), declaredMIME, input.SkipImageProcessing)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +269,12 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// A legacy image source (or dedup destination) may have empty content_metadata; the copy simply
 	// inherits that, and the sweep-dims job (RunDimsBackfill) populates dims for both rows off-path
 	// (no libvips decode on a copy request — spec 019/020). Response omits dims until the sweep runs.
-	if !input.SkipDedup {
+	// Content-dedup applies only to non-reference copies. A reference-bearing
+	// copy (a re-share fork carrying its own externalReference) is identity'd by
+	// that reference, so it always materializes a fresh row even when the
+	// destination bucket already holds the same bytes — they share the
+	// content-addressed blob, but the DB row is per-reference.
+	if !input.SkipDedup && !hasReference(input.ExternalReference) {
 		existing, found, err := s.findDedupDocument(ctx, source.ExternalID, input.DestinationBucketID)
 		if err != nil {
 			return nil, err
@@ -279,9 +285,10 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		}
 	}
 
-	// Reuse insertDocument so race-handling, error mapping (ErrDuplicateKey →
-	// ErrConflict on SkipDedup, race re-query otherwise), and audit fields
-	// stay identical to CreateDocument.
+	// Reuse insertDocument so the constraint-directed duplicate resolution
+	// (reference collision → idempotent; any other index → ErrConflict for a
+	// SkipDedup caller, content re-query otherwise) and the audit fields stay
+	// identical to CreateDocument.
 	createInput := model.CreateDocumentInput{
 		DisplayName:       source.DisplayName,
 		CreatedBy:         input.CreatedBy,
@@ -289,6 +296,7 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 		StorageBucketID:   input.DestinationBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		SkipDedup:         input.SkipDedup,
 	}
 	stored := model.StoredFile{
@@ -366,8 +374,9 @@ func (s *FileService) reconcileReplaceMIME(knownMIME string, content []byte) (mi
 	}
 }
 
-// insertDocument builds the Document, attempts a Create, and handles the
-// unique-key race by re-querying and returning the concurrent winner.
+// insertDocument builds the Document, attempts a Create, and hands a
+// unique-key failure to resolveDuplicateInsert, which branches on the index
+// that actually raised it.
 //
 // Blob cleanup policy: once Storage.Save has published a blob, we never
 // delete it on subsequent failures. externalID is global content identity,
@@ -394,6 +403,7 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		StorageBucketID:   input.StorageBucketID,
 		AuthorizationID:   input.AuthorizationID,
 		TagsetID:          input.TagsetID,
+		ExternalReference: input.ExternalReference,
 		CreatedDate:       now,
 		UpdatedDate:       now,
 		ContentMetadata:   contentMetadata,
@@ -406,31 +416,129 @@ func (s *FileService) insertDocument(ctx context.Context, input model.CreateDocu
 		return &doc, nil
 	}
 
-	if errors.Is(err, model.ErrDuplicateKey) {
-		// SkipDedup means the caller explicitly asked for a fresh row. Any
-		// uniqueness failure means that insert cannot be honored; never
-		// masquerade it as a dedup hit and corrupt placeholder flows.
+	var dup *model.DuplicateKeyError
+	if errors.As(err, &dup) {
+		return s.resolveDuplicateInsert(ctx, input, stored, dup)
+	}
+	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// resolveDuplicateInsert resolves an insert that lost to a unique index, branching
+// on WHICH index raised it. The database names the violated constraint on every
+// unique violation and the adapter classifies that name, so this is a decision, not
+// a guess:
+//
+//   - the (externalReference, storageBucketId) index → an idempotent re-share;
+//     resolve to the row already holding that reference.
+//   - any other index → the contract every non-reference caller has always had:
+//     ErrConflict for a SkipDedup caller, content-dedup resolution otherwise.
+//   - unattributable (no constraint name) → a loud error. The two resolutions are
+//     mutually exclusive and both are WRONG for the other index, so picking one
+//     blind would either 409 a legitimate re-share or hand the caller a row it
+//     never asked for.
+//
+// Round 2 got this wrong twice in a row for the same underlying reason: it PROBED
+// (re-query and infer) instead of reading what Postgres already reported. Probing
+// reference-first made a SkipDedup content collision resolvable as a dedup hit;
+// probing content-first made every re-share a 409. Neither ordering is fixable,
+// because the probe's miss is indistinguishable from a concurrent delete.
+func (s *FileService) resolveDuplicateInsert(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, dup *model.DuplicateKeyError) (*model.Document, error) {
+	switch dup.Constraint {
+	case model.ConstraintExternalReferenceBucket:
+		return s.resolveReferenceCollision(ctx, input, dup)
+	case model.ConstraintOther:
+		// SkipDedup means the caller explicitly asked for a fresh row, and some
+		// index other than the reference one refused. Surface that as ErrConflict
+		// rather than masquerading as a dedup hit (which would silently corrupt
+		// placeholder flows).
 		if input.SkipDedup {
 			return nil, ErrConflict
 		}
-		// One probe disambiguates the constraint without depending on its
-		// database-generated name: a matching content row is a valid dedup
-		// winner; no match means another unique column collided.
-		raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
-		if findErr == nil {
-			raced.Reused = true
-			return &raced, nil
-		}
-		if errors.Is(findErr, model.ErrDocumentNotFound) {
-			// No content winner exists, so treat this as a non-dedup unique
-			// collision (normally authorizationId or tagsetId).
-			return nil, ErrConflict
-		}
-		s.Logger.Warn("dedup: unique violation but re-query failed",
-			zap.String("externalID", stored.ExternalID), zap.Error(findErr))
-		return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
+		return s.resolveContentCollision(ctx, input, stored, dup)
+	default:
+		s.Logger.Error("dedup: unique violation with no constraint name; cannot resolve",
+			zap.String("externalID", stored.ExternalID),
+			zap.String("bucketID", input.StorageBucketID.String()))
+		return nil, fmt.Errorf("create document record: unattributable unique violation: %w", dup)
 	}
-	return nil, fmt.Errorf("create document record: %w", err)
+}
+
+// resolveReferenceCollision resolves a collision on the partial
+// UNIQUE(externalReference, storageBucketId) index: this reference is ALREADY
+// materialized in this bucket, so re-homing / re-sharing the same media_id twice
+// is an idempotent no-op and returns the existing row with Reused=true.
+//
+// It runs REGARDLESS of SkipDedup. SkipDedup means "do not CONTENT-dedup" — never
+// "do not resolve a reference collision" — and the only production caller of the
+// reference path (a re-share COPY) always sends skipDedup=true.
+//
+// The winner is returned WITHOUT requiring its externalID to equal the content we
+// just staged. That is the dual-identity rule, not a dropped check: a reference
+// row's identity IS its reference, so the row holding (reference, bucket) is the
+// correct answer even if its bytes have since been replaced. The response reports
+// the stored row's externalID/mimeType/size, so the caller sees what the DB holds.
+//
+// NOTE for the caller (a documented, pre-existing property of every Reused
+// resolution): the caller-supplied authorizationId/tagsetId are NOT used — the
+// existing row's are authoritative — so a caller that minted a policy for this
+// copy owns releasing it. file-service does not own the authorization_policy
+// table and cannot delete it here; Reused=true is the signal.
+func (s *FileService) resolveReferenceCollision(ctx context.Context, input model.CreateDocumentInput, dup *model.DuplicateKeyError) (*model.Document, error) {
+	if !hasReference(input.ExternalReference) {
+		// The partial index only covers rows WITH a reference, so an insert
+		// carrying none cannot violate it. Reaching here means the classification
+		// and the input disagree; resolving either way would be fabrication.
+		return nil, fmt.Errorf("create document record: reference-index violation on a reference-less insert: %w", dup)
+	}
+	raced, findErr := s.Repo.GetByReferenceInBucket(ctx, *input.ExternalReference, input.StorageBucketID)
+	if findErr == nil {
+		raced.Reused = true
+		return &raced, nil
+	}
+	if errors.Is(findErr, model.ErrDocumentNotFound) {
+		// The row owning (reference, bucket) at insert time was deleted before
+		// this re-query. There is nothing to resolve TO, and nothing to fall
+		// through to either: the content lookup filters `externalReference IS
+		// NULL`, so in a reference-only bucket it can only ever answer with an
+		// UNRELATED reference-less row (or a misleading not-found). Report the
+		// race for what it is — a 409 the caller retries.
+		s.Logger.Warn("dedup: reference collision winner vanished before re-query",
+			zap.String("reference", *input.ExternalReference),
+			zap.String("bucketID", input.StorageBucketID.String()))
+		return nil, ErrConflict
+	}
+	s.Logger.Warn("dedup: unique violation but reference re-query failed",
+		zap.String("reference", *input.ExternalReference), zap.Error(findErr))
+	return nil, fmt.Errorf("create document record: duplicate key, reference winner lookup failed: %w", findErr)
+}
+
+// resolveContentCollision resolves a NON-reference unique violation for a caller
+// that allows dedup, by re-querying the concurrent content winner. In production
+// this branch is near-inert as a DEDUP path: the `file` table has no
+// (externalID, storageBucketId) unique index, so content-dedup is an app-level
+// best-effort lookup and a content winner can only materialize where such an
+// index exists.
+//
+// What DOES reach here in production is the other-index case: an insert that
+// collided on the authorizationId or tagsetId unique. That is a CLIENT error —
+// the caller supplied an identifier another row already owns — so a re-query
+// that finds no content winner resolves to ErrConflict (409), never a 500. A
+// re-query that fails for any other reason is a transport fault and propagates
+// as one, so an unavailable database is never reported to the caller as a
+// conflict it could fix by retrying with different input.
+func (s *FileService) resolveContentCollision(ctx context.Context, input model.CreateDocumentInput, stored model.StoredFile, dup *model.DuplicateKeyError) (*model.Document, error) {
+	raced, findErr := s.Repo.FindByExternalIDAndBucket(ctx, stored.ExternalID, input.StorageBucketID)
+	if findErr == nil {
+		raced.Reused = true
+		return &raced, nil
+	}
+	if errors.Is(findErr, model.ErrDocumentNotFound) {
+		return nil, ErrConflict
+	}
+	s.Logger.Warn("dedup: unique violation but re-query failed",
+		zap.String("externalID", stored.ExternalID),
+		zap.String("constraint", dup.Name), zap.Error(findErr))
+	return nil, fmt.Errorf("create document record: duplicate key, winner lookup failed: %w", findErr)
 }
 
 // DeleteDocument removes a document record and its file (if not shared).
@@ -543,7 +651,9 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 			zap.String("outcome", outcome))
 	}
 
-	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0)
+	// Replace never stores verbatim — content edits always run the normal
+	// transcode/measure pipeline (the raw-store path is create-only).
+	su, err := s.stageContent(ctx, br, mimeType, len(prefix) > 0, false)
 	if err != nil {
 		return nil, err
 	}
@@ -609,26 +719,37 @@ func (s *FileService) StoreAndLinkStream(ctx context.Context, documentID uuid.UU
 	}, nil
 }
 
-// UpdateDocumentMetadata updates the mutable metadata fields (storage bucket,
-// temporary-location flag, display name) atomically. The handler reads the
-// current row first and fills any fields the caller didn't supply, so this
-// method always overwrites all three columns. Uses optimistic locking via
-// the version column.
+// UpdateDocumentMetadata applies the "move + re-attribute" metadata update
+// atomically — besides storage bucket, temporary-location flag, and display
+// name it also re-points authorizationId, createdBy, and the opaque
+// externalReference (server-driven inbound re-home). The handler reads the
+// current row first and fills any field the caller didn't supply, so meta
+// always carries every column's intended final value. Uses optimistic locking
+// via the version column.
+//
+// A temporary→durable transition (the row WAS temporary and meta targets a
+// durable state) routes through the transactional PromoteWithOutbox when the
+// backup producer is on, so the now-durable object's backup hint is enqueued in
+// the SAME commit as the UPDATE (008-continuous-file-backup FR-001) — this is
+// how 013 conversation media (re-home MOVE / re-share pin / outbound flip)
+// reaches the backup outbox instead of escaping it. Every other update (and the
+// producer-off path) uses the plain versioned Repo.UpdateMetadata. Because the
+// replace path is version-guarded and version-bumping, the current.ExternalID/
+// Size the promote enqueues can't be stale (a racing replace forces this update
+// to 0 rows → ErrConflict), so develop's snapshot-enqueue design needs no
+// in-transaction RETURNING.
 //
 // mimeType, externalID, and size are not mutable through this method — they
-// change only via StoreAndLink (replace content). Callers that rename a
-// document are responsible for keeping displayName's extension consistent
-// with the (immutable) mimeType; this service does not enforce extension
-// matching.
-func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, storageBucketID uuid.UUID, temporaryLocation bool, displayName string) (*model.Document, error) {
+// change only via StoreAndLink (replace content).
+func (s *FileService) UpdateDocumentMetadata(ctx context.Context, current model.Document, meta model.DocumentMetadataUpdate) (*model.Document, error) {
 	var err error
-	if s.Outbox != nil && current.TemporaryLocation && !temporaryLocation {
-		err = s.Outbox.PromoteWithOutbox(ctx, current, storageBucketID, displayName, s.priorityForMime(current.MimeType))
+	if s.Outbox != nil && current.TemporaryLocation && !meta.TemporaryLocation {
+		err = s.Outbox.PromoteWithOutbox(ctx, current, meta, s.priorityForMime(current.MimeType))
 		if err == nil {
 			backupOutboxEnqueued.Add(1)
 		}
 	} else {
-		err = s.Repo.UpdateMetadata(ctx, current.ID, storageBucketID, temporaryLocation, displayName, current.Version)
+		err = s.Repo.UpdateMetadata(ctx, current.ID, meta, current.Version)
 	}
 	if err != nil {
 		// Version mismatch returns ErrDocumentNotFound (0 rows); translate to ErrConflict
@@ -677,4 +798,13 @@ var (
 // normalizeMIME strips parameters and lowercases a MIME type.
 func normalizeMIME(mimeType string) string {
 	return model.NormalizeMIME(mimeType)
+}
+
+// hasReference reports whether a create/copy carries a usable externalReference
+// (non-nil, non-empty). Reference-bearing rows are identity'd by their
+// reference, not by content, so they bypass per-bucket content-dedup: two
+// distinct references with identical bytes must yield two rows (each
+// by-reference-resolvable), sharing only the content-addressed blob.
+func hasReference(ref *string) bool {
+	return ref != nil && *ref != ""
 }

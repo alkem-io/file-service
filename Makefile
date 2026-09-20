@@ -5,6 +5,12 @@ SWEEP_BINARY := sweep-ipfs-cids
 GO := go
 GOFLAGS := -race
 
+# apispec is run via `go run <pkg>@version` (like matrix-adapter) so NO
+# pre-installed binary on PATH is required — a globally-installed apispec fails to
+# load packages under Go 1.26. Keep in sync with the org-pinned apispec (the
+# shared alkem-io/github-workflows go-ci.yml@v1 default — currently v0.4.25).
+APISPEC_VERSION ?= v0.4.25
+
 build:
 	mkdir -p bin/
 	$(GO) build -tags vips -o bin/$(BINARY) ./cmd/server/
@@ -38,7 +44,7 @@ sqlc-generate:
 	sqlc -f db/sqlc.yaml generate
 
 openapi:
-	apispec --dir . --output openapi.yaml --config apispec.yaml --skip-cgo
+	$(GO) run github.com/antst/go-apispec/cmd/apispec@$(APISPEC_VERSION) --dir . --output openapi.yaml --config apispec.yaml --skip-cgo
 
 setup-hooks:
 	git config core.hooksPath .githooks

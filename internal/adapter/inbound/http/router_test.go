@@ -24,6 +24,18 @@ func testRouter() http.Handler {
 		AuthorizationID: uuid.New(),
 		StorageBucketID: uuid.New(),
 	}}
+	// Scripted with a DISTINCT externalID so a by-reference resolution is
+	// identifiable in the response body — the route fence below asserts the
+	// request actually reached ByReference, not merely "not a 404".
+	byReference := "media_id_router"
+	repo.refDoc = &model.Document{
+		ID:                uuid.New(),
+		ExternalID:        "by-reference-hash",
+		MimeType:          "text/plain",
+		AuthorizationID:   uuid.New(),
+		StorageBucketID:   uuid.New(),
+		ExternalReference: &byReference,
+	}
 	storage := &mockStorage{data: []byte("content")}
 	svc := &service.FileService{
 		Repo:      repo,
@@ -258,6 +270,85 @@ func TestRouter_InternalNoAuth(t *testing.T) {
 	if rr.Code == http.StatusUnauthorized {
 		t.Error("internal route should not require auth")
 	}
+}
+
+// TestRouter_StaticAndParameterizedSiblingsCoexist guards the genuinely risky thing about the
+// /internal/file subtree: static segments (`/file/copy`) live alongside the parameterized
+// /file/{id}/meta, so neither may shadow the other — an assumption about the router, therefore
+// asserted rather than assumed.
+//
+// Each route is identified by BEHAVIOUR, not just by "not 404": the body carrying an unknown
+// `ids` field is sent to /file/copy, where Copy's strict decode must reject it.
+func TestRouter_StaticAndParameterizedSiblingsCoexist(t *testing.T) {
+	batchBody := `{"ids":["` + uuid.New().String() + `"]}`
+
+	// The parameterized sibling must still resolve — a literal segment registered next to
+	// {id} must not shadow it.
+	t.Run("SingleMetaStillRoutes", func(t *testing.T) {
+		r := testRouter()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/"+uuid.New().String()+"/meta", nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET /internal/file/{id}/meta = %d, want 200: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"externalID"`) {
+			t.Errorf("body = %s, want the single-document meta shape", rr.Body.String())
+		}
+	})
+
+	// The static POST sibling must still reach Copy — proven by Copy REJECTING the batch body.
+	t.Run("CopyStillRoutesToCopy", func(t *testing.T) {
+		r := testRouter()
+		req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", strings.NewReader(batchBody))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("POST /internal/file/copy with a batch body = %d, want 400 (Copy rejects the unknown `ids` field): %s",
+				rr.Code, rr.Body.String())
+		}
+	})
+}
+
+// TestRouter_ByReferenceEndpoint guards that GET /internal/file/by-reference is actually
+// wired in NewRouter. It is a STATIC segment sharing a subtree with the parameterized
+// /internal/file/{id}/... routes, so "not a 404" proves nothing on its own: with the route
+// line deleted, chi answers from a neighbouring node and the whole suite stayed green.
+//
+// Both sub-cases are therefore BEHAVIOURAL — only ByReference itself can produce them.
+func TestRouter_ByReferenceEndpoint(t *testing.T) {
+	// A resolved lookup returns the document THIS repo scripts only for the
+	// by-reference variant, so the body proves which handler answered.
+	t.Run("ResolvesThroughByReference", func(t *testing.T) {
+		r := testRouter()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference?ref=media_id_router", nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET /internal/file/by-reference = %d, want 200: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"externalID":"by-reference-hash"`) {
+			t.Errorf("body = %s, want the by-reference document (some other route answered)", rr.Body.String())
+		}
+	})
+
+	// The missing-ref 400 is unique to this handler: no neighbouring route can
+	// answer a GET on this path with a 400 (a router-level miss is 404/405), and
+	// the parameterized sibling would treat "by-reference" as a document id.
+	t.Run("MissingRefIs400FromByReference", func(t *testing.T) {
+		r := testRouter()
+		req := httptest.NewRequest(http.MethodGet, "/internal/file/by-reference", nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("GET /internal/file/by-reference without ref = %d, want 400: %s", rr.Code, rr.Body.String())
+		}
+	})
 }
 
 // TestRouter_BlobContentEndpoint guards that GET /internal/blob/{hash}/content is actually

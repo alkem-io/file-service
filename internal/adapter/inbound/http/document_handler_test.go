@@ -68,6 +68,13 @@ type stubProcessor struct {
 	// application/octet-stream so image-MIME tests exercise the
 	// dims-on-response paths.
 	detectMIME string
+
+	// Arm counters. For a TRANSCODABLE image type these are mutually
+	// exclusive and are the only externally visible difference between the
+	// transcode arm and the verbatim (skipImageProcessing) arm, which is how
+	// an HTTP-level test can prove the flag reached StageUpload.
+	transcodeCalls   int
+	measureDimsCalls int
 }
 
 func (p *stubProcessor) DetectMIME(_ []byte) string {
@@ -92,6 +99,7 @@ func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 	}, nil
 }
 func (p *stubProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
+	p.measureDimsCalls++
 	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
@@ -439,7 +447,7 @@ func TestDocumentHandler_Create_SkipDedup_BypassesDedup(t *testing.T) {
 // masquerading as Reused=true.
 func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -466,9 +474,13 @@ func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
 
 func TestDocumentHandler_Create_AuthorizationCollision_Returns409(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	// No (externalID, bucket) winner exists in the default mock, so this
-	// unique violation represents authorizationId/tagsetId reuse.
-	repo.createErr = model.ErrDuplicateKey
+	// A violation on a NON-reference index, and no (externalID, bucket) winner
+	// exists in the default mock — so this represents authorizationId/tagsetId
+	// reuse, which the caller can fix. It must surface as 409, never 500.
+	repo.createErr = &model.DuplicateKeyError{
+		Constraint: model.ConstraintOther,
+		Name:       "REL_d9e2dfcccf59233c17cc6bc641", // the authorizationId unique, prod's name
+	}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -703,7 +715,7 @@ func TestDocumentHandler_Copy_SkipDedup_Conflict_Returns409(t *testing.T) {
 		MimeType:   "image/png",
 		Size:       42,
 	}
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	body, _ := json.Marshal(CopyDocumentRequest{
 		SourceID:            sourceID.String(),
@@ -1435,7 +1447,7 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}`
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1454,7 +1466,7 @@ func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}`
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1710,9 +1722,11 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 }
 
 func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
-	// Renaming to the same name twice: handler/service does not branch on
-	// "no-op", but the row's version still advances (DB UPDATE always
-	// runs). The contract is "stable result", not "no DB write".
+	// Renaming to the SAME name is an idempotent no-op (013 settled contract):
+	// the PATCH produces no effective change, so it returns 200 with the current
+	// document and writes NOTHING — no version/updatedDate bump, no UpdateMetadata
+	// call — so a concurrent actor is never spuriously 409'd. The response still
+	// carries the current displayName.
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{
@@ -1734,12 +1748,12 @@ func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
 		}
-		if repo.lastUpdateDisplayName != "stable.txt" {
-			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
+		if !strings.Contains(rr.Body.String(), `"displayName":"stable.txt"`) {
+			t.Errorf("iteration %d: body = %q, want current displayName stable.txt", i, rr.Body.String())
 		}
 	}
-	if repo.updateMetadataCalls != 2 {
-		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("no-op PATCH must not write: UpdateMetadata calls = %d, want 0", repo.updateMetadataCalls)
 	}
 }
 
@@ -1925,7 +1939,9 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+	// PATCH never changes externalID, so the 409 is a reference/authorization
+	// collision, not a same-content one — the message names those.
+	if !strings.Contains(rr.Body.String(), "duplicate reference or authorization") {
 		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
 	}
 }
@@ -2296,6 +2312,7 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 // TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
 // detectMIME override or the input type.
 func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	p.transcodeCalls++
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}

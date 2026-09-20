@@ -17,7 +17,8 @@ import (
 // existing write path, never a behaviour change when disabled.
 type BackupOutboxRepo interface {
 	// CreateWithOutbox inserts a new document and enqueues its backup hint atomically.
-	// Returns model.ErrDuplicateKey on any document unique violation (no outbox row written),
+	// Returns a *model.DuplicateKeyError — matching the model.ErrDuplicateKey sentinel and
+	// naming the violated index — on any document unique violation (no outbox row written),
 	// exactly as DocumentRepo.Create does, so service classification is identical.
 	CreateWithOutbox(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata, priority int16) (uuid.UUID, error)
 	// UpdateFileWithOutbox replaces a document's content and enqueues a backup hint for the new
@@ -27,7 +28,10 @@ type BackupOutboxRepo interface {
 	// PromoteWithOutbox atomically applies a temporary→permanent metadata update and enqueues the
 	// already-stored content. Without this path, the normal two-phase upload flow would exclude the
 	// temporary create and then make the object permanent without ever producing a backup hint.
-	PromoteWithOutbox(ctx context.Context, current model.Document, storageBucketID uuid.UUID, displayName string, priority int16) error
+	// meta carries the full "move + re-attribute" field set (bucket/temporaryLocation/displayName
+	// plus authorizationId/createdBy/externalReference) the PATCH applies; the outbox breadcrumb's
+	// createdBy is the re-attributed owner (meta.CreatedBy).
+	PromoteWithOutbox(ctx context.Context, current model.Document, meta model.DocumentMetadataUpdate, priority int16) error
 	// PruneBackupOutbox drops `done` outbox rows older than the cutoff, keeping the shared
 	// outbox bounded (SC-008); returns the number pruned.
 	PruneBackupOutbox(ctx context.Context, olderThan time.Time) (int64, error)

@@ -74,19 +74,14 @@ func (h *DocumentHandler) ContentBatch(w http.ResponseWriter, r *http.Request) {
 	ContentBatchResponse{Items: items}.Render(w)
 }
 
+// decodeContentBatchRequest strict-decodes the batch body under this endpoint's
+// own, much tighter cap. The size/unknown-field/trailing-data rules and the
+// 413/400 responses are decodeStrictJSON's — passing the limit in is what keeps
+// a second decoder (and a second, drifting set of error responses) from
+// existing here.
 func decodeContentBatchRequest(w http.ResponseWriter, r *http.Request, dst *ContentBatchRequest) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxContentBatchRequestBytes)
-	err := decodeStrictJSON(r, dst)
-	if err == nil {
-		return true
-	}
-	var maxBytesErr *http.MaxBytesError
-	if errors.As(err, &maxBytesErr) {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		return false
-	}
-	writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-	return false
+	_, ok := decodeStrictJSON(w, r, dst, maxContentBatchRequestBytes)
+	return ok
 }
 
 func (h *DocumentHandler) batchItem(rawID string, res service.BatchContentResult) ContentBatchItem {
