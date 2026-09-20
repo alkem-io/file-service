@@ -142,7 +142,6 @@ func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata
 	m.createCalls++
 	m.lastCreateDoc = doc
 	m.lastCreateContentMetadata = contentMetadata
-	m.lastCreateDoc = doc
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
 	}
