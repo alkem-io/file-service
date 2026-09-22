@@ -35,6 +35,12 @@ func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
 }
 
 // DeleteDocumentResponse is returned by DELETE /internal/document/:id.
+//
+// AuthorizationID is OPTIONAL on the wire: a document stored without a
+// server-minted authorization (the matrix_media staging store) has a NULL
+// authorizationId column, which reads back as the zero UUID. Serializing that
+// as "00000000-0000-0000-0000-000000000000" would tell the caller to clean up
+// a policy that never existed, so the field is omitted instead.
 type DeleteDocumentResponse struct {
 	AuthorizationID *string `json:"authorizationId,omitempty"`
 	TagsetID        *string `json:"tagsetId,omitempty"`
@@ -109,7 +115,14 @@ func (r RejectedContentResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// DocumentMetaResponse is returned by GET /internal/document/:id/meta.
+// DocumentMetaResponse is returned by GET /internal/document/:id/meta and by
+// GET /internal/file/by-reference.
+//
+// AuthorizationID is OPTIONAL on the wire, for the same reason as on
+// DeleteDocumentResponse: a staging document has a NULL authorizationId column,
+// which reads back as the zero UUID. Emitting that as
+// "00000000-0000-0000-0000-000000000000" would report an UNAUTHORIZED document
+// as if it were authorized under a real (all-zero) policy, so it is omitted.
 type DocumentMetaResponse struct {
 	ID                string    `json:"id"`
 	ExternalID        string    `json:"externalID"`
@@ -119,10 +132,18 @@ type DocumentMetaResponse struct {
 	CreatedBy         *string   `json:"createdBy,omitempty"`
 	TemporaryLocation bool      `json:"temporaryLocation"`
 	StorageBucketID   string    `json:"storageBucketId"`
-	AuthorizationID   string    `json:"authorizationId"`
+	AuthorizationID   *string   `json:"authorizationId,omitempty"`
 	TagsetID          *string   `json:"tagsetId,omitempty"`
+	ExternalReference *string   `json:"externalReference,omitempty"`
 	CreatedDate       time.Time `json:"createdDate"`
 	UpdatedDate       time.Time `json:"updatedDate"`
+	// ImageWidth/ImageHeight are post-rotation pixel dimensions sourced from
+	// content_metadata for image rows (both nil for non-images and for image
+	// rows whose metadata is empty/sentinel). Carried on /meta and the
+	// by-reference response so the Synapse provider gets conversation-attachment
+	// dimensions in one lookup.
+	ImageWidth  *int `json:"imageWidth,omitempty"`
+	ImageHeight *int `json:"imageHeight,omitempty"`
 }
 
 // Render writes the response as JSON with HTTP 200.
@@ -132,15 +153,29 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// UpdateDocumentRequest is the body for PATCH /internal/file/:id.
-// All fields are optional; at least one must be present. Omitted fields
-// retain their current value. mimeType, externalID, and size are immutable
-// through this endpoint — see PUT /internal/file/{id}/content for content
-// replacement (which also updates mimeType and size).
+// UpdateDocumentRequest is the body for PATCH /internal/file/:id — the
+// "move + re-attribute" primitive. All fields are optional; at least one must
+// be present. Omitted fields retain their current value. mimeType, externalID,
+// and size are immutable through this endpoint — see PUT
+// /internal/file/{id}/content for content replacement.
+//
+// authorizationId, createdBy, and externalReference are tri-state: omitted →
+// keep; a string → set; explicit JSON null → clear (authorizationId is NOT
+// clearable — clearing it would orphan the document). The presence map in the
+// handler distinguishes "omitted" from "null" (a plain *string cannot).
+//
+// The `apispec:"format=uuid"` tags pin the published `format: uuid` on the
+// UUID-valued fields. The generator otherwise infers it by following the
+// decoded body into a uuid.Parse call, and that flow analysis cannot see
+// through the shared parse helpers these fields go through — so the format is
+// declared at the source instead of depending on the shape of the handler.
 type UpdateDocumentRequest struct {
-	StorageBucketID   *string `json:"storageBucketId,omitempty"`
+	StorageBucketID   *string `json:"storageBucketId,omitempty" apispec:"format=uuid"`
 	TemporaryLocation *bool   `json:"temporaryLocation,omitempty"`
 	DisplayName       *string `json:"displayName,omitempty"`
+	AuthorizationID   *string `json:"authorizationId,omitempty" apispec:"format=uuid"`
+	CreatedBy         *string `json:"createdBy,omitempty" apispec:"format=uuid"`
+	ExternalReference *string `json:"externalReference,omitempty"`
 }
 
 // ContentBatchIDs is the bounded, ordered id list accepted by ContentBatch.
@@ -174,13 +209,23 @@ func (r ContentBatchResponse) Render(w http.ResponseWriter) {
 
 // CopyDocumentRequest is the JSON body for POST /internal/file/copy.
 // Reuses CreateDocumentResponse for the response shape.
+// The `apispec:"format=uuid"` tags on tagsetId/createdBy pin the published
+// `format: uuid`: those two reach uuid.Parse through a shared helper the
+// generator's flow analysis cannot follow, unlike sourceId/destinationBucketId/
+// authorizationId, which it still infers from the handler's inline parses.
 type CopyDocumentRequest struct {
 	SourceID            string  `json:"sourceId"`
 	DestinationBucketID string  `json:"destinationBucketId"`
 	AuthorizationID     string  `json:"authorizationId"`
-	TagsetID            *string `json:"tagsetId,omitempty"`
-	CreatedBy           *string `json:"createdBy,omitempty"`
-	SkipDedup           bool    `json:"skipDedup,omitempty"`
+	TagsetID            *string `json:"tagsetId,omitempty" apispec:"format=uuid"`
+	CreatedBy           *string `json:"createdBy,omitempty" apispec:"format=uuid"`
+	// ExternalReference is the opaque caller reference set on the copied row
+	// (the re-share fork carries the same media_id). Omitted leaves it unset.
+	ExternalReference *string `json:"externalReference,omitempty"`
+	// DisplayName overrides the copied row's name. Omitted inherits the
+	// source's name. Ignored on a dedup-reused row, which keeps its own.
+	DisplayName *string `json:"displayName,omitempty"`
+	SkipDedup   bool    `json:"skipDedup,omitempty"`
 }
 
 // HealthResponse is returned by GET /health.
