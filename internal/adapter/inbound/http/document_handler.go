@@ -911,12 +911,22 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An omitted displayName inherits the source's name; a supplied one must
+	// satisfy the same contract as every other name this service stores.
+	if body.DisplayName != nil {
+		if err := validateDisplayName(*body.DisplayName); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	input := model.CopyDocumentInput{
 		DestinationBucketID: destBucketID,
 		AuthorizationID:     authID,
 		TagsetID:            tagsetID,
 		CreatedBy:           createdBy,
 		ExternalReference:   externalReference,
+		DisplayName:         body.DisplayName,
 		SkipDedup:           body.SkipDedup,
 	}
 
