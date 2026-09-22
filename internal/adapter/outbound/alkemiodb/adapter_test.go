@@ -264,14 +264,31 @@ func TestUpdateMetadata(t *testing.T) {
 	docID := uuid.UUID(id)
 	origBucket := uuid.UUID(bucketID)
 
+	// Load the full row so the "move + re-attribute" update preserves
+	// authorizationId/createdBy/externalReference (UpdateMetadata overwrites all
+	// of them); flip only temporaryLocation.
+	orig, err := a.GetByID(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	meta := model.DocumentMetadataUpdate{
+		StorageBucketID:   origBucket,
+		TemporaryLocation: !tempLoc,
+		DisplayName:       displayName,
+		AuthorizationID:   nonNilUUIDForTest(orig.AuthorizationID),
+		CreatedBy:         orig.CreatedBy,
+		ExternalReference: orig.ExternalReference,
+	}
 	// Update with current version (optimistic lock)
-	err = a.UpdateMetadata(context.Background(), docID, origBucket, !tempLoc, displayName, int(version))
+	err = a.UpdateMetadata(context.Background(), docID, meta, int(version))
 	if err != nil {
 		t.Fatalf("UpdateMetadata: %v", err)
 	}
 	defer func() {
 		// Restore with incremented version
-		_ = a.UpdateMetadata(context.Background(), docID, origBucket, tempLoc, displayName, int(version+1))
+		restore := meta
+		restore.TemporaryLocation = tempLoc
+		_ = a.UpdateMetadata(context.Background(), docID, restore, int(version+1))
 	}()
 
 	doc, _ := a.GetByID(context.Background(), docID)
@@ -285,10 +302,23 @@ func TestUpdateMetadata_NotFound(t *testing.T) {
 	defer pool.Close()
 	a := New(pool)
 
-	err := a.UpdateMetadata(context.Background(), uuid.New(), uuid.New(), false, "name.txt", 1)
+	err := a.UpdateMetadata(context.Background(), uuid.New(), model.DocumentMetadataUpdate{
+		StorageBucketID: uuid.New(),
+		DisplayName:     "name.txt",
+	}, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
 	}
+}
+
+// nonNilUUIDForTest maps the zero UUID (how a NULL column reads back) to nil so
+// a "move + re-attribute" update preserves a NULL authorizationId rather than
+// rewriting it to the zero UUID.
+func nonNilUUIDForTest(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 
 func TestDelete_NotFound(t *testing.T) {

@@ -31,6 +31,20 @@ type mockDocRepo struct {
 	count        int
 	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
+	// By-reference lookup scripting (013 externalReference). The GLOBAL and
+	// bucket-SCOPED variants are scripted and counted SEPARATELY and never fall
+	// back to one another: which one the handler dispatched to is the whole
+	// invariant of the by-reference endpoint (global = the provider's fetch,
+	// scoped = read resolution), so a shared doc/counter would make the two
+	// indistinguishable and the dispatch untestable.
+	refDoc           *model.Document // non-nil → GetByReference returns this
+	refInBucketDoc   *model.Document // non-nil → GetByReferenceInBucket returns this
+	refErr           error
+	refCalls         int // GetByReference (global)
+	refInBucketCalls int // GetByReferenceInBucket (scoped)
+	lastRefKey       string
+	lastRefBucket    uuid.UUID
+
 	// docsByID, when non-nil, makes GetByID id-aware: it returns the mapped
 	// document for a known id and model.ErrDocumentNotFound for an unknown
 	// one. Used by the batched-read tests, which need several distinct rows
@@ -44,8 +58,11 @@ type mockDocRepo struct {
 	lastUpdateTemporary   bool
 	lastUpdateDisplayName string
 	lastUpdateVersion     int
+	lastUpdateMeta        model.DocumentMetadataUpdate
 
-	// Captured args from Create / UpdateFile content_metadata params (US1+).
+	// Captured args from Create / UpdateFile: the whole document row (013:
+	// optional authorizationId, externalReference) and the content_metadata
+	// params (US1+).
 	lastCreateDoc                 model.Document
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
@@ -83,6 +100,29 @@ func (m *mockDocRepo) Create(_ context.Context, doc model.Document, contentMetad
 	m.lastCreateContentMetadata = contentMetadata
 	return doc.ID, m.createErr
 }
+func (m *mockDocRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
+	m.refCalls++
+	m.lastRefKey = reference
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc != nil {
+		return *m.refDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockDocRepo) GetByReferenceInBucket(_ context.Context, reference string, bucketID uuid.UUID) (model.Document, error) {
+	m.refInBucketCalls++
+	m.lastRefKey = reference
+	m.lastRefBucket = bucketID
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refInBucketDoc != nil {
+		return *m.refInBucketDoc, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
 func (m *mockDocRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, contentMetadata model.ContentMetadata) error {
 	m.lastUpdateFileContentMetadata = contentMetadata
 	return m.updateErr
@@ -97,21 +137,30 @@ func (m *mockDocRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, e
 	}
 	return true, nil
 }
-func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, bucketID uuid.UUID, temporary bool, displayName string, version int) error {
+func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
 	m.updateMetadataCalls++
-	m.lastUpdateBucketID = bucketID
-	m.lastUpdateTemporary = temporary
-	m.lastUpdateDisplayName = displayName
+	m.lastUpdateBucketID = meta.StorageBucketID
+	m.lastUpdateTemporary = meta.TemporaryLocation
+	m.lastUpdateDisplayName = meta.DisplayName
 	m.lastUpdateVersion = version
+	m.lastUpdateMeta = meta
 	if m.updateErr != nil {
 		return m.updateErr
 	}
 	// Mirror real adapter behavior so the subsequent service GetByID
 	// reflects the update — otherwise tests can't tell whether the
-	// handler propagated the new values or returned stale ones.
-	m.doc.StorageBucketID = bucketID
-	m.doc.TemporaryLocation = temporary
-	m.doc.DisplayName = displayName
+	// handler propagated the new values or returned stale ones. This is the
+	// full "move + re-attribute" field set.
+	m.doc.StorageBucketID = meta.StorageBucketID
+	m.doc.TemporaryLocation = meta.TemporaryLocation
+	m.doc.DisplayName = meta.DisplayName
+	if meta.AuthorizationID != nil {
+		m.doc.AuthorizationID = *meta.AuthorizationID
+	} else {
+		m.doc.AuthorizationID = uuid.Nil
+	}
+	m.doc.CreatedBy = meta.CreatedBy
+	m.doc.ExternalReference = meta.ExternalReference
 	m.doc.Version = version + 1
 	return nil
 }
