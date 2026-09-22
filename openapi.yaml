@@ -49,6 +49,10 @@ components:
         destinationBucketId:
           format: uuid
           type: string
+        displayName:
+          type: string
+        externalReference:
+          type: string
         skipDedup:
           type: boolean
         sourceId:
@@ -105,8 +109,14 @@ components:
           type: string
         externalID:
           type: string
+        externalReference:
+          type: string
         id:
           type: string
+        imageHeight:
+          type: integer
+        imageWidth:
+          type: integer
         mimeType:
           type: string
         size:
@@ -128,7 +138,6 @@ components:
         - displayName
         - temporaryLocation
         - storageBucketId
-        - authorizationId
         - createdDate
         - updatedDate
       type: object
@@ -180,7 +189,15 @@ components:
       type: object
     http.UpdateDocumentRequest:
       properties:
+        authorizationId:
+          format: uuid
+          type: string
+        createdBy:
+          format: uuid
+          type: string
         displayName:
+          type: string
+        externalReference:
           type: string
         storageBucketId:
           format: uuid
@@ -295,8 +312,12 @@ paths:
         whole-file buffering. Parts are processed in whatever order they arrive;
         metadata validation always happens after the loop, before the stage is
         published. (The known caller sends the file part first — research R4 —
-        which is why bucket-level limits cannot gate the stream early; the
-        handler itself does not depend on any ordering.)
+        which is why bucket-level limits cannot gate the stream early.)
+
+        One ordering dependency exists (spec 013): skipImageProcessing is consumed
+        when the file part is staged, so the verbatim/byte-exact contract can only
+        be honored if it precedes the file. A skipImageProcessing=true that arrives
+        AFTER the file part is rejected with 400 rather than silently transcoded.
       operationId: DocumentHandler.Create
       responses:
         "201":
@@ -351,6 +372,59 @@ paths:
         Create handles POST /internal/file — streaming ingest (spec 020): the
         file part flows request → sniff → (transcode) → staged storage without
         whole-file buffering.
+      tags:
+        - /internal
+  /internal/file/by-reference:
+    get:
+      description: |-
+        ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
+        ref is required. bucketId OMITTED → GLOBAL resolution (the provider's fetch:
+        any document carrying the reference, all sharing one blob). bucketId present
+        → bucket-SCOPED resolution (read resolution: the document in that bucket).
+        200 → document meta (incl. externalReference + image dims); 404 → no match.
+
+        Only an ABSENT bucketId parameter selects the global lookup. A bucketId that
+        is PRESENT but empty (`&bucketId=`) is malformed input, not an omission, and
+        is rejected with the same 400 as a malformed one — silently widening a
+        bucket-scoped read into a cross-bucket one because the caller's variable
+        interpolated empty is exactly the failure mode that must not be quiet.
+      operationId: DocumentHandler.ByReference
+      parameters:
+        - in: query
+          name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          schema:
+            format: uuid
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.DocumentMetaResponse'
+          description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Internal Server Error
+      summary: ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
       tags:
         - /internal
   /internal/file/content-batch:
@@ -422,19 +496,25 @@ paths:
           content:
             application/json; charset=utf-8:
               schema:
-                $ref: '#/components/schemas/source-document-not-found'
+                $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
         "409":
           content:
             application/json; charset=utf-8:
               schema:
-                $ref: '#/components/schemas/copy-conflicts-with-an-existing-row'
+                $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
+        "413":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Entity Too Large
         "500":
           content:
             application/json; charset=utf-8:
               schema:
-                $ref: '#/components/schemas/internal-error'
+                $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
       summary: Copy handles POST /internal/file/copy.
       tags:
@@ -474,9 +554,12 @@ paths:
     patch:
       description: |-
         Update handles PATCH /internal/file/{id}.
-        Mutates storageBucketId, temporaryLocation, and/or displayName. Each
-        field is optional; at least one must be present. Omitted fields retain
-        their current value.
+        Mutates the "move + re-attribute" fields: storageBucketId, temporaryLocation,
+        displayName, authorizationId, createdBy, and externalReference. Each field is
+        optional; at least one must produce an effective change. Omitted fields retain
+        their current value; createdBy and externalReference accept an explicit JSON
+        null to clear (authorizationId is NOT clearable — clearing it orphans the
+        document from its policy).
 
         displayName notes:
           - Validation rejects empty/whitespace-only, length > 512 (matches
@@ -526,6 +609,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Conflict
+        "413":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Request Entity Too Large
         "500":
           content:
             application/json; charset=utf-8:

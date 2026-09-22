@@ -72,7 +72,12 @@ WHERE "externalID" = $1`)).
 	if err != nil || changed != 6 {
 		t.Fatalf("UpdateCIDGroup = (%d, %v)", changed, err)
 	}
-	count, err := a.CountCIDAliasReferences(context.Background(), aliases[0])
+	// gosec G602 flags aliases[0] here only because aliases was passed to
+	// UpdateCIDGroup above and it stops tracking the length across the call. A
+	// Go slice is passed as a header COPY, so a callee cannot shrink the
+	// caller's slice; aliases is a 2-element literal declared in this function
+	// and the same index is already used above the call without a complaint.
+	count, err := a.CountCIDAliasReferences(context.Background(), aliases[0]) //nolint:gosec // G602 false positive: aliases is a 2-element literal
 	if err != nil || count != 0 {
 		t.Fatalf("CountCIDAliasReferences = (%d, %v)", count, err)
 	}
