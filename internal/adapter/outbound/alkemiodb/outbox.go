@@ -16,8 +16,8 @@ import (
 // committed non-temporary file row carries its backup hint). After commit it emits a best-effort
 // NOTIFY so the backup worker wakes immediately — the durable table + the worker's poll floor
 // cover a lost NOTIFY. A unique violation on the document → model.ErrDuplicateKey with NO outbox
-// row written (a dedup hit means the content already exists and was already captured); the
-// service's dedup path re-queries the winner exactly as on the non-outbox path.
+// row written; the violation is classified by the index that raised it, exactly as on the
+// non-outbox path, so the service resolves it identically.
 func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata, priority int16) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -32,8 +32,8 @@ func (a *Adapter) CreateWithOutbox(ctx context.Context, doc model.Document, cont
 
 	id, err := q.CreateDocument(ctx, createDocumentParams(doc, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return uuid.Nil, model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return uuid.Nil, dup
 		}
 		return uuid.Nil, err
 	}
@@ -74,8 +74,8 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expect
 
 	rows, err := q.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -99,11 +99,15 @@ func (a *Adapter) UpdateFileWithOutbox(ctx context.Context, id uuid.UUID, expect
 	return nil
 }
 
-// PromoteWithOutbox makes an already-stored temporary document permanent and enqueues its current
-// content in the same transaction. UpdateDocumentMetadata's version guard serializes promotion
-// with content replacement; content replacement also bumps version, so whichever commits first
-// forces the stale operation to retry with fresh temporary/content state.
-func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document, storageBucketID uuid.UUID, displayName string, priority int16) error {
+// PromoteWithOutbox applies the "move + re-attribute" metadata update that flips a temporary
+// document durable AND enqueues its current content in the same transaction. UpdateDocumentMetadata's
+// version guard serializes promotion with content replacement; content replacement also bumps version,
+// so whichever commits first forces the stale operation to retry with fresh temporary/content state.
+// Because the version guard holds, current.ExternalID/current.Size are still the row's authoritative
+// content at commit (a replace that beat us bumped version → this UPDATE hits 0 rows → ErrConflict,
+// no stale enqueue). meta carries the full re-attribute field set; the outbox breadcrumb's createdBy
+// is the RE-ATTRIBUTED owner (meta.CreatedBy) the same commit sets on the row.
+func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document, meta model.DocumentMetadataUpdate, priority int16) error {
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -111,17 +115,10 @@ func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document,
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := a.queries.WithTx(tx)
 
-	rows, err := q.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
-		ID:                uuidToPgx(current.ID),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: false,
-		DisplayName:       displayName,
-		UpdatedDate:       timeToPgxNow(),
-		Version:           safeInt32(current.Version),
-	})
+	rows, err := q.UpdateDocumentMetadata(ctx, updateMetadataParams(current.ID, meta, current.Version))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -132,7 +129,7 @@ func (a *Adapter) PromoteWithOutbox(ctx context.Context, current model.Document,
 		FileId:      uuidToPgx(current.ID),
 		ExternalID:  current.ExternalID,
 		Priority:    priority,
-		CreatedBy:   uuidToPgxNullable(current.CreatedBy),
+		CreatedBy:   uuidToPgxNullable(meta.CreatedBy),
 		CreatedDate: timeToPgxNow(),
 		Size:        int64(current.Size),
 	}); err != nil {
@@ -162,7 +159,7 @@ func (a *Adapter) DeletePendingByHash(ctx context.Context, externalID string) (i
 // though: a persistently failing NOTIFY (e.g. a permissions issue) should be visible rather than
 // silently dropped.
 func (a *Adapter) notifyBackup(ctx context.Context) {
-	if _, err := a.pool.Exec(ctx, "NOTIFY file_backup_outbox"); err != nil {
+	if err := a.queries.NotifyBackupOutbox(ctx); err != nil {
 		a.logger.Warn("backup-outbox NOTIFY failed (best-effort; the consumer's poll floor still drains)",
 			zap.Error(err))
 	}

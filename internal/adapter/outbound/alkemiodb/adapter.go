@@ -86,11 +86,42 @@ func (a *Adapter) FindByExternalIDAndBucket(ctx context.Context, externalID stri
 	return findRowToDocument(row), nil
 }
 
+// GetByReference resolves the opaque externalReference across all buckets.
+// pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReference(ctx context.Context, reference string) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReference(ctx, stringToPgxText(&reference))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refRowToDocument(row), nil
+}
+
+// GetByReferenceInBucket resolves the opaque externalReference within one
+// bucket. pgx.ErrNoRows is translated to model.ErrDocumentNotFound.
+func (a *Adapter) GetByReferenceInBucket(ctx context.Context, reference string, storageBucketID uuid.UUID) (model.Document, error) {
+	row, err := a.queries.GetDocumentByReferenceInBucket(ctx, queries.GetDocumentByReferenceInBucketParams{
+		ExternalReference: stringToPgxText(&reference),
+		StorageBucketId:   uuidToPgx(storageBucketID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Document{}, model.ErrDocumentNotFound
+		}
+		return model.Document{}, err
+	}
+	return refInBucketRowToDocument(row), nil
+}
+
 // Create inserts a new document row, serializing contentMetadata into the
 // JSONB content_metadata column (see marshalContentMetadata for the shape
-// rules). A unique violation — another row already holds this content in the
-// bucket — surfaces as model.ErrDuplicateKey so the service can fall back to
-// its dedup path.
+// rules). Any unique violation — a content index, the (externalReference,
+// storageBucketId) index, or the authorizationId/tagsetId uniques — surfaces as
+// a *model.DuplicateKeyError, which matches the model.ErrDuplicateKey sentinel
+// AND names the violated index, so the service resolves the collision by the
+// index that actually raised it rather than by probing.
 func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	raw, err := marshalContentMetadata(contentMetadata)
 	if err != nil {
@@ -98,8 +129,8 @@ func (a *Adapter) Create(ctx context.Context, doc model.Document, contentMetadat
 	}
 	id, err := a.queries.CreateDocument(ctx, createDocumentParams(doc, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return uuid.Nil, model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return uuid.Nil, dup
 		}
 		return uuid.Nil, err
 	}
@@ -119,19 +150,57 @@ func createDocumentParams(doc model.Document, raw []byte) queries.CreateDocument
 		CreatedBy:         uuidToPgxNullable(doc.CreatedBy),
 		TemporaryLocation: doc.TemporaryLocation,
 		StorageBucketId:   uuidToPgx(doc.StorageBucketID),
-		AuthorizationId:   uuidToPgx(doc.AuthorizationID),
+		// authorizationId is nullable: a provider staging store (matrix_media
+		// bucket) has no server-minted authorization, so a zero UUID must map to
+		// SQL NULL. The all-zero UUID would FK-violate against a policy that does
+		// not exist and would collide on UNIQUE("authorizationId") across every
+		// staging row; NULL does neither.
+		AuthorizationId:   uuidToPgxNullableNil(doc.AuthorizationID),
 		TagsetId:          uuidToPgxNullable(doc.TagsetID),
 		CreatedDate:       timeToPgx(doc.CreatedDate),
 		UpdatedDate:       timeToPgx(doc.UpdatedDate),
 		ContentMetadata:   raw,
+		ExternalReference: stringToPgxText(doc.ExternalReference),
 	}
 }
 
-// isUniqueViolation reports whether err is a Postgres unique-constraint violation — the
-// signal that another row already holds this content in the bucket (the dedup race).
-func isUniqueViolation(err error) bool {
+// uqFileExternalReferenceBucket is the NAME of the partial unique index enforcing
+// at most one row per (externalReference, storageBucketId). It is EXPLICITLY named
+// in both the production DDL (the server's TypeORM migration
+// FileExternalReference1782299000000) and this repo's sqlc schema mirror
+// (db/schema/document.sql), so the name is byte-identical in every environment —
+// which is what makes classifying a violation by it sound. Postgres reports the
+// INDEX name as the constraint name for a bare unique index.
+//
+// Only THIS index is named. The table's other unique indexes carry TypeORM's
+// hash-generated names in production ("REL_d9e2dfcccf59233c17cc6bc641" for
+// authorizationId, "REL_9fb9257b14ec21daf5bc9aa4c8" for tagsetId — see the
+// server's 1764590884532-baseline migration) and Postgres-generated ones in the
+// local schema mirror, so they are classified by EXCLUSION rather than against
+// names that differ per environment.
+const uqFileExternalReferenceBucket = "UQ_file_externalReference_storageBucketId"
+
+// duplicateKeyError translates a Postgres unique-constraint violation into the
+// domain's typed duplicate-key error, classifying WHICH index was violated so the
+// service can resolve the collision deterministically instead of probing for it.
+// Returns nil when err is not a unique violation, so every call site reads as
+// `if dup := duplicateKeyError(err); dup != nil { return dup }`.
+//
+// This is the single boundary where a pgconn error becomes domain vocabulary: the
+// pgx type stops here and only model.UniqueConstraint crosses into the core.
+func duplicateKeyError(err error) error {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation
+	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
+		return nil
+	}
+	constraint := model.ConstraintOther
+	switch pgErr.ConstraintName {
+	case "":
+		constraint = model.ConstraintUnspecified
+	case uqFileExternalReferenceBucket:
+		constraint = model.ConstraintExternalReferenceBucket
+	}
+	return &model.DuplicateKeyError{Constraint: constraint, Name: pgErr.ConstraintName}
 }
 
 // UpdateFile rewrites the content fields (externalID, mimeType, size) plus
@@ -147,8 +216,8 @@ func (a *Adapter) UpdateFile(ctx context.Context, id uuid.UUID, expectedExternal
 	}
 	rows, err := a.queries.UpdateDocumentFile(ctx, updateFileParams(id, expectedExternalID, expectedVersion, externalID, mimeType, size, raw))
 	if err != nil {
-		if isUniqueViolation(err) {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -173,28 +242,18 @@ func updateFileParams(id uuid.UUID, expectedExternalID string, expectedVersion i
 	}
 }
 
-// UpdateMetadata mutates bucket/temporaryLocation/displayName under
-// optimistic locking (WHERE version = $given, SET version = version + 1).
-// 0 rows affected — row missing or version stale — returns
-// model.ErrDocumentNotFound; the service maps that to its conflict error.
-func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucketID uuid.UUID, temporaryLocation bool, displayName string, version int) error {
-	rows, err := a.queries.UpdateDocumentMetadata(ctx, queries.UpdateDocumentMetadataParams{
-		ID:                uuidToPgx(id),
-		StorageBucketId:   uuidToPgx(storageBucketID),
-		TemporaryLocation: temporaryLocation,
-		DisplayName:       displayName,
-		UpdatedDate:       timeToPgxNow(),
-		Version:           safeInt32(version),
-	})
+// UpdateMetadata applies the "move + re-attribute" primitive under optimistic
+// locking (WHERE version = $given, SET version = version + 1): besides bucket/
+// temporaryLocation/displayName it also re-points authorizationId, createdBy,
+// and the opaque externalReference. 0 rows affected — row missing or version
+// stale — returns model.ErrDocumentNotFound; the service maps that to its
+// conflict error. A unique violation (the partial externalReference index, or
+// the authorizationId unique) surfaces as model.ErrDuplicateKey.
+func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, meta model.DocumentMetadataUpdate, version int) error {
+	rows, err := a.queries.UpdateDocumentMetadata(ctx, updateMetadataParams(id, meta, version))
 	if err != nil {
-		// Defensive: keeps PATCH consistent with Create/UpdateFile if a
-		// uniqueness constraint is added later (e.g. (externalID,
-		// storageBucketId)). No such constraint exists in this repo's
-		// db/schema/document.sql today, but the production schema can
-		// diverge, and a 409 beats a 500 if it fires.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-			return model.ErrDuplicateKey
+		if dup := duplicateKeyError(err); dup != nil {
+			return dup
 		}
 		return err
 	}
@@ -202,6 +261,25 @@ func (a *Adapter) UpdateMetadata(ctx context.Context, id uuid.UUID, storageBucke
 		return model.ErrDocumentNotFound
 	}
 	return nil
+}
+
+// updateMetadataParams maps the "move + re-attribute" field set to the sqlc
+// update params — the ONE owner, shared by UpdateMetadata and the transactional
+// PromoteWithOutbox so the two can't drift on which columns move. authorizationId
+// and createdBy are nullable (nil → SQL NULL); externalReference is the opaque
+// nullable text.
+func updateMetadataParams(id uuid.UUID, meta model.DocumentMetadataUpdate, version int) queries.UpdateDocumentMetadataParams {
+	return queries.UpdateDocumentMetadataParams{
+		ID:                uuidToPgx(id),
+		StorageBucketId:   uuidToPgx(meta.StorageBucketID),
+		TemporaryLocation: meta.TemporaryLocation,
+		DisplayName:       meta.DisplayName,
+		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
+		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
+		ExternalReference: stringToPgxText(meta.ExternalReference),
+		UpdatedDate:       timeToPgxNow(),
+		Version:           safeInt32(version),
+	}
 }
 
 // BackfillContentMetadata persists computed content_metadata on a row without

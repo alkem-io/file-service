@@ -16,6 +16,31 @@ import (
 
 var nopLogger = zap.NewNop()
 
+// dupOnReference / dupOnOther build the CLASSIFIED duplicate-key error the
+// adapter returns for a unique violation, naming which index raised it. The
+// service branches on that classification, so a test that scripted the bare
+// model.ErrDuplicateKey sentinel would be asserting against an unattributable
+// violation — a different case with a different (loud) outcome.
+func dupOnReference() error {
+	return &model.DuplicateKeyError{
+		Constraint: model.ConstraintExternalReferenceBucket,
+		Name:       "UQ_file_externalReference_storageBucketId",
+	}
+}
+
+// dupUnattributed is a unique violation the database reported WITHOUT naming the
+// index — the one case the service cannot resolve and must refuse to guess at.
+func dupUnattributed() error {
+	return &model.DuplicateKeyError{Constraint: model.ConstraintUnspecified}
+}
+
+func dupOnOther() error {
+	return &model.DuplicateKeyError{
+		Constraint: model.ConstraintOther,
+		Name:       "REL_d9e2dfcccf59233c17cc6bc641", // the authorizationId unique, prod's name
+	}
+}
+
 // faultyReadCloser fails on the first Read — a storage transport fault mid-header (EIO / NFS blip),
 // as opposed to bytes that are simply undecodable.
 type faultyReadCloser struct{}
@@ -26,8 +51,16 @@ func (f *faultyReadCloser) Close() error             { return nil }
 // --- Mocks ---
 
 type mockRepo struct {
-	doc           model.Document
-	getErr        error
+	doc    model.Document
+	getErr error
+
+	// docsByID, when non-nil, makes GetByID id-aware: it returns the mapped
+	// document for a known id and model.ErrDocumentNotFound for an unknown
+	// one. Used by the batched-read tests, which need several distinct rows in
+	// one call. When nil, GetByID falls back to the doc/getErr pair so existing
+	// single-document tests are unaffected.
+	docsByID map[uuid.UUID]model.Document
+
 	findDoc       *model.Document // nil means "not found"
 	findErr       error           // if set, overrides findDoc
 	findCalls     int
@@ -42,7 +75,16 @@ type mockRepo struct {
 	count         int
 	countErr      error
 
+	// By-reference lookup scripting (013 externalReference).
+	refDoc          *model.Document // nil means "not found"
+	refErr          error
+	refCalls        int
+	lastRefKey      string
+	updateMetaCalls int
+	lastUpdateMeta  model.DocumentMetadataUpdate
+
 	// Captured args from Create / UpdateFile content_metadata params.
+	lastCreateDoc                 model.Document
 	lastCreateContentMetadata     model.ContentMetadata
 	lastUpdateFileContentMetadata model.ContentMetadata
 
@@ -75,7 +117,13 @@ type mockRepo struct {
 // Ensure mockRepo implements the full interface at compile time.
 var _ port.DocumentRepo = (*mockRepo)(nil)
 
-func (m *mockRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, error) {
+func (m *mockRepo) GetByID(_ context.Context, id uuid.UUID) (model.Document, error) {
+	if m.docsByID != nil {
+		if doc, ok := m.docsByID[id]; ok {
+			return doc, nil
+		}
+		return model.Document{}, model.ErrDocumentNotFound
+	}
 	return m.doc, m.getErr
 }
 func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID string, storageBucketID uuid.UUID) (model.Document, error) {
@@ -92,6 +140,7 @@ func (m *mockRepo) FindByExternalIDAndBucket(_ context.Context, externalID strin
 }
 func (m *mockRepo) Create(_ context.Context, doc model.Document, contentMetadata model.ContentMetadata) (uuid.UUID, error) {
 	m.createCalls++
+	m.lastCreateDoc = doc
 	m.lastCreateContentMetadata = contentMetadata
 	if m.createErrOnce != nil && m.createCalls == 1 {
 		return uuid.Nil, m.createErrOnce
@@ -116,7 +165,31 @@ func (m *mockRepo) BackfillContentMetadata(_ context.Context, id uuid.UUID, expe
 	}
 	return !m.backfillLostRace, nil
 }
-func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+func (m *mockRepo) GetByReference(_ context.Context, reference string) (model.Document, error) {
+	m.refCalls++
+	m.lastRefKey = reference
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return *m.refDoc, nil
+}
+func (m *mockRepo) GetByReferenceInBucket(_ context.Context, reference string, _ uuid.UUID) (model.Document, error) {
+	m.refCalls++
+	m.lastRefKey = reference
+	if m.refErr != nil {
+		return model.Document{}, m.refErr
+	}
+	if m.refDoc == nil {
+		return model.Document{}, model.ErrDocumentNotFound
+	}
+	return *m.refDoc, nil
+}
+func (m *mockRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.DocumentMetadataUpdate, _ int) error {
+	m.lastUpdateMeta = meta
+	m.updateMetaCalls++
 	return m.updateErr
 }
 func (m *mockRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
@@ -307,6 +380,29 @@ func TestCreateDocument_Happy(t *testing.T) {
 	}
 }
 
+func TestCreateDocument_OmittedAuthorizationPersistsNil(t *testing.T) {
+	repo := &mockRepo{}
+	svc := &FileService{
+		Logger:    nopLogger,
+		Repo:      repo,
+		Storage:   &mockStorage{},
+		Processor: &mockProcessor{},
+	}
+
+	doc, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		// AuthorizationID intentionally omitted: internal snapshot rows are
+		// stored with SQL NULL authorization.
+	}, []byte("content"), "", nil, 0)
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	if doc.AuthorizationID != uuid.Nil || repo.lastCreateDoc.AuthorizationID != uuid.Nil {
+		t.Fatalf("authorization = response %s / repo %s, want uuid.Nil", doc.AuthorizationID, repo.lastCreateDoc.AuthorizationID)
+	}
+}
+
 // Dedup: same content in same bucket → existing row returned, Reused=true,
 // caller-supplied auth/tagset ignored.
 func TestCreateDocument_Dedup_SameContentSameBucket_ReturnsExisting(t *testing.T) {
@@ -385,9 +481,9 @@ func TestCreateDocument_Dedup_SameContentDifferentBucket_InsertsNew(t *testing.T
 	}
 }
 
-// Concurrent race: first Create fails with ErrDuplicateKey (other writer
-// won the race on unique(externalID, storageBucketID)). Service re-queries
-// and returns the winner with Reused=true.
+// Defensive content-winner classification: a schema variant reports
+// ErrDuplicateKey and the follow-up (externalID, bucket) probe finds the
+// concurrent row. The service returns that row with Reused=true.
 func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	winnerID := uuid.New()
 	winnerAuth := uuid.New()
@@ -409,7 +505,7 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 				AuthorizationID: winnerAuth,
 			}, nil
 		},
-		createErr: model.ErrDuplicateKey,
+		createErr: dupOnOther(),
 	}
 	storage := &mockStorage{}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: storage, Processor: &mockProcessor{}}
@@ -431,6 +527,60 @@ func TestCreateDocument_Dedup_CreateRace_ReturnsWinnerAsReused(t *testing.T) {
 	}
 	if doc.AuthorizationID != winnerAuth {
 		t.Errorf("AuthorizationID = %v, want winner %v", doc.AuthorizationID, winnerAuth)
+	}
+}
+
+// A NON-reference unique violation with no content winner behind it is the
+// authorizationId/tagsetId case: the caller supplied an id another row already
+// owns. That is a client conflict the caller can fix, so it must resolve to
+// ErrConflict (409) — never the opaque 500 an unclassified failure would give.
+func TestCreateDocument_DuplicateKeyWithoutContentWinnerReturnsConflict(t *testing.T) {
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			return model.Document{}, model.ErrDocumentNotFound
+		},
+		createErr: dupOnOther(),
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}, []byte("content"), "", nil, 0)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want ErrConflict for authorizationId/tagsetId collision", err)
+	}
+}
+
+// The counterpart to the 409 above: a winner lookup that fails for a TRANSPORT
+// reason is a server fault and must propagate as one. Reporting it as
+// ErrConflict would tell the caller to fix input that was never the problem.
+func TestCreateDocument_DuplicateKeyWinnerLookupFailurePropagates(t *testing.T) {
+	dbErr := errors.New("database unavailable")
+	call := 0
+	repo := &mockRepoRace{
+		find: func() (model.Document, error) {
+			call++
+			if call == 1 {
+				return model.Document{}, model.ErrDocumentNotFound
+			}
+			return model.Document{}, dbErr
+		},
+		createErr: dupOnOther(),
+	}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	_, err := svc.CreateDocument(context.Background(), model.CreateDocumentInput{
+		DisplayName:     "snapshot.ybin",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}, []byte("content"), "", nil, 0)
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("error = %v, want wrapped lookup failure", err)
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("transport failure must not be classified as a client conflict: %v", err)
 	}
 }
 
@@ -555,7 +705,7 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 			t.Fatal("FindByExternalIDAndBucket must not be called when SkipDedup=true")
 			return model.Document{}, nil
 		},
-		createErr: model.ErrDuplicateKey,
+		createErr: dupOnOther(),
 	}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
@@ -576,6 +726,7 @@ func TestCreateDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 type mockRepoRace struct {
 	find      func() (model.Document, error)
 	createErr error
+	refWinner *model.Document // reference-branch race re-query winner (013)
 }
 
 var _ port.DocumentRepo = (*mockRepoRace)(nil)
@@ -586,6 +737,15 @@ func (m *mockRepoRace) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 func (m *mockRepoRace) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return m.find()
 }
+func (m *mockRepoRace) GetByReference(_ context.Context, _ string) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *mockRepoRace) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	if m.refWinner != nil {
+		return *m.refWinner, nil
+	}
+	return model.Document{}, model.ErrDocumentNotFound
+}
 func (m *mockRepoRace) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
 	return nil, nil
 }
@@ -595,7 +755,7 @@ func (m *mockRepoRace) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *mockRepoRace) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+func (m *mockRepoRace) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
 	return nil
 }
 func (m *mockRepoRace) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) (bool, error) {
@@ -698,6 +858,22 @@ func TestCreateDocument_DBFails_DoesNotDeleteBlob(t *testing.T) {
 
 // CopyDocument: happy path. Source exists in bucket A; copy to bucket B
 // produces a fresh row with same content metadata, caller's auth/tagset.
+func TestCopyDocument_RequiresAuthorization(t *testing.T) {
+	repo := &mockRepo{}
+	svc := &FileService{Logger: nopLogger, Repo: repo}
+
+	_, err := svc.CopyDocument(context.Background(), uuid.New(), model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.Nil,
+	})
+	if !errors.Is(err, ErrInvalidAuthorizationID) {
+		t.Fatalf("error = %v, want ErrInvalidAuthorizationID", err)
+	}
+	if repo.createCalls != 0 {
+		t.Fatalf("copy with no authorization must not create a row; calls=%d", repo.createCalls)
+	}
+}
+
 func TestCopyDocument_Happy(t *testing.T) {
 	sourceID := uuid.New()
 	bucketA := uuid.New()
@@ -900,7 +1076,7 @@ func TestCopyDocument_SkipDedup_DuplicateKey_ReturnsConflict(t *testing.T) {
 
 	// Use mockRepoRace to script the create behavior (ErrDuplicateKey).
 	// GetByID returns the source; find must not be called when SkipDedup=true.
-	repo := &copyRaceRepo{source: source, createErr: model.ErrDuplicateKey}
+	repo := &copyRaceRepo{source: source, createErr: dupOnOther()}
 	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
 
 	_, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
@@ -929,6 +1105,12 @@ func (m *copyRaceRepo) GetByID(_ context.Context, _ uuid.UUID) (model.Document, 
 func (m *copyRaceRepo) FindByExternalIDAndBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
 	return model.Document{}, model.ErrDocumentNotFound
 }
+func (m *copyRaceRepo) GetByReference(_ context.Context, _ string) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
+func (m *copyRaceRepo) GetByReferenceInBucket(_ context.Context, _ string, _ uuid.UUID) (model.Document, error) {
+	return model.Document{}, model.ErrDocumentNotFound
+}
 func (m *copyRaceRepo) ListImagesNeedingDims(_ context.Context, _ uuid.UUID, _ int32) ([]model.Document, error) {
 	return nil, nil
 }
@@ -938,7 +1120,7 @@ func (m *copyRaceRepo) Create(_ context.Context, _ model.Document, _ model.Conte
 func (m *copyRaceRepo) UpdateFile(_ context.Context, _ uuid.UUID, _ string, _ int, _, _ string, _ int, _ model.ContentMetadata) error {
 	return nil
 }
-func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool, _ string, _ int) error {
+func (m *copyRaceRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, _ model.DocumentMetadataUpdate, _ int) error {
 	return nil
 }
 func (m *copyRaceRepo) BackfillContentMetadata(_ context.Context, _ uuid.UUID, _ string, _ model.ContentMetadata) (bool, error) {
@@ -1067,7 +1249,7 @@ func TestUpdateDocumentMetadata_Happy(t *testing.T) {
 		}},
 	}
 
-	updated, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: docID, Version: 1}, newBucket, false, "renamed.txt")
+	updated, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: docID, Version: 1}, model.DocumentMetadataUpdate{StorageBucketID: newBucket, DisplayName: "renamed.txt"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1081,7 +1263,7 @@ func TestUpdateDocumentMetadata_NotFound(t *testing.T) {
 		Repo: &mockRepo{updateErr: errors.New("not found")},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, uuid.New(), false, "name.txt")
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"})
 	if err == nil {
 		t.Fatal("expected error for not found")
 	}
@@ -1095,7 +1277,7 @@ func TestUpdateDocumentMetadata_UpdateFails(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, uuid.New(), false, "name.txt")
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 1}, model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1270,7 +1452,7 @@ func TestUpdateDocumentMetadata_VersionConflict(t *testing.T) {
 		},
 	}
 
-	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 3}, uuid.New(), false, "name.txt")
+	_, err := svc.UpdateDocumentMetadata(context.Background(), model.Document{ID: uuid.New(), Version: 3}, model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "name.txt"})
 	if err == nil {
 		t.Fatal("expected error for version conflict")
 	}
@@ -1488,4 +1670,110 @@ func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType strin
 
 func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
+}
+
+// CopyDocument: a supplied DisplayName names the NEW row; the source is
+// untouched. The Matrix storage provider names its row after the media id, so
+// a conversation copy must be able to carry the event's real filename.
+func TestCopyDocument_DisplayNameOverridesCopiedRow(t *testing.T) {
+	sourceID := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "KnJLupUceCirVxKYoDGsrbdC",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	override := "holiday.png"
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+		DisplayName:         &override,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.DisplayName != override {
+		t.Errorf("DisplayName = %q, want the supplied %q", doc.DisplayName, override)
+	}
+	if repo.doc.DisplayName != "KnJLupUceCirVxKYoDGsrbdC" {
+		t.Errorf("source row was mutated: DisplayName = %q", repo.doc.DisplayName)
+	}
+	if repo.updateMetaCalls != 0 {
+		t.Errorf("copy updated existing metadata %d times", repo.updateMetaCalls)
+	}
+}
+
+// CopyDocument: omitting DisplayName inherits the source's name unchanged.
+func TestCopyDocument_DisplayNameOmittedInheritsSource(t *testing.T) {
+	sourceID := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "banner.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.DisplayName != source.DisplayName {
+		t.Errorf("DisplayName = %q, want inherited %q", doc.DisplayName, source.DisplayName)
+	}
+}
+
+// CopyDocument: a dedup-reused row is returned untouched, so a supplied
+// DisplayName must NOT rename an existing document. Renaming here would change
+// the filename shown for OLDER messages that already reference that row.
+func TestCopyDocument_DedupReusedRowKeepsItsName(t *testing.T) {
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "source.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	existing := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "sha3-of-content",
+		DisplayName:     "already-here.png",
+		StorageBucketID: bucketB,
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source, findDoc: &existing}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	override := "renamed.png"
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     uuid.New(),
+		DisplayName:         &override,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Fatal("expected a dedup-reused row")
+	}
+	if doc.DisplayName != existing.DisplayName {
+		t.Errorf("DisplayName = %q, want the reused row's own %q", doc.DisplayName, existing.DisplayName)
+	}
 }

@@ -8,17 +8,14 @@ package authhttp
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
 	"go.uber.org/zap"
-	"golang.org/x/net/http2"
 
 	"github.com/alkem-io/file-service/internal/domain/model"
 )
@@ -140,15 +137,11 @@ func (c *Client) doRequest(ctx context.Context, actorID, privilege, authorizatio
 }
 
 // newH2CClient creates an HTTP/2 cleartext client with persistent connection multiplexing.
-// http2.Transport automatically re-establishes the TCP connection if it drops.
 func newH2CClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
 	return &http.Client{
-		Timeout: 30 * time.Second, // fallback for requests without context deadline
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			},
-		},
+		Timeout:   30 * time.Second, // fallback for requests without context deadline
+		Transport: &http.Transport{Protocols: protocols},
 	}
 }

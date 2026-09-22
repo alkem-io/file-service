@@ -43,7 +43,7 @@ func TestMock_CreateWithOutbox_Commits(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: docID, Valid: true}, "hashX", int16(1),
@@ -64,6 +64,36 @@ func TestMock_CreateWithOutbox_Commits(t *testing.T) {
 	}
 }
 
+func TestMock_CreateWithOutbox_OmittedAuthorizationIsNull(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+	docID := uuid.New()
+	doc := sampleDoc(docID)
+	doc.AuthorizationID = uuid.Nil
+
+	// 14 insert args since 013 appended externalReference; authorizationId is
+	// still arg 8 (see createDocumentParams for the order).
+	insertArgs := anyArgs(14)
+	insertArgs[8] = pgtype.UUID{Valid: false} // authorizationId
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO file").WithArgs(insertArgs...).
+		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
+	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
+
+	if _, err := New(mock).CreateWithOutbox(context.Background(), doc, model.ContentMetadata{}, 0); err != nil {
+		t.Fatalf("CreateWithOutbox: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestMock_CreateWithOutbox_DedupRollsBack: a unique violation on the document rolls the
 // transaction back (NO outbox row, NO NOTIFY) and surfaces model.ErrDuplicateKey so the
 // service's dedup path re-queries the winner.
@@ -76,7 +106,7 @@ func TestMock_CreateWithOutbox_DedupRollsBack(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnError(&pgconn.PgError{Code: pgerrcode.UniqueViolation})
 	mock.ExpectRollback()
 
@@ -100,7 +130,7 @@ func TestMock_CreateWithOutbox_NotifyFailureNonFatal(t *testing.T) {
 	docID := uuid.New()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(13)...).
+	mock.ExpectQuery("INSERT INTO file").WithArgs(anyArgs(14)...).
 		WillReturnRows(mock.NewRows([]string{"id"}).AddRow(pgtype.UUID{Bytes: docID, Valid: true}))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -214,10 +244,22 @@ func TestMock_PromoteWithOutbox_CommitsMetadataAndHintAtomically(t *testing.T) {
 	doc.Version = 4
 	doc.CreatedBy = &createdBy
 
+	// meta carries the "move + re-attribute" field set; its CreatedBy is the
+	// re-attributed owner the outbox breadcrumb uses.
+	meta := model.DocumentMetadataUpdate{
+		StorageBucketID:   uuid.New(),
+		TemporaryLocation: false,
+		DisplayName:       "final.yjs",
+		CreatedBy:         &createdBy,
+	}
+
 	mock.ExpectBegin()
+	// UPDATE args: id, bucket, temporaryLocation, displayName, authorizationId,
+	// createdBy, externalReference, updatedDate, version.
 	mock.ExpectExec("UPDATE file").
 		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, pgxmock.AnyArg(), false,
-			"final.yjs", pgxmock.AnyArg(), int32(4)).
+			"final.yjs", pgxmock.AnyArg(), pgtype.UUID{Bytes: createdBy, Valid: true},
+			pgxmock.AnyArg(), pgxmock.AnyArg(), int32(4)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, "hashX", int16(1),
@@ -226,7 +268,7 @@ func TestMock_PromoteWithOutbox_CommitsMetadataAndHintAtomically(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectExec("NOTIFY file_backup_outbox").WillReturnResult(pgxmock.NewResult("NOTIFY", 0))
 
-	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, meta, 1)
 	if err != nil {
 		t.Fatalf("PromoteWithOutbox: %v", err)
 	}
@@ -246,11 +288,12 @@ func TestMock_PromoteWithOutbox_StaleVersionRollsBackWithoutHint(t *testing.T) {
 	doc.Version = 4
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectRollback()
 
-	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	meta := model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "final.yjs"}
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, meta, 1)
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Fatalf("PromoteWithOutbox = %v, want ErrDocumentNotFound", err)
 	}
@@ -270,13 +313,14 @@ func TestMock_PromoteWithOutbox_EnqueueFailureRollsBackPromotion(t *testing.T) {
 	doc.Version = 4
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(6)...).
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
 		WillReturnError(errors.New("outbox unavailable"))
 	mock.ExpectRollback()
 
-	err = New(mock).PromoteWithOutbox(context.Background(), doc, uuid.New(), "final.yjs", 1)
+	meta := model.DocumentMetadataUpdate{StorageBucketID: uuid.New(), DisplayName: "final.yjs"}
+	err = New(mock).PromoteWithOutbox(context.Background(), doc, meta, 1)
 	if err == nil {
 		t.Fatal("PromoteWithOutbox must fail when its atomic enqueue fails")
 	}

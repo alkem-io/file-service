@@ -68,6 +68,13 @@ type stubProcessor struct {
 	// application/octet-stream so image-MIME tests exercise the
 	// dims-on-response paths.
 	detectMIME string
+
+	// Arm counters. For a TRANSCODABLE image type these are mutually
+	// exclusive and are the only externally visible difference between the
+	// transcode arm and the verbatim (skipImageProcessing) arm, which is how
+	// an HTTP-level test can prove the flag reached StageUpload.
+	transcodeCalls   int
+	measureDimsCalls int
 }
 
 func (p *stubProcessor) DetectMIME(_ []byte) string {
@@ -92,6 +99,7 @@ func (p *stubProcessor) Process(content []byte, mimeType string) (port.ProcessRe
 	}, nil
 }
 func (p *stubProcessor) MeasureDims(_ io.Reader, _ string) (*int, *int, error) {
+	p.measureDimsCalls++
 	return p.measureDimsW, p.measureDimsH, p.measureDimsErr
 }
 
@@ -261,6 +269,57 @@ func TestDocumentHandler_Create_Success(t *testing.T) {
 	}
 }
 
+func TestDocumentHandler_Create_OmittedAuthorization_CreatesNullAuthRow(t *testing.T) {
+	h, repo, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "snapshot.ybin")
+	_, _ = part.Write([]byte("snapshot"))
+	_ = writer.WriteField("displayName", "snapshot.ybin")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	// authorizationId deliberately omitted.
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", rr.Code, rr.Body.String())
+	}
+	if repo.lastCreateDoc.AuthorizationID != uuid.Nil {
+		t.Fatalf("repo authorizationId = %s, want uuid.Nil (SQL NULL)", repo.lastCreateDoc.AuthorizationID)
+	}
+}
+
+func TestDocumentHandler_Create_ExplicitNilAuthorization_400(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "snapshot.ybin")
+	_, _ = part.Write([]byte("snapshot"))
+	_ = writer.WriteField("displayName", "snapshot.ybin")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.Nil.String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestDocumentHandler_Create_Success_NotReused(t *testing.T) {
 	h, _, _ := newDocHandler()
 
@@ -388,7 +447,7 @@ func TestDocumentHandler_Create_SkipDedup_BypassesDedup(t *testing.T) {
 // masquerading as Reused=true.
 func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
 	h, repo, _ := newDocHandler()
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -403,6 +462,37 @@ func TestDocumentHandler_Create_SkipDedup_Conflict_Returns409(t *testing.T) {
 	r := chi.NewRouter()
 	r.Post("/internal/file", h.Create)
 
+	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_Create_AuthorizationCollision_Returns409(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	// A violation on a NON-reference index, and no (externalID, bucket) winner
+	// exists in the default mock — so this represents authorizationId/tagsetId
+	// reuse, which the caller can fix. It must surface as 409, never 500.
+	repo.createErr = &model.DuplicateKeyError{
+		Constraint: model.ConstraintOther,
+		Name:       "REL_d9e2dfcccf59233c17cc6bc641", // the authorizationId unique, prod's name
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "snapshot.ybin")
+	_, _ = part.Write([]byte("snapshot"))
+	_ = writer.WriteField("displayName", "snapshot.ybin")
+	_ = writer.WriteField("storageBucketId", uuid.New().String())
+	_ = writer.WriteField("authorizationId", uuid.New().String())
+	_ = writer.Close()
+
+	r := chi.NewRouter()
+	r.Post("/internal/file", h.Create)
 	req := httptest.NewRequest(http.MethodPost, "/internal/file", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	rr := httptest.NewRecorder()
@@ -578,6 +668,26 @@ func TestDocumentHandler_Copy_InvalidSourceID_400(t *testing.T) {
 	}
 }
 
+func TestDocumentHandler_Copy_NilAuthorizationID_400(t *testing.T) {
+	h, _, _ := newDocHandler()
+
+	body, _ := json.Marshal(CopyDocumentRequest{
+		SourceID:            uuid.New().String(),
+		DestinationBucketID: uuid.New().String(),
+		AuthorizationID:     uuid.Nil.String(),
+	})
+	r := chi.NewRouter()
+	r.Post("/internal/file/copy", h.Copy)
+	req := httptest.NewRequest(http.MethodPost, "/internal/file/copy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // POST /internal/file/copy: malformed JSON body → 400.
 func TestDocumentHandler_Copy_MalformedJSON_400(t *testing.T) {
 	h, _, _ := newDocHandler()
@@ -605,7 +715,7 @@ func TestDocumentHandler_Copy_SkipDedup_Conflict_Returns409(t *testing.T) {
 		MimeType:   "image/png",
 		Size:       42,
 	}
-	repo.createErr = model.ErrDuplicateKey
+	repo.createErr = &model.DuplicateKeyError{Constraint: model.ConstraintOther, Name: "REL_d9e2dfcccf59233c17cc6bc641"}
 
 	body, _ := json.Marshal(CopyDocumentRequest{
 		SourceID:            sourceID.String(),
@@ -823,6 +933,41 @@ func TestDocumentHandler_Delete_Success(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["authorizationId"] != authID.String() {
+		t.Fatalf("authorizationId = %v, want %s", resp["authorizationId"], authID)
+	}
+}
+
+func TestDocumentHandler_Delete_NullAuthorizationIsOmitted(t *testing.T) {
+	h, repo, _ := newDocHandler()
+	docID := uuid.New()
+	repo.doc = model.Document{ID: docID, ExternalID: "snapshot"}
+	repo.deleteResult = model.DeletedDocument{AuthorizationID: uuid.Nil}
+	repo.count = 1
+
+	r := chi.NewRouter()
+	r.Delete("/internal/file/{id}", h.Delete)
+
+	req := httptest.NewRequest(http.MethodDelete, "/internal/file/"+docID.String(), nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, present := resp["authorizationId"]; present {
+		t.Fatalf("authorizationId must be omitted for a NULL policy, body: %s", rr.Body.String())
 	}
 }
 
@@ -1302,7 +1447,7 @@ func TestDocumentHandler_Patch_UpdateError(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}`
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1321,7 +1466,7 @@ func TestDocumentHandler_Patch_VersionConflict(t *testing.T) {
 	r := chi.NewRouter()
 	r.Patch("/internal/file/{id}", h.Update)
 
-	body := `{"temporaryLocation": false}`
+	body := `{"temporaryLocation": true}`
 	req := httptest.NewRequest(http.MethodPatch, "/internal/file/"+uuid.New().String(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -1577,9 +1722,11 @@ func TestDocumentHandler_Patch_DisplayName_Happy(t *testing.T) {
 }
 
 func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
-	// Renaming to the same name twice: handler/service does not branch on
-	// "no-op", but the row's version still advances (DB UPDATE always
-	// runs). The contract is "stable result", not "no DB write".
+	// Renaming to the SAME name is an idempotent no-op (013 settled contract):
+	// the PATCH produces no effective change, so it returns 200 with the current
+	// document and writes NOTHING — no version/updatedDate bump, no UpdateMetadata
+	// call — so a concurrent actor is never spuriously 409'd. The response still
+	// carries the current displayName.
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()
 	repo.doc = model.Document{
@@ -1601,12 +1748,12 @@ func TestDocumentHandler_Patch_DisplayName_Idempotent(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("iteration %d: status = %d, want 200, body: %s", i, rr.Code, rr.Body.String())
 		}
-		if repo.lastUpdateDisplayName != "stable.txt" {
-			t.Errorf("iteration %d: displayName = %q, want stable.txt", i, repo.lastUpdateDisplayName)
+		if !strings.Contains(rr.Body.String(), `"displayName":"stable.txt"`) {
+			t.Errorf("iteration %d: body = %q, want current displayName stable.txt", i, rr.Body.String())
 		}
 	}
-	if repo.updateMetadataCalls != 2 {
-		t.Errorf("UpdateMetadata calls = %d, want 2", repo.updateMetadataCalls)
+	if repo.updateMetadataCalls != 0 {
+		t.Errorf("no-op PATCH must not write: UpdateMetadata calls = %d, want 0", repo.updateMetadataCalls)
 	}
 }
 
@@ -1792,7 +1939,9 @@ func TestDocumentHandler_Patch_DuplicateKey_409(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for duplicate key, body: %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "destination bucket already contains a document with this content") {
+	// PATCH never changes externalID, so the 409 is a reference/authorization
+	// collision, not a same-content one — the message names those.
+	if !strings.Contains(rr.Body.String(), "duplicate reference or authorization") {
 		t.Errorf("conflict body = %q, want duplicate-key message (not version-conflict)", rr.Body.String())
 	}
 }
@@ -2163,6 +2312,7 @@ func TestDocumentHandler_ReplaceContent_Mismatch422WithDetail(t *testing.T) {
 // TranscodeStream (stub for handler tests): pass-through copy; MIME echoes
 // detectMIME override or the input type.
 func (p *stubProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType string) (port.TranscodeResult, error) {
+	p.transcodeCalls++
 	if _, err := io.Copy(w, r); err != nil {
 		return port.TranscodeResult{}, err
 	}

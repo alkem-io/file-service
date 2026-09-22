@@ -26,6 +26,9 @@ func startH2CServer(t *testing.T, handler http.Handler) *httptest.Server {
 
 func TestH2CClient_Allowed(t *testing.T) {
 	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			t.Errorf("protocol = %s, want HTTP/2", r.Proto)
+		}
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
 		}

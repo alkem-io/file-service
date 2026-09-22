@@ -9,7 +9,7 @@ Ingestion (create + replace) currently materializes every file in memory:
 `io.ReadAll` in the handlers, `[]byte` through `FileService`, `[]byte` into
 `StoragePort.Save`. This feature converts the pipeline to one-pass streaming:
 request part → bounded sniff prefix → (optional streaming image transcode via
-the govips fork) → hash-while-writing into a staged storage object →
+upstream govips) → hash-while-writing into a staged storage object →
 commit/discard at end-of-stream. Memory per request becomes a fixed budget;
 the upload cap becomes configuration (default unchanged at 32 MiB, validated
 to 1 GiB); uploads get a progress-based idle timeout; rejection/abort paths
@@ -19,11 +19,8 @@ leave no partial permanent object.
 
 **Language/Version**: Go 1.26.1
 **Primary Dependencies**: chi v5, pgx/v5 + sqlc, zap, `gabriel-vasile/mimetype`,
-govips v2 — originally **consumed from the fork** via `replace
-github.com/davidbyttow/govips/v2 => github.com/antst/govips/v2 @<pinned commit
-10498ea>`; **superseded 2026-08-13**, the streaming work landed upstream
-(davidbyttow/govips#539 + #540) and the `replace` was dropped for a direct
-require on an upstream master pseudo-version. Streaming APIs used:
+upstream govips v2.19.0, including the streaming work from
+davidbyttow/govips#539 and #540. Streaming APIs used:
 `LoadImageFromReader` (+`AccessSequential`), `SaveToWriter`,
 `SetStreamDiscThreshold`, `SetStreamScratchDir`, `SetPipeReadLimit`.
 **Storage**: PostgreSQL `file` table (unchanged); content-addressed blobs
@@ -56,7 +53,7 @@ by N × budget
 | VI. Test-First | ✅ | Memory-budget, atomicity, and equivalence tests precede implementation (tasks) |
 | VIII. DRY | ✅ | One ingest pipeline shared by create + replace; 019's reconcile logic reused untouched |
 | X. No Legacy Code | ✅ | `[]byte` ingest paths are migrated, not duplicated; `Save([]byte)` becomes a thin wrapper during transition and is removed once all callers stream |
-| XIV. Latest Dependencies | ✅ | Fork pin is temporary by design; upstream PR planned (spec Out of Scope) |
+| XIV. Latest Dependencies | ✅ | Streaming APIs are included in upstream govips v2.19.0 |
 
 **Violations**: none. Complexity Tracking not required.
 
@@ -97,7 +94,7 @@ internal/
 │   └── processor_stub.go         # stub: pass-through io.Copy
 internal/config/config.go         # +MAX_UPLOAD_SIZE (32 MiB), +UPLOAD_IDLE_TIMEOUT_MS (30000), +IMAGE_PIXEL_BUDGET (100 MP), +VIPS_STREAM_DISC_THRESHOLD, +VIPS_SCRATCH_DIR, +VIPS_PIPE_READ_LIMIT
 cmd/server/app.go                 # ReadHeaderTimeout replaces global ReadTimeout (research R6); wire vips knobs
-go.mod                            # replace directive → fork pin
+go.mod                            # direct upstream govips v2.19.0 dependency
 ```
 
 **Structure Decision**: one new domain file (`ingest.go`) holds the shared
@@ -126,7 +123,7 @@ adapters implement them; no new packages.
    `http.ResponseController` on each successful read — > 30 s without bytes
    ⇒ abort with the `stalled` outcome (FR-009). Non-upload endpoints get a
    fixed per-request deadline equal to today's behavior.
-4. **Transcode** (research R5): compose fork primitives rather than the
+4. **Transcode** (research R5): compose govips primitives rather than the
    one-shot `TranscodeStream` so dimensions survive: sequential header load
    → pixel-budget check (FR-010, header dims, orientation-aware swap) →
    orientation ≥ 3 ⇒ disc-threshold materialization → `AutoRotate` →
@@ -145,5 +142,4 @@ adapters implement them; no new packages.
 ## Post-Design Constitution Re-Check
 
 Re-evaluated after Phase 1: no violations. No new packages; ports extended
-rather than bypassed; the fork pin is documented temporary state with an
-upstreaming exit path.
+rather than bypassed; govips is consumed directly from its upstream release.
