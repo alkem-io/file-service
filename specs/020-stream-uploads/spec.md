@@ -23,9 +23,8 @@ then written to storage. Consequences:
   again for hashing/transcoding, then written.
 
 The enabling capability for the image path — streaming decode from a reader
-and streaming encode to a writer — exists in the project's image-processing
-library fork (antst/govips#2) and will be upstreamed once this feature has
-proven it in production use.
+and streaming encode to a writer — is included in upstream govips v2.19.0
+(davidbyttow/govips#539 and #540). The service consumes that release directly.
 
 ## Clarifications
 
@@ -257,13 +256,11 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 ## Assumptions
 
-- Streaming decode/encode for image conversion is provided by the project's
-  image-processing library fork (antst/govips#2: reader-fed load, writer-fed
+- Streaming decode/encode for image conversion is provided by upstream
+  govips v2.19.0: reader-fed load, writer-fed
   save, one-shot reader→writer transcode with automatic path selection,
   sequential fast path, disc-backed materialization with configurable
-  threshold and scratch directory, bounded header buffering). The service
-  consumes the fork until the change is accepted upstream; upstreaming
-  happens after this feature has hardened it (explicitly out of scope here).
+  threshold and scratch directory, bounded header buffering.
 - Decode memory for most formats is bounded by the library's configured
   disc threshold (frames above it materialize to scratch disk); formats
   whose codecs decode whole-frame internally (HEIC) and interlaced inputs
@@ -289,11 +286,8 @@ fallback, EMPTY_CONTENT and MIME_MISMATCH rejections, atomicity).
 
 ## Out of Scope
 
-- Upstreaming the image-library streaming support (follow-up after this
-  feature stabilizes).
-- Further image-library fork changes — the sequential-streaming /
-  disc-backed-decode workstream has landed on antst/govips#2 and is
-  sufficient; streaming HEIC decode would require upstream libheif work and
+- Further image-library changes — the sequential-streaming /
+  disc-backed-decode APIs are available upstream and are sufficient; streaming HEIC decode would require upstream libheif work and
   is explicitly not pursued (FR-010 covers it).
 - Changing the public/internal API shapes, dedup semantics, or bucket
   policy semantics.

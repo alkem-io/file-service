@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.27
 
 ARG GO_VERSION=1.26
 ARG ALPINE_VERSION=3.24
@@ -8,7 +8,7 @@ ARG ALPINE_VERSION=3.24
 # Digest-pinned. The digest is the OCI INDEX (multi-arch), not a per-architecture
 # child — pinning a child would build amd64 and break the arm64 release build.
 # Verify with: docker buildx imagetools inspect <ref> -> lists linux/amd64 AND linux/arm64.
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:51a7c389a5ddaf82f527191a1e9bff9928655130a44e4975dd1d7e0acf59f1ae AS builder
 
 WORKDIR /app
 
@@ -40,7 +40,7 @@ RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-se
 # Runtime Stage — Alpine for lightweight runtime with vips.
 #
 # NOT distroless, deliberately. file-service builds CGO_ENABLED=1 against libvips
-# (`-tags vips`, govips/antst fork), so the binary is DYNAMICALLY linked: `ldd` on
+# (`-tags vips`, upstream govips), so the binary is DYNAMICALLY linked: `ldd` on
 # the shipped image reports 80 entries including libvips.so.42, musl-linked.
 # gcr.io/distroless/static-* ships CA certs and tzdata only — such a binary builds
 # clean there and exits at container start. See alkem-io/file-service#67.
