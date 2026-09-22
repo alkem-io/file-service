@@ -1701,8 +1701,11 @@ func TestCopyDocument_DisplayNameOverridesCopiedRow(t *testing.T) {
 	if doc.DisplayName != override {
 		t.Errorf("DisplayName = %q, want the supplied %q", doc.DisplayName, override)
 	}
-	if source.DisplayName != "KnJLupUceCirVxKYoDGsrbdC" {
-		t.Errorf("source row was mutated: DisplayName = %q", source.DisplayName)
+	if repo.doc.DisplayName != "KnJLupUceCirVxKYoDGsrbdC" {
+		t.Errorf("source row was mutated: DisplayName = %q", repo.doc.DisplayName)
+	}
+	if repo.updateMetaCalls != 0 {
+		t.Errorf("copy updated existing metadata %d times", repo.updateMetaCalls)
 	}
 }
 
