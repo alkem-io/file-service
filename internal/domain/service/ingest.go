@@ -107,7 +107,12 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 // is a transcodable image, otherwise copy with a fixed buffer. The returned
 // upload is NOT yet published — callers validate and then CompleteUpload,
 // or Discard on any failure.
-func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME string) (*StagedUpload, error) {
+//
+// skipImageProcessing forces the verbatim pass-through arm even for a
+// transcodable image type: the staged bytes are byte-identical to the input
+// (no transcode, no EXIF rotate). Used by the Synapse media provider so its
+// read-back stays byte-exact. Dimensions are still measured non-destructively.
+func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME string, skipImageProcessing bool) (*StagedUpload, error) {
 	br := bufio.NewReaderSize(r, sniffPrefixSize)
 	prefix, err := br.Peek(sniffPrefixSize)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
@@ -127,7 +132,7 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 		detected = normalizeMIME(s.Processor.DetectMIME(prefix))
 	}
 
-	su, err := s.stageContent(ctx, br, detected, len(prefix) > 0)
+	su, err := s.stageContent(ctx, br, detected, len(prefix) > 0, skipImageProcessing)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +143,14 @@ func (s *FileService) StageUpload(ctx context.Context, r io.Reader, declaredMIME
 // stageContent opens a stage and streams br into it under the already-
 // decided MIME type — the shared back half of the create (StageUpload) and
 // replace (StoreAndLinkStream) pipelines.
-func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeType string, hasContent bool) (*StagedUpload, error) {
+//
+// skipImageProcessing forces the verbatim pass-through arm even when the type
+// is transcodable: the bytes are stored exactly as received (no transcode /
+// rotate). Only the create path sets it (the provider's raw store); the
+// replace path always passes false. Image dimensions are still measured
+// non-destructively from the completed stage (a header-only read that never
+// touches the stored bytes), so a verbatim store still surfaces dims.
+func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeType string, hasContent, skipImageProcessing bool) (*StagedUpload, error) {
 	stage, err := s.Storage.OpenStage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open storage stage: %w", err)
@@ -154,7 +166,29 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	}()
 	cw := &countingWriter{w: stage}
 
-	if hasContent && transcodableMIME(mimeType) {
+	// A verbatim store (skipImageProcessing) forces the pass-through arm even for
+	// a transcodable image type: the provider's read-back must be byte-exact, so
+	// no transcode/rotate. Dimensions are still measured below (header-only,
+	// non-destructive).
+	//
+	// ACCEPTED CONSEQUENCES — deliberate, reviewed, and NOT defects (013 research
+	// D6, revised 2026-08-05). TranscodeStream is the only place three things
+	// happen, so a verbatim store skips all three:
+	//   1. img.RemoveMetadata() — inbound Matrix media therefore RETAINS its
+	//      EXIF/GPS/IPTC/XMP. Alkemio's own upload path still strips it; the
+	//      Synapse provider path does not, exactly as Element itself does not.
+	//   2. HEIC/HEIF/WebP -> JPEG canonicalization — an iOS Element upload stays
+	//      image/heic and may not render in every browser. Element renders its
+	//      own upload natively.
+	//   3. checkPixelBudget (IMAGE_PIXEL_BUDGET decode-bomb guard) — nothing here
+	//      fully decodes the image, so there is no decode to bomb; the size cap
+	//      and the bucket MIME allow-list still apply.
+	// This is the tiered-client boundary: the provider is a byte bridge for a
+	// Matrix client, not a media pipeline. Re-enabling any of the three on this
+	// arm would break Synapse's byte-exact read-back. If inbound canonicalization
+	// is ever wanted it belongs in its own spec, as a DERIVED web variant.
+	transcode := hasContent && !skipImageProcessing && transcodableMIME(mimeType)
+	if transcode {
 		// The image library can collapse a request-stream failure into an
 		// opaque decode/load error. Capture the source error independently so
 		// a client disconnect, over-limit read, or idle timeout is never
@@ -196,7 +230,13 @@ func (s *FileService) stageContent(ctx context.Context, br *bufio.Reader, mimeTy
 	}
 
 	su.Size = cw.n
-	if hasContent && strings.HasPrefix(mimeType, "image/") && !transcodableMIME(mimeType) {
+	// Measure dims for every image that took the pass-through arm — the
+	// byte-identical formats (GIF/SVG/BMP/AVIF) AND any transcodable image stored
+	// verbatim (skipImageProcessing). The measure is a header-only read of the
+	// completed stage, so it never alters the stored bytes and keeps the
+	// verbatim byte-exact contract intact while still surfacing dims (FR: the
+	// conversation attachment needs them).
+	if hasContent && !transcode && strings.HasPrefix(mimeType, "image/") {
 		s.measureStagedImageDims(su)
 	}
 	returned = true
@@ -256,33 +296,7 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return nil, ErrPayloadTooLarge
 	}
 
-	// A front-window sniff (3072 bytes) degrades to application/zip when an
-	// OOXML package's [Content_Types].xml lands past that window — the cause
-	// of spurious 415s on reordered office zips (cf. spec 019 / PR #13). When
-	// the sniff is the generic application/zip (and was not overridden by a
-	// transcode, where MimeType is the encoder output), recover the real
-	// OOXML type from the staged file's central directory and validate THAT
-	// against the allow-list below. The su.MimeType == su.DetectedMIME guard
-	// keeps the image-transcode path untouched (images never sniff as zip).
-	if normalizeMIME(su.DetectedMIME) == "application/zip" && su.MimeType == su.DetectedMIME {
-		ra, size, err := su.stage.StagedReaderAt()
-		switch {
-		case err != nil:
-			// An infrastructure read failure (FS sync, or a future object-store
-			// ranged read) is not a verdict on the content: don't treat it as
-			// "not an office package". Recovery is skipped and the upload falls
-			// through to plain application/zip allow-list validation, but log it
-			// so a legitimate office file rejected only because its staged bytes
-			// were unreadable is diagnosable rather than silent.
-			s.logIngest("zip central-directory reader unavailable; skipping OOXML recovery", su.DetectedMIME, su.Size, err)
-		default:
-			if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
-				su.DetectedMIME = officeMIME // validated against the allow-list below
-				su.MimeType = officeMIME     // persisted as the real office type, not application/zip
-				s.logIngest("recovered office MIME from zip central directory", officeMIME, su.Size, nil)
-			}
-		}
-	}
+	s.recoverOfficeMIME(su)
 
 	if len(allowedMimeTypes) > 0 {
 		normalized := make([]string, len(allowedMimeTypes))
@@ -316,7 +330,13 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		zap.Int64("bytes", su.Size),
 		zap.String("outcome", "accepted"))
 
-	if input.SkipDedup {
+	// Content-dedup applies only to non-reference creates. A reference-bearing
+	// create is identity'd by its externalReference (the partial
+	// UNIQUE(externalReference, storageBucketId) index), so it always inserts a
+	// fresh row even when an existing row in the bucket holds the same bytes —
+	// the blob layer still dedups by hash, only the DB row is per-reference.
+	// SkipDedup forces a fresh row too.
+	if input.SkipDedup || hasReference(input.ExternalReference) {
 		return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
 	}
 	existing, found, err := s.findDedupDocument(ctx, stored.ExternalID, input.StorageBucketID)
@@ -333,6 +353,36 @@ func (s *FileService) CompleteUpload(ctx context.Context, su *StagedUpload, inpu
 		return existing, nil
 	}
 	return s.insertDocument(ctx, input, stored, su.MimeType, contentMetadata, su.ImageWidth, su.ImageHeight)
+}
+
+// recoverOfficeMIME fixes up a staged upload whose 3072-byte front-window sniff
+// degraded to the generic application/zip because an OOXML package's
+// [Content_Types].xml landed past that window (the cause of spurious 415s on
+// reordered office zips, cf. spec 019 / PR #13). It reads only the staged file's
+// central directory and, when it identifies an office package, promotes both
+// DetectedMIME (validated against the allow-list) and MimeType (persisted). The
+// su.MimeType == su.DetectedMIME guard keeps the image-transcode path untouched
+// (images never sniff as zip); a no-op for every non-zip upload.
+func (s *FileService) recoverOfficeMIME(su *StagedUpload) {
+	if normalizeMIME(su.DetectedMIME) != "application/zip" || su.MimeType != su.DetectedMIME {
+		return
+	}
+	ra, size, err := su.stage.StagedReaderAt()
+	if err != nil {
+		// An infrastructure read failure (FS sync, or a future object-store
+		// ranged read) is not a verdict on the content: don't treat it as
+		// "not an office package". Recovery is skipped and the upload falls
+		// through to plain application/zip allow-list validation, but log it
+		// so a legitimate office file rejected only because its staged bytes
+		// were unreadable is diagnosable rather than silent.
+		s.logIngest("zip central-directory reader unavailable; skipping OOXML recovery", su.DetectedMIME, su.Size, err)
+		return
+	}
+	if officeMIME, ok := detectZipOfficeMIME(ra, size); ok {
+		su.DetectedMIME = officeMIME // validated against the allow-list by the caller
+		su.MimeType = officeMIME     // persisted as the real office type, not application/zip
+		s.logIngest("recovered office MIME from zip central directory", officeMIME, su.Size, nil)
+	}
 }
 
 // detectZipOfficeMIME recovers the canonical OOXML MIME from a staged zip's
