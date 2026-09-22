@@ -40,7 +40,7 @@ RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-se
 # Runtime Stage — Alpine for lightweight runtime with vips.
 #
 # NOT distroless, deliberately. file-service builds CGO_ENABLED=1 against libvips
-# (`-tags vips`, govips/antst fork), so the binary is DYNAMICALLY linked: `ldd` on
+# (`-tags vips`, upstream govips), so the binary is DYNAMICALLY linked: `ldd` on
 # the shipped image reports 80 entries including libvips.so.42, musl-linked.
 # gcr.io/distroless/static-* ships CA certs and tzdata only — such a binary builds
 # clean there and exits at container start. See alkem-io/file-service#67.

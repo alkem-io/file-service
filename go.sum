@@ -1,8 +1,8 @@
 github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op h1:1BOWQJweNyvZMlpAHXGLiZQn9S+QXGcz3xh94lC0w6E=
 github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
-github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e h1:JmkerRVsVAWdQeyvZhMYRJIzV59RVGfvQuAh2WDEfvg=
-github.com/antst/govips/v2 v2.0.0-20260612014756-be0d7643869e/go.mod h1:8+nst5zfMoats12PgmmAPh6p5OfjDaXK0BXMFl/vOcM=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/davidbyttow/govips/v2 v2.19.0 h1:vIFpRodf/jrQlnKetj0BaQ1OwGNR+bR+QIBQ2sgxtxc=
+github.com/davidbyttow/govips/v2 v2.19.0/go.mod h1:QK5liLrx7YaHC7xPcYnm4KaQIYvu9xSGrBt9goXrfgo=
 github.com/gabriel-vasile/mimetype v1.4.15 h1:05iP/CYtZ/w455R/KZM6rZ5ieAdh99UPtd+d3YzLmaI=
 github.com/gabriel-vasile/mimetype v1.4.15/go.mod h1:azpTcoLcDZRNgFou5j+APrqQx9HqVPWa6ijYQIIVswQ=
 github.com/go-chi/chi/v5 v5.3.2 h1:5YQkICvTCSZ25hoRsyJazN0scjzKGiu4VAUc7H1o1nY=
