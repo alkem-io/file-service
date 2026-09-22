@@ -1671,3 +1671,106 @@ func (m *mockProcessor) TranscodeStream(r io.Reader, w io.Writer, mimeType strin
 func (m *dedupMockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	return nil, errors.New("dedupMockStorage: OpenStage not used in these tests")
 }
+
+// CopyDocument: a supplied DisplayName names the NEW row; the source is
+// untouched. The Matrix storage provider names its row after the media id, so
+// a conversation copy must be able to carry the event's real filename.
+func TestCopyDocument_DisplayNameOverridesCopiedRow(t *testing.T) {
+	sourceID := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "KnJLupUceCirVxKYoDGsrbdC",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	override := "holiday.png"
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+		DisplayName:         &override,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.DisplayName != override {
+		t.Errorf("DisplayName = %q, want the supplied %q", doc.DisplayName, override)
+	}
+	if source.DisplayName != "KnJLupUceCirVxKYoDGsrbdC" {
+		t.Errorf("source row was mutated: DisplayName = %q", source.DisplayName)
+	}
+}
+
+// CopyDocument: omitting DisplayName inherits the source's name unchanged.
+func TestCopyDocument_DisplayNameOmittedInheritsSource(t *testing.T) {
+	sourceID := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "banner.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: uuid.New(),
+		AuthorizationID:     uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc.DisplayName != source.DisplayName {
+		t.Errorf("DisplayName = %q, want inherited %q", doc.DisplayName, source.DisplayName)
+	}
+}
+
+// CopyDocument: a dedup-reused row is returned untouched, so a supplied
+// DisplayName must NOT rename an existing document. Renaming here would change
+// the filename shown for OLDER messages that already reference that row.
+func TestCopyDocument_DedupReusedRowKeepsItsName(t *testing.T) {
+	sourceID := uuid.New()
+	bucketB := uuid.New()
+	source := model.Document{
+		ID:              sourceID,
+		ExternalID:      "sha3-of-content",
+		MimeType:        "image/png",
+		Size:            42,
+		DisplayName:     "source.png",
+		StorageBucketID: uuid.New(),
+		AuthorizationID: uuid.New(),
+	}
+	existing := model.Document{
+		ID:              uuid.New(),
+		ExternalID:      "sha3-of-content",
+		DisplayName:     "already-here.png",
+		StorageBucketID: bucketB,
+		AuthorizationID: uuid.New(),
+	}
+	repo := &mockRepo{doc: source, findDoc: &existing}
+	svc := &FileService{Logger: nopLogger, Repo: repo, Storage: &mockStorage{}, Processor: &mockProcessor{}}
+
+	override := "renamed.png"
+	doc, err := svc.CopyDocument(context.Background(), sourceID, model.CopyDocumentInput{
+		DestinationBucketID: bucketB,
+		AuthorizationID:     uuid.New(),
+		DisplayName:         &override,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !doc.Reused {
+		t.Fatal("expected a dedup-reused row")
+	}
+	if doc.DisplayName != existing.DisplayName {
+		t.Errorf("DisplayName = %q, want the reused row's own %q", doc.DisplayName, existing.DisplayName)
+	}
+}

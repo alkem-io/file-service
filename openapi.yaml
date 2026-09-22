@@ -49,6 +49,8 @@ components:
         destinationBucketId:
           format: uuid
           type: string
+        displayName:
+          type: string
         externalReference:
           type: string
         skipDedup:

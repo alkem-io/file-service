@@ -222,7 +222,10 @@ type CopyDocumentRequest struct {
 	// ExternalReference is the opaque caller reference set on the copied row
 	// (the re-share fork carries the same media_id). Omitted leaves it unset.
 	ExternalReference *string `json:"externalReference,omitempty"`
-	SkipDedup         bool    `json:"skipDedup,omitempty"`
+	// DisplayName overrides the copied row's name. Omitted inherits the
+	// source's name. Ignored on a dedup-reused row, which keeps its own.
+	DisplayName *string `json:"displayName,omitempty"`
+	SkipDedup   bool    `json:"skipDedup,omitempty"`
 }
 
 // HealthResponse is returned by GET /health.

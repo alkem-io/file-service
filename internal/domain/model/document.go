@@ -129,6 +129,10 @@ type CopyDocumentInput struct {
 	// per-bucket content-dedup.
 	ExternalReference *string
 
+	// DisplayName overrides the copied row's name. Nil inherits the source's.
+	// A dedup-reused row is returned untouched and keeps its existing name.
+	DisplayName *string
+
 	// SkipDedup mirrors the same flag on CreateDocumentInput. Default false
 	// runs the per-bucket dedup lookup; true forces a fresh row insert.
 	SkipDedup bool

@@ -289,8 +289,13 @@ func (s *FileService) CopyDocument(ctx context.Context, sourceID uuid.UUID, inpu
 	// (reference collision → idempotent; any other index → ErrConflict for a
 	// SkipDedup caller, content re-query otherwise) and the audit fields stay
 	// identical to CreateDocument.
+	displayName := source.DisplayName
+	if input.DisplayName != nil {
+		displayName = *input.DisplayName
+	}
+
 	createInput := model.CreateDocumentInput{
-		DisplayName:       source.DisplayName,
+		DisplayName:       displayName,
 		CreatedBy:         input.CreatedBy,
 		TemporaryLocation: false,
 		StorageBucketID:   input.DestinationBucketID,
