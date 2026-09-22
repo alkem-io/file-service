@@ -1,19 +1,14 @@
 package http
 
 import (
-	"context"
-	"crypto/tls"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 
 	"github.com/alkem-io/file-service/internal/domain/service"
 )
@@ -131,13 +126,9 @@ func TestProgressReader_StallAborts_H2C(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	client := &http.Client{Transport: &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
-		},
-	}}
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	client := &http.Client{Transport: &http.Transport{Protocols: protocols}}
 	runStallScenario(t, srv, client, res)
 }
 
