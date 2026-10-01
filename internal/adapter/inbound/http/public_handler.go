@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -270,8 +271,16 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "public")
 	w.Header().Set("Expires", time.Now().Add(time.Duration(h.MaxAge)*time.Second).UTC().Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 
+	// A seekable blob (the local adapter's *os.File) goes through ServeContent so Range requests
+	// get 206/416: Safari will not play a <video> whose server answers a range request with 200.
+	if rs, ok := rc.(io.ReadSeeker); ok {
+		defer func() { _ = rc.Close() }()
+		http.ServeContent(w, r, "", time.Time{}, rs)
+		return
+	}
+
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	streamBlob(w, h.Logger, rc, size, doc.ExternalID)
 }
