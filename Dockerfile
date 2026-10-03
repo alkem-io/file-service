@@ -46,7 +46,7 @@ RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-se
 # clean there and exits at container start. See alkem-io/file-service#67.
 #
 # Digest-pinned to the OCI INDEX (multi-arch), not a per-architecture child.
-FROM alpine:${ALPINE_VERSION}@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:${ALPINE_VERSION}@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Install libvips runtime only
 RUN apk add --no-cache vips vips-heif vips-jxl vips-poppler
