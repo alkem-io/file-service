@@ -239,6 +239,7 @@ func TestMock_PromoteWithOutbox_CommitsMetadataAndHintAtomically(t *testing.T) {
 	}
 	defer mock.Close()
 	createdBy := uuid.New()
+	tagsetID := uuid.New()
 	doc := sampleDoc(uuid.New())
 	doc.TemporaryLocation = true
 	doc.Version = 4
@@ -251,15 +252,16 @@ func TestMock_PromoteWithOutbox_CommitsMetadataAndHintAtomically(t *testing.T) {
 		TemporaryLocation: false,
 		DisplayName:       "final.yjs",
 		CreatedBy:         &createdBy,
+		TagsetID:          &tagsetID,
 	}
 
 	mock.ExpectBegin()
 	// UPDATE args: id, bucket, temporaryLocation, displayName, authorizationId,
-	// createdBy, externalReference, updatedDate, version.
+	// createdBy, externalReference, updatedDate, version, tagsetId.
 	mock.ExpectExec("UPDATE file").
 		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, pgxmock.AnyArg(), false,
 			"final.yjs", pgxmock.AnyArg(), pgtype.UUID{Bytes: createdBy, Valid: true},
-			pgxmock.AnyArg(), pgxmock.AnyArg(), int32(4)).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), int32(4), uuidToPgxNullable(&tagsetID)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").
 		WithArgs(pgtype.UUID{Bytes: doc.ID, Valid: true}, "hashX", int16(1),
@@ -288,7 +290,7 @@ func TestMock_PromoteWithOutbox_StaleVersionRollsBackWithoutHint(t *testing.T) {
 	doc.Version = 4
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectRollback()
 
@@ -313,7 +315,7 @@ func TestMock_PromoteWithOutbox_EnqueueFailureRollsBackPromotion(t *testing.T) {
 	doc.Version = 4
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(9)...).
+	mock.ExpectExec("UPDATE file").WithArgs(anyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("INSERT INTO file_backup_outbox").WithArgs(anyArgs(6)...).
 		WillReturnError(errors.New("outbox unavailable"))

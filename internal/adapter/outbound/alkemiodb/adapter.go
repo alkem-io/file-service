@@ -275,6 +275,7 @@ func updateMetadataParams(id uuid.UUID, meta model.DocumentMetadataUpdate, versi
 		TemporaryLocation: meta.TemporaryLocation,
 		DisplayName:       meta.DisplayName,
 		AuthorizationId:   uuidToPgxNullable(meta.AuthorizationID),
+		TagsetId:          uuidToPgxNullable(meta.TagsetID),
 		CreatedBy:         uuidToPgxNullable(meta.CreatedBy),
 		ExternalReference: stringToPgxText(meta.ExternalReference),
 		UpdatedDate:       timeToPgxNow(),
@@ -356,6 +357,19 @@ func (a *Adapter) Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocume
 		AuthorizationID: pgxToUUID(row.AuthorizationId),
 		TagsetID:        pgxToUUIDNullable(row.TagsetId),
 	}, nil
+}
+
+// DeleteInBucket deletes only while the row remains in the expected source bucket.
+// The condition and returned cleanup identifiers come from one SQL statement.
+func (a *Adapter) DeleteInBucket(ctx context.Context, id, expectedBucketID uuid.UUID) (model.DeletedDocument, error) {
+	row, err := a.queries.DeleteDocumentInBucket(ctx, queries.DeleteDocumentInBucketParams{ID: uuidToPgx(id), StorageBucketId: uuidToPgx(expectedBucketID)})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.DeletedDocument{}, model.ErrDocumentNotFound
+		}
+		return model.DeletedDocument{}, err
+	}
+	return model.DeletedDocument{ExternalID: row.ExternalID, AuthorizationID: pgxToUUID(row.AuthorizationId), TagsetID: pgxToUUIDNullable(row.TagsetId)}, nil
 }
 
 // CountByExternalID counts rows referencing a content hash across all

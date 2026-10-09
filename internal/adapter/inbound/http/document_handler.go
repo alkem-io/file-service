@@ -953,7 +953,8 @@ func (h *DocumentHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	newCreateDocumentResponse(doc).Render(w)
 }
 
-// Delete handles DELETE /internal/file/{id}
+// Delete handles DELETE /internal/file/{id}. Optional expectedStorageBucketId
+// atomically rejects cleanup of a missing or relocated staging row with 409.
 func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	docID, err := parseDocID(r)
 	if err != nil {
@@ -961,8 +962,26 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.Service.DeleteDocument(r.Context(), docID)
+	var expected []uuid.UUID
+	expectedBucket := r.URL.Query().Get("expectedStorageBucketId")
+	if values, present := r.URL.Query()["expectedStorageBucketId"]; present {
+		if len(values) != 1 {
+			writeJSONError(w, http.StatusBadRequest, "expectedStorageBucketId must be a UUID")
+			return
+		}
+		bucketID, parseErr := uuid.Parse(expectedBucket)
+		if parseErr != nil || bucketID == uuid.Nil {
+			writeJSONError(w, http.StatusBadRequest, "expectedStorageBucketId must be a UUID")
+			return
+		}
+		expected = append(expected, bucketID)
+	}
+	deleted, err := h.Service.DeleteDocument(r.Context(), docID, expected...)
 	if err != nil {
+		if errors.Is(err, service.ErrConflict) {
+			writeJSONError(w, http.StatusConflict, "source bucket changed or document missing")
+			return
+		}
 		if errors.Is(err, model.ErrDocumentNotFound) {
 			writeJSONError(w, http.StatusNotFound, "document not found")
 			return
@@ -980,11 +999,12 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // Update handles PATCH /internal/file/{id}.
 // Mutates the "move + re-attribute" fields: storageBucketId, temporaryLocation,
-// displayName, authorizationId, createdBy, and externalReference. Each field is
+// displayName, authorizationId, tagsetId, createdBy, and externalReference. Each field is
 // optional; at least one must produce an effective change. Omitted fields retain
 // their current value; createdBy and externalReference accept an explicit JSON
 // null to clear (authorizationId is NOT clearable — clearing it orphans the
-// document from its policy).
+// document from its policy). tagsetId is optional and omitted values retain the existing tagset.
+// expectedStorageBucketId checks the same snapshot used by the versioned write.
 //
 // displayName notes:
 //   - Validation rejects empty/whitespace-only, length > 512 (matches
@@ -1010,6 +1030,11 @@ func (h *DocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	doc, err := h.Service.Repo.GetByID(r.Context(), docID)
 	if err != nil {
 		h.writeLookupError(w, err, "failed to lookup document")
+		return
+	}
+
+	if body.ExpectedStorageBucketID != nil && uuid.MustParse(*body.ExpectedStorageBucketID) != doc.StorageBucketID {
+		writeJSONError(w, http.StatusConflict, "document is no longer in the expected storage bucket")
 		return
 	}
 
@@ -1078,6 +1103,27 @@ func (h *DocumentHandler) decodeAndValidateUpdate(w http.ResponseWriter, r *http
 	if !suppliesUpdatableField(body, present) {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return body, nil, false
+	}
+
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{
+		{"expectedStorageBucketId", body.ExpectedStorageBucketID},
+		{"tagsetId", body.TagsetID},
+	} {
+		if _, exists := present[field.name]; !exists {
+			continue
+		}
+		if field.value == nil {
+			writeJSONError(w, http.StatusBadRequest, field.name+" must not be null")
+			return body, nil, false
+		}
+		id, err := uuid.Parse(*field.value)
+		if err != nil || id == uuid.Nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid "+field.name)
+			return body, nil, false
+		}
 	}
 
 	if body.DisplayName != nil {
@@ -1316,6 +1362,8 @@ func decodeUpdateRequest(w http.ResponseWriter, r *http.Request, dst *UpdateDocu
 // dropping the re-attribute/clear it requested (a half-applied, security-relevant
 // re-home).
 var patchFieldNames = []string{
+	"expectedStorageBucketId",
+	"tagsetId",
 	"storageBucketId",
 	"temporaryLocation",
 	"displayName",
@@ -1326,10 +1374,11 @@ var patchFieldNames = []string{
 
 // triStatePatchFields are the PATCH fields where an explicit JSON null is
 // MEANINGFUL — a request to clear (createdBy, externalReference) or, for
-// authorizationId, a request that is answered with a 400 because clearing it
+// authorizationId/tagsetId, a request answered with 400 because clearing it
 // would orphan the document. On the remaining fields (storageBucketId,
 // temporaryLocation, displayName) a null carries no instruction at all.
 var triStatePatchFields = []string{
+	"tagsetId",
 	"authorizationId",
 	"createdBy",
 	"externalReference",
@@ -1391,9 +1440,17 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 		TemporaryLocation: doc.TemporaryLocation,
 		DisplayName:       doc.DisplayName,
 		AuthorizationID:   nonNilUUID(doc.AuthorizationID),
+		TagsetID:          doc.TagsetID,
 		CreatedBy:         doc.CreatedBy,
 		ExternalReference: doc.ExternalReference,
 	}
+
+	tagsetID, tagsetApplied, err := attachTagset(doc.TagsetID, body.TagsetID)
+	if err != nil {
+		return meta, applied, err
+	}
+	meta.TagsetID = tagsetID
+	applied += tagsetApplied
 
 	if body.StorageBucketID != nil {
 		parsed, perr := uuid.Parse(*body.StorageBucketID)
@@ -1445,6 +1502,21 @@ func buildMetadataUpdate(doc model.Document, body UpdateDocumentRequest, present
 	}
 
 	return meta, applied, nil
+}
+
+// attachTagset applies an optional tagset update, preserving omitted values.
+func attachTagset(current *uuid.UUID, requested *string) (*uuid.UUID, int, error) {
+	if requested == nil {
+		return current, 0, nil
+	}
+	id, err := uuid.Parse(*requested)
+	if err != nil || id == uuid.Nil {
+		return current, 0, fmt.Errorf("invalid tagsetId")
+	}
+	if current != nil && *current == id {
+		return current, 0, nil
+	}
+	return &id, 1, nil
 }
 
 // applyReattributeUUID resolves a tri-state optional-UUID PATCH field against
@@ -1512,4 +1584,24 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 		ImageWidth:        doc.ImageWidth,
 		ImageHeight:       doc.ImageHeight,
 	}
+}
+
+// ContentByReference handles internal GET/HEAD content by opaque reference.
+func (h *DocumentHandler) ContentByReference(w http.ResponseWriter, r *http.Request) {
+	query, err := referenceQuery(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	doc, err := h.Service.Repo.GetByReference(r.Context(), query.Get("ref"))
+	if err != nil {
+		handleReferenceLookupFailure(w, h.Logger, err)
+		return
+	}
+	serveDocumentBlob(w, r, doc, h.Service.Storage, h.Logger, 0)
+}
+
+// HeadContentByReference serves internal reference headers through the same read path.
+func (h *DocumentHandler) HeadContentByReference(w http.ResponseWriter, r *http.Request) {
+	h.ContentByReference(w, r)
 }

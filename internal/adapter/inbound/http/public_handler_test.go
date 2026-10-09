@@ -154,6 +154,7 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	m.doc.StorageBucketID = meta.StorageBucketID
 	m.doc.TemporaryLocation = meta.TemporaryLocation
 	m.doc.DisplayName = meta.DisplayName
+	m.doc.TagsetID = meta.TagsetID
 	if meta.AuthorizationID != nil {
 		m.doc.AuthorizationID = *meta.AuthorizationID
 	} else {
@@ -505,4 +506,8 @@ func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	st := &httpMockStage{parent: m}
 	m.stages = append(m.stages, st)
 	return st, nil
+}
+
+func (m *mockDocRepo) DeleteInBucket(ctx context.Context, id, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.Delete(ctx, id)
 }
