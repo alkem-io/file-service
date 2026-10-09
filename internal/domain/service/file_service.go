@@ -548,9 +548,18 @@ func (s *FileService) resolveContentCollision(ctx context.Context, input model.C
 
 // DeleteDocument removes a document record and its file (if not shared).
 // Counts remaining references AFTER delete to avoid TOCTOU race.
-func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID) (*model.DeletedDocument, error) {
-	// Delete the row first — returns externalID for post-delete cleanup
-	deleted, err := s.Repo.Delete(ctx, documentID)
+func (s *FileService) DeleteDocument(ctx context.Context, documentID uuid.UUID, expectedBucketID ...uuid.UUID) (*model.DeletedDocument, error) {
+	// Both forms return identifiers from the atomic DELETE, never a prior read.
+	var deleted model.DeletedDocument
+	var err error
+	if len(expectedBucketID) > 0 {
+		deleted, err = s.Repo.DeleteInBucket(ctx, documentID, expectedBucketID[0])
+		if errors.Is(err, model.ErrDocumentNotFound) {
+			return nil, ErrConflict
+		}
+	} else {
+		deleted, err = s.Repo.Delete(ctx, documentID)
+	}
 	if err != nil {
 		return nil, err
 	}

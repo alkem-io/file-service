@@ -1777,3 +1777,15 @@ func TestCopyDocument_DedupReusedRowKeepsItsName(t *testing.T) {
 		t.Errorf("DisplayName = %q, want the reused row's own %q", doc.DisplayName, existing.DisplayName)
 	}
 }
+
+func (m *mockRepo) DeleteInBucket(ctx context.Context, id, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.Delete(ctx, id)
+}
+
+func (m *mockRepoRace) DeleteInBucket(ctx context.Context, id, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.Delete(ctx, id)
+}
+
+func (m *copyRaceRepo) DeleteInBucket(ctx context.Context, id, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.Delete(ctx, id)
+}
