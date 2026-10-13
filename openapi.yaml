@@ -518,7 +518,7 @@ paths:
           content:
             application/octet-stream:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service_internal_adapter_inbound_http.DocumentHandler.Logger'
+                $ref: '#/components/schemas/net_http.Request'
           description: Status code could not be determined
         "200":
           content:
@@ -925,9 +925,9 @@ paths:
                 oneOf:
                   - format: binary
                     type: string
+                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
+                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
                   - $ref: '#/components/schemas/nats.evaluateRequest'
-                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
-                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
           description: OK
         "400":
           content:
