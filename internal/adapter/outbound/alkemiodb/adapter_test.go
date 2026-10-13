@@ -276,6 +276,7 @@ func TestUpdateMetadata(t *testing.T) {
 		TemporaryLocation: !tempLoc,
 		DisplayName:       displayName,
 		AuthorizationID:   nonNilUUIDForTest(orig.AuthorizationID),
+		TagsetID:          orig.TagsetID,
 		CreatedBy:         orig.CreatedBy,
 		ExternalReference: orig.ExternalReference,
 	}

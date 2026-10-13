@@ -125,6 +125,100 @@ func runPatch(t *testing.T, docID uuid.UUID, body string, configure func(*mockDo
 	return rr, repo
 }
 
+func TestDocumentHandler_ConditionalMove(t *testing.T) {
+	id, source, target, auth, tagset, actor := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	ref := "matrix-media-reference"
+	body := fmt.Sprintf(`{"expectedStorageBucketId":%q,"storageBucketId":%q,"authorizationId":%q,"tagsetId":%q,"createdBy":%q,"displayName":"résumé.png","temporaryLocation":false}`, source, target, auth, tagset, actor)
+	rr, repo := runPatch(t, id, body, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: id, StorageBucketID: source, TemporaryLocation: true, DisplayName: "media-id", ExternalReference: &ref, ExternalID: "private-blob", Version: 17}
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("response=%d %s", rr.Code, rr.Body.String())
+	}
+	if repo.updateMetadataCalls != 1 || repo.lastUpdateVersion != 17 || repo.lastUpdateBucketID != target || repo.lastUpdateTemporary || repo.lastUpdateDisplayName != "résumé.png" {
+		t.Fatalf("move not atomic on initial snapshot: calls=%d version=%d meta=%+v", repo.updateMetadataCalls, repo.lastUpdateVersion, repo.lastUpdateMeta)
+	}
+	metaJSON, err := json.Marshal(repo.lastUpdateMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta["TagsetID"] != tagset.String() || meta["AuthorizationID"] != auth.String() || meta["CreatedBy"] != actor.String() || meta["ExternalReference"] != ref || repo.doc.ExternalID != "private-blob" {
+		t.Fatalf("incomplete or altered metadata: %s", metaJSON)
+	}
+}
+
+func TestDocumentHandler_ConditionalMoveRejectsStaleSourceBeforeNoop(t *testing.T) {
+	id, oldSource, current := uuid.New(), uuid.New(), uuid.New()
+	rr, repo := runPatch(t, id, fmt.Sprintf(`{"expectedStorageBucketId":%q,"storageBucketId":%q}`, oldSource, current), func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: id, StorageBucketID: current, Version: 3}
+	})
+	if rr.Code != http.StatusConflict || repo.updateMetadataCalls != 0 {
+		t.Fatalf("status=%d writes=%d body=%s", rr.Code, repo.updateMetadataCalls, rr.Body.String())
+	}
+}
+
+func TestDocumentHandler_ConditionalMoveUsesCheckedSnapshot(t *testing.T) {
+	id, source, target := uuid.New(), uuid.New(), uuid.New()
+	rr, repo := runPatch(t, id, fmt.Sprintf(`{"expectedStorageBucketId":%q,"storageBucketId":%q}`, source, target), func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: id, StorageBucketID: source, Version: 8}
+		// The real repository returns this when another writer advanced version.
+		repo.updateErr = model.ErrDocumentNotFound
+	})
+	if rr.Code != http.StatusConflict || repo.lastUpdateVersion != 8 || repo.getByIDCalls != 1 {
+		t.Fatalf("status=%d checked version=%d reads=%d", rr.Code, repo.lastUpdateVersion, repo.getByIDCalls)
+	}
+}
+
+func TestDocumentHandler_TagsetUpdate(t *testing.T) {
+	id, existing, different := uuid.New(), uuid.New(), uuid.New()
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"same", fmt.Sprintf(`{"tagsetId":%q}`, existing), http.StatusOK},
+		{"different", fmt.Sprintf(`{"tagsetId":%q}`, different), http.StatusOK},
+		{"null", `{"tagsetId":null}`, http.StatusBadRequest},
+		{"invalid", `{"tagsetId":"invalid"}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr, repo := runPatch(t, id, tc.body, func(repo *mockDocRepo) { repo.doc = model.Document{ID: id, TagsetID: &existing} })
+			writes := 0
+			if tc.name == "different" {
+				writes = 1
+			}
+			if rr.Code != tc.status || repo.updateMetadataCalls != writes {
+				t.Fatalf("status=%d writes=%d body=%s", rr.Code, repo.updateMetadataCalls, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestDocumentHandler_MoveFieldsValidationAndOmittedTagset(t *testing.T) {
+	id, tagset := uuid.New(), uuid.New()
+	for _, body := range []string{
+		`{"expectedStorageBucketId":null,"displayName":"name.txt"}`,
+		`{"expectedStorageBucketId":"invalid","displayName":"name.txt"}`,
+		`{"expectedStorageBucketId":"00000000-0000-0000-0000-000000000000","displayName":"name.txt"}`,
+		`{"tagsetId":null,"displayName":"name.txt"}`,
+		`{"tagsetId":"00000000-0000-0000-0000-000000000000","displayName":"name.txt"}`,
+	} {
+		rr, repo := runPatch(t, id, body, nil)
+		if rr.Code != http.StatusBadRequest || repo.getByIDCalls != 0 {
+			t.Errorf("invalid input looked up document: %d %s reads=%d", rr.Code, rr.Body.String(), repo.getByIDCalls)
+		}
+	}
+	rr, repo := runPatch(t, id, `{"displayName":"renamed.txt"}`, func(repo *mockDocRepo) {
+		repo.doc = model.Document{ID: id, TagsetID: &tagset, DisplayName: "original.txt"}
+	})
+	if rr.Code != http.StatusOK || repo.doc.TagsetID == nil || *repo.doc.TagsetID != tagset {
+		t.Fatalf("ordinary rename dropped tagset: %d %+v", rr.Code, repo.doc)
+	}
+}
+
 func TestDocumentHandler_GetMeta_Found(t *testing.T) {
 	h, repo, _ := newDocHandler()
 	docID := uuid.New()

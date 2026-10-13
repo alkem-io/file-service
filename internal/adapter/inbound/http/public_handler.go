@@ -2,12 +2,8 @@ package http
 
 import (
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -194,11 +190,6 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// actorID may be empty here: anonymous requests are valid input.
-	// The auth-evaluation-service evaluates the document's policy
-	// against the (possibly anonymous) caller and returns the decision.
-	actorID := GetActorID(r.Context())
-
 	doc, err := h.Repo.GetByID(r.Context(), docID)
 	if err != nil {
 		if errors.Is(err, model.ErrDocumentNotFound) {
@@ -209,6 +200,15 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+
+	h.serveAuthorizedDocument(w, r, doc)
+}
+
+func (h *PublicHandler) serveAuthorizedDocument(w http.ResponseWriter, r *http.Request, doc model.Document) {
+	// actorID may be empty here: anonymous requests are valid input.
+	// The auth-evaluation-service evaluates the document's policy
+	// against the (possibly anonymous) caller and returns the decision.
+	actorID := GetActorID(r.Context())
 
 	// A document with NO authorization policy is DENIED here, at the
 	// file-service boundary. Its authorizationId column is NULL, which reads
@@ -244,43 +244,30 @@ func (h *PublicHandler) ServeDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ETag based on content hash — invalidates when file content changes via store-and-link
-	etag := `"` + doc.ExternalID + `"`
-	if r.Header.Get("If-None-Match") == etag {
-		// A 304 carries no body, but a cache MUST update the stored response's
-		// headers from it (RFC 9110 §15.4.5) — so the hardening ships here too.
-		// Without it a revalidation would let a cache keep, and keep serving, a
-		// stored copy that predates the deny-list/nosniff hardening.
-		applyServeHardening(w, doc)
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
+	serveDocumentBlob(w, r, doc, h.Storage, h.Logger, h.MaxAge)
+}
 
-	// Stream the file from storage (constant memory — never buffer the whole blob, so a burst of
-	// concurrent large-file reads can't drive RSS to N×blobsize).
-	rc, size, err := h.Storage.ReadStream(doc.ExternalID)
+// ServeByReference handles public GET/HEAD content scoped to a bucket and reference.
+func (h *PublicHandler) ServeByReference(w http.ResponseWriter, r *http.Request) {
+	query, err := referenceQuery(r)
 	if err != nil {
-		writeStorageReadError(w, h.Logger, err, "file not found on storage", "failed to read file from storage")
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// Response headers matching TS file-service
-	w.Header().Set("Content-Type", doc.MimeType)
-	applyServeHardening(w, doc)
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", h.MaxAge))
-	w.Header().Set("Pragma", "public")
-	w.Header().Set("Expires", time.Now().Add(time.Duration(h.MaxAge)*time.Second).UTC().Format(http.TimeFormat))
-	w.Header().Set("ETag", etag)
-
-	// A seekable blob (the local adapter's *os.File) goes through ServeContent so Range requests
-	// get 206/416: Safari will not play a <video> whose server answers a range request with 200.
-	if rs, ok := rc.(io.ReadSeeker); ok {
-		defer func() { _ = rc.Close() }()
-		http.ServeContent(w, r, "", time.Time{}, rs)
+	bucket, err := uuid.Parse(query.Get("bucketId"))
+	if len(query["bucketId"]) != 1 || err != nil || bucket == uuid.Nil {
+		writeJSONError(w, http.StatusBadRequest, "one valid bucketId is required")
 		return
 	}
+	doc, err := h.Repo.GetByReferenceInBucket(r.Context(), query.Get("ref"), bucket)
+	if err != nil {
+		handleReferenceLookupFailure(w, h.Logger, err)
+		return
+	}
+	h.serveAuthorizedDocument(w, r, doc)
+}
 
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.WriteHeader(http.StatusOK)
-	streamBlob(w, h.Logger, rc, size, doc.ExternalID)
+// HeadByReference serves the public reference headers through the same read path.
+func (h *PublicHandler) HeadByReference(w http.ResponseWriter, r *http.Request) {
+	h.ServeByReference(w, r)
 }
