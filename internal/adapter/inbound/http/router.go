@@ -59,6 +59,8 @@ func NewRouter(deps Deps) *chi.Mux {
 	// into `/rest/storage/...` before it arrives here.
 	r.Route("/rest/storage", func(r chi.Router) {
 		r.Use(ActorHeaderExtractor)
+		r.Get("/file/by-reference", deps.PublicHandler.ServeByReference)
+		r.Head("/file/by-reference", deps.PublicHandler.HeadByReference)
 		r.Get("/document/{id}", deps.PublicHandler.ServeDocument) // backward compat alias
 		r.Get("/file/{id}", deps.PublicHandler.ServeDocument)
 	})
@@ -69,6 +71,8 @@ func NewRouter(deps Deps) *chi.Mux {
 		r.Post("/file/copy", deps.DocumentHandler.Copy)
 		r.Post("/file/content-batch", deps.DocumentHandler.ContentBatch)
 		r.Get("/file/by-reference", deps.DocumentHandler.ByReference)
+		r.Get("/file/by-reference/content", deps.DocumentHandler.ContentByReference)
+		r.Head("/file/by-reference/content", deps.DocumentHandler.HeadContentByReference)
 		r.Get("/file/{id}/meta", deps.DocumentHandler.GetMeta)
 		r.Get("/file/{id}/content", deps.DocumentHandler.GetContent)
 		// Content-addressed read by SHA3-256 hash (workspace#008); rationale on GetBlobContent.

@@ -114,6 +114,30 @@ func (q *Queries) DeleteDocument(ctx context.Context, id pgtype.UUID) (DeleteDoc
 	return i, err
 }
 
+const deleteDocumentInBucket = `-- name: DeleteDocumentInBucket :one
+DELETE FROM file
+WHERE id = $1 AND "storageBucketId" = $2
+RETURNING "externalID", "authorizationId", "tagsetId"
+`
+
+type DeleteDocumentInBucketParams struct {
+	ID              pgtype.UUID `json:"id"`
+	StorageBucketId pgtype.UUID `json:"storageBucketId"`
+}
+
+type DeleteDocumentInBucketRow struct {
+	ExternalID      string      `json:"externalID"`
+	AuthorizationId pgtype.UUID `json:"authorizationId"`
+	TagsetId        pgtype.UUID `json:"tagsetId"`
+}
+
+func (q *Queries) DeleteDocumentInBucket(ctx context.Context, arg DeleteDocumentInBucketParams) (DeleteDocumentInBucketRow, error) {
+	row := q.db.QueryRow(ctx, deleteDocumentInBucket, arg.ID, arg.StorageBucketId)
+	var i DeleteDocumentInBucketRow
+	err := row.Scan(&i.ExternalID, &i.AuthorizationId, &i.TagsetId)
+	return i, err
+}
+
 const findDocumentByExternalIDAndBucket = `-- name: FindDocumentByExternalIDAndBucket :one
 SELECT id, "externalID", "mimeType", size, "displayName", "createdBy",
        "temporaryLocation", "storageBucketId", "authorizationId", "tagsetId",
@@ -486,6 +510,7 @@ SET "storageBucketId"    = $2,
     "createdBy"          = $6,
     "externalReference"  = $7,
     "updatedDate"        = $8,
+    "tagsetId"           = $10,
     version              = version + 1
 WHERE id = $1 AND version = $9
 `
@@ -500,12 +525,13 @@ type UpdateDocumentMetadataParams struct {
 	ExternalReference pgtype.Text        `json:"externalReference"`
 	UpdatedDate       pgtype.Timestamptz `json:"updatedDate"`
 	Version           int32              `json:"version"`
+	TagsetId          pgtype.UUID        `json:"tagsetId"`
 }
 
 // Updates the mutable metadata fields atomically with optimistic locking.
 // Caller fills unchanged fields with their current values. This is the
 // "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
-// displayName it also re-points authorizationId, createdBy, and the opaque
+// displayName it also sets authorizationId, tagsetId, createdBy, and the opaque
 // externalReference (server-driven inbound re-home). mimeType, externalID,
 // size are not mutable here — they change only via UpdateDocumentFile.
 //
@@ -525,6 +551,7 @@ func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocument
 		arg.ExternalReference,
 		arg.UpdatedDate,
 		arg.Version,
+		arg.TagsetId,
 	)
 	if err != nil {
 		return 0, err

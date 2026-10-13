@@ -153,6 +153,7 @@ type DocumentMetadataUpdate struct {
 	// (which would collide on the UNIQUE("authorizationId") index). Tri-state,
 	// symmetric with CreatedBy and ExternalReference: nil = NULL/clear.
 	AuthorizationID   *uuid.UUID
+	TagsetID          *uuid.UUID
 	CreatedBy         *uuid.UUID
 	ExternalReference *string
 }

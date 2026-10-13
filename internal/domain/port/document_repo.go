@@ -63,6 +63,9 @@ type DocumentRepo interface {
 	// which deletes them). Returns model.ErrDocumentNotFound if the row
 	// does not exist — deletes are not idempotent at this layer.
 	Delete(ctx context.Context, id uuid.UUID) (model.DeletedDocument, error)
+	// DeleteInBucket atomically checks the source bucket in DELETE ... RETURNING.
+	// A missing or relocated row returns ErrDocumentNotFound without deletion.
+	DeleteInBucket(ctx context.Context, id, expectedBucketID uuid.UUID) (model.DeletedDocument, error)
 	// CountByExternalID reports how many rows (across all buckets) still
 	// reference a content hash — the blob refcount that gates physical
 	// deletion from storage.

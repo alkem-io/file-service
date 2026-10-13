@@ -170,12 +170,14 @@ func (r DocumentMetaResponse) Render(w http.ResponseWriter) {
 // through the shared parse helpers these fields go through — so the format is
 // declared at the source instead of depending on the shape of the handler.
 type UpdateDocumentRequest struct {
-	StorageBucketID   *string `json:"storageBucketId,omitempty" apispec:"format=uuid"`
-	TemporaryLocation *bool   `json:"temporaryLocation,omitempty"`
-	DisplayName       *string `json:"displayName,omitempty"`
-	AuthorizationID   *string `json:"authorizationId,omitempty" apispec:"format=uuid"`
-	CreatedBy         *string `json:"createdBy,omitempty" apispec:"format=uuid"`
-	ExternalReference *string `json:"externalReference,omitempty"`
+	ExpectedStorageBucketID *string `json:"expectedStorageBucketId,omitempty" apispec:"format=uuid"`
+	TagsetID                *string `json:"tagsetId,omitempty" apispec:"format=uuid"`
+	StorageBucketID         *string `json:"storageBucketId,omitempty" apispec:"format=uuid"`
+	TemporaryLocation       *bool   `json:"temporaryLocation,omitempty"`
+	DisplayName             *string `json:"displayName,omitempty"`
+	AuthorizationID         *string `json:"authorizationId,omitempty" apispec:"format=uuid"`
+	CreatedBy               *string `json:"createdBy,omitempty" apispec:"format=uuid"`
+	ExternalReference       *string `json:"externalReference,omitempty"`
 }
 
 // ContentBatchIDs is the bounded, ordered id list accepted by ContentBatch.

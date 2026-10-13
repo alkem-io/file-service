@@ -3,6 +3,7 @@ package alkemiodb
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
@@ -311,6 +312,31 @@ func TestMock_Delete_NotFound(t *testing.T) {
 	}
 }
 
+func TestMock_DeleteInBucket_PassesBucket(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	docID, bucketID := uuid.New(), uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`DELETE FROM file WHERE id = $1 AND "storageBucketId" = $2`)).
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID)).
+		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}).
+			AddRow("abc123", pgtype.UUID{}, pgtype.UUID{}))
+
+	deleted, err := New(mock).DeleteInBucket(context.Background(), docID, bucketID)
+	if err != nil {
+		t.Fatalf("DeleteInBucket: %v", err)
+	}
+	if deleted.ExternalID != "abc123" {
+		t.Fatalf("externalID = %q", deleted.ExternalID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestMock_CountByExternalID(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
@@ -341,16 +367,17 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 
 	// Param order in UpdateDocumentMetadata (move + re-attribute): $1=id,
 	// $2=storageBucketId, $3=temporaryLocation, $4=displayName, $5=authorizationId,
-	// $6=createdBy, $7=externalReference, $8=updatedDate, $9=version. Pin
+	// $6=createdBy, $7=externalReference, $8=updatedDate, $9=version, $10=tagsetId. Pin
 	// everything except updatedDate (timestamp computed in adapter).
 	docID := uuid.New()
 	bucketID := uuid.New()
 	authID := uuid.New()
+	tagsetID := uuid.New()
 	ref := "media_id_abc"
 	mock.ExpectExec("UPDATE file SET").
 		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID), false, "name.txt",
 			uuidToPgxNullable(&authID), pgtype.UUID{Valid: false}, stringToPgxText(&ref),
-			pgxmock.AnyArg(), int32(1)).
+			pgxmock.AnyArg(), int32(1), uuidToPgxNullable(&tagsetID)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	a := New(mock)
@@ -359,6 +386,7 @@ func TestMock_UpdateMetadata_Success(t *testing.T) {
 		TemporaryLocation: false,
 		DisplayName:       "name.txt",
 		AuthorizationID:   &authID,
+		TagsetID:          &tagsetID,
 		ExternalReference: &ref,
 	}, 1)
 	if err != nil {
@@ -375,7 +403,7 @@ func TestMock_UpdateMetadata_NotFound(t *testing.T) {
 
 	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	a := New(mock)
@@ -436,7 +464,7 @@ func TestMock_UpdateMetadata_DBError(t *testing.T) {
 
 	mock.ExpectExec("UPDATE file SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
 	a := New(mock)
