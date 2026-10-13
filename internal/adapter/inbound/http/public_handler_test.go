@@ -28,6 +28,7 @@ type mockDocRepo struct {
 	updateErr    error
 	deleteResult model.DeletedDocument
 	deleteErr    error
+	deleteCalls  int
 	count        int
 	getByIDCalls int // asserts the by-hash blob endpoint never does a document lookup
 
@@ -154,6 +155,7 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	m.doc.StorageBucketID = meta.StorageBucketID
 	m.doc.TemporaryLocation = meta.TemporaryLocation
 	m.doc.DisplayName = meta.DisplayName
+	m.doc.TagsetID = meta.TagsetID
 	if meta.AuthorizationID != nil {
 		m.doc.AuthorizationID = *meta.AuthorizationID
 	} else {
@@ -165,6 +167,7 @@ func (m *mockDocRepo) UpdateMetadata(_ context.Context, _ uuid.UUID, meta model.
 	return nil
 }
 func (m *mockDocRepo) Delete(_ context.Context, _ uuid.UUID) (model.DeletedDocument, error) {
+	m.deleteCalls++
 	return m.deleteResult, m.deleteErr
 }
 func (m *mockDocRepo) CountByExternalID(_ context.Context, _ string) (int, error) {
@@ -505,4 +508,8 @@ func (m *mockStorage) OpenStage(_ context.Context) (port.StageWriter, error) {
 	st := &httpMockStage{parent: m}
 	m.stages = append(m.stages, st)
 	return st, nil
+}
+
+func (m *mockDocRepo) DeleteInBucket(ctx context.Context, id, _ uuid.UUID) (model.DeletedDocument, error) {
+	return m.Delete(ctx, id)
 }

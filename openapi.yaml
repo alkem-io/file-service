@@ -1,5 +1,18 @@
 components:
   schemas:
+    authhttp.evaluateRequest:
+      properties:
+        actorId:
+          type: string
+        authorizationPolicyId:
+          type: string
+        privilege:
+          type: string
+      required:
+        - actorId
+        - privilege
+        - authorizationPolicyId
+      type: object
     http.ContentBatchIDs:
       items:
         type: string
@@ -197,9 +210,15 @@ components:
           type: string
         displayName:
           type: string
+        expectedStorageBucketId:
+          format: uuid
+          type: string
         externalReference:
           type: string
         storageBucketId:
+          format: uuid
+          type: string
+        tagsetId:
           format: uuid
           type: string
         temporaryLocation:
@@ -235,10 +254,33 @@ components:
         - error
         - message
       type: object
+    nats.evaluateData:
+      properties:
+        actorId:
+          type: string
+        authorizationPolicyId:
+          type: string
+        privilege:
+          type: string
+      required:
+        - actorId
+        - privilege
+        - authorizationPolicyId
+      type: object
+    nats.evaluateRequest:
+      properties:
+        data:
+          $ref: '#/components/schemas/nats.evaluateData'
+        pattern:
+          type: string
+      required:
+        - pattern
+        - data
+      type: object
 info:
   contact:
     email: info@alkem.io
-    name: Alkemio Foundation
+    name: Alkemio
     url: https://alkem.io
   description: |
     Universal file I/O gateway and document lifecycle manager for the Alkemio platform.
@@ -427,6 +469,97 @@ paths:
       summary: ByReference handles GET /internal/file/by-reference?ref=<v>&bucketId=<uuid?>.
       tags:
         - /internal
+  /internal/file/by-reference/content:
+    get:
+      description: |-
+        ContentByReference handles internal GET/HEAD content by opaque reference.
+        An omitted bucketId selects global lookup; a supplied bucketId scopes it.
+      operationId: DocumentHandler.ContentByReference
+      parameters:
+        - in: query
+          name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
+          description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/error.Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/document-not-found'
+          description: Not Found
+        "500":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/internal-error'
+          description: Internal Server Error
+      summary: ContentByReference handles internal GET/HEAD content by opaque reference.
+      tags:
+        - /internal
+    head:
+      operationId: DocumentHandler.HeadContentByReference
+      parameters:
+        - in: query
+          name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          schema:
+            format: uuid
+            type: string
+      responses:
+        "0":
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/net_http.Request'
+          description: Status code could not be determined
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
+          description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/error.Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/document-not-found'
+          description: Not Found
+        "500":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/internal-error'
+          description: Internal Server Error
+      summary: HeadContentByReference serves internal reference headers through the same read path.
+      tags:
+        - /internal
   /internal/file/content-batch:
     post:
       description: |-
@@ -521,11 +654,19 @@ paths:
         - /internal
   /internal/file/{id}:
     delete:
+      description: |-
+        Delete handles DELETE /internal/file/{id}. Optional expectedStorageBucketId
+        atomically rejects cleanup of a missing or relocated staging row with 409.
       operationId: DocumentHandler.Delete
       parameters:
         - in: path
           name: id
           required: true
+          schema:
+            format: uuid
+            type: string
+        - in: query
+          name: expectedStorageBucketId
           schema:
             format: uuid
             type: string
@@ -536,30 +677,43 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.DeleteDocumentResponse'
           description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Bad Request
         "404":
           content:
             application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Not Found
+        "409":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/http.errorResponse'
+          description: Conflict
         "500":
           content:
             application/json; charset=utf-8:
               schema:
                 $ref: '#/components/schemas/http.errorResponse'
           description: Internal Server Error
-      summary: Delete handles DELETE /internal/file/{id}
+      summary: Delete handles DELETE /internal/file/{id}.
       tags:
         - /internal
     patch:
       description: |-
         Update handles PATCH /internal/file/{id}.
         Mutates the "move + re-attribute" fields: storageBucketId, temporaryLocation,
-        displayName, authorizationId, createdBy, and externalReference. Each field is
+        displayName, authorizationId, tagsetId, createdBy, and externalReference. Each field is
         optional; at least one must produce an effective change. Omitted fields retain
         their current value; createdBy and externalReference accept an explicit JSON
         null to clear (authorizationId is NOT clearable — clearing it orphans the
-        document from its policy).
+        document from its policy). tagsetId is optional and omitted values retain the existing tagset.
+        expectedStorageBucketId checks the same snapshot used by the versioned write.
 
         displayName notes:
           - Validation rejects empty/whitespace-only, length > 512 (matches
@@ -763,6 +917,117 @@ paths:
       summary: |-
         ServeLive is the K8s liveness handler: returns 200 unconditionally so the
         probe reflects process-alive only, independent of DB/NATS availability.
+  /rest/storage/file/by-reference:
+    get:
+      operationId: PublicHandler.ServeByReference
+      parameters:
+        - in: query
+          name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/nats.evaluateRequest'
+                  - format: binary
+                    type: string
+                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
+                  - format: binary
+                    type: string
+          description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/authhttp.evaluateRequest'
+          description: Bad Request
+        "403":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/insufficient-privileges'
+          description: Forbidden
+        "404":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/document-not-found'
+          description: Not Found
+        "500":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/internal-error'
+          description: Internal Server Error
+        "503":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/authorization-service-unavailable'
+          description: Service Unavailable
+      summary: ServeByReference handles public GET/HEAD content scoped to a bucket and reference.
+      tags:
+        - /rest/storage
+    head:
+      operationId: PublicHandler.HeadByReference
+      parameters:
+        - in: query
+          name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
+          schema:
+            format: uuid
+            type: string
+      responses:
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                format: binary
+                type: string
+          description: OK
+        "400":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/error.Error'
+          description: Bad Request
+        "403":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/insufficient-privileges'
+          description: Forbidden
+        "404":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/document-not-found'
+          description: Not Found
+        "500":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/internal-error'
+          description: Internal Server Error
+        "503":
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/authorization-service-unavailable'
+          description: Service Unavailable
+      summary: HeadByReference serves the public reference headers through the same read path.
+      tags:
+        - /rest/storage
   /rest/storage/file/{id}:
     get:
       operationId: PublicHandler.ServeDocument
@@ -781,8 +1046,6 @@ paths:
                 format: binary
                 type: string
           description: OK
-        "304":
-          description: Not Modified
         "403":
           content:
             application/json; charset=utf-8:

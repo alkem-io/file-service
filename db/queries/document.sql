@@ -73,7 +73,7 @@ WHERE id = $1 AND "externalID" = $7 AND version = $8;
 -- Updates the mutable metadata fields atomically with optimistic locking.
 -- Caller fills unchanged fields with their current values. This is the
 -- "move + re-attribute" primitive: besides storageBucketId/temporaryLocation/
--- displayName it also re-points authorizationId, createdBy, and the opaque
+-- displayName it also sets authorizationId, tagsetId, createdBy, and the opaque
 -- externalReference (server-driven inbound re-home). mimeType, externalID,
 -- size are not mutable here — they change only via UpdateDocumentFile.
 --
@@ -90,6 +90,7 @@ SET "storageBucketId"    = $2,
     "createdBy"          = $6,
     "externalReference"  = $7,
     "updatedDate"        = $8,
+    "tagsetId"           = $10,
     version              = version + 1
 WHERE id = $1 AND version = $9;
 
@@ -107,6 +108,11 @@ WHERE id = $1
 -- name: DeleteDocument :one
 DELETE FROM file
 WHERE id = $1
+RETURNING "externalID", "authorizationId", "tagsetId";
+
+-- name: DeleteDocumentInBucket :one
+DELETE FROM file
+WHERE id = $1 AND "storageBucketId" = $2
 RETURNING "externalID", "authorizationId", "tagsetId";
 
 -- name: CountDocumentsByExternalID :one
