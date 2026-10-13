@@ -518,7 +518,7 @@ paths:
           content:
             application/octet-stream:
               schema:
-                $ref: '#/components/schemas/net_http.Request'
+                $ref: '#/components/schemas/github.com_alkem-io_file-service_internal_adapter_inbound_http.DocumentHandler.Service.Storage'
           description: Status code could not be determined
         "200":
           content:
@@ -923,17 +923,18 @@ paths:
             application/octet-stream:
               schema:
                 oneOf:
+                  - $ref: '#/components/schemas/nats.evaluateRequest'
                   - format: binary
                     type: string
                   - $ref: '#/components/schemas/authhttp.evaluateRequest'
-                  - $ref: '#/components/schemas/authhttp.evaluateRequest'
-                  - $ref: '#/components/schemas/nats.evaluateRequest'
+                  - format: binary
+                    type: string
           description: OK
         "400":
           content:
             application/json; charset=utf-8:
               schema:
-                $ref: '#/components/schemas/nats.evaluateRequest'
+                $ref: '#/components/schemas/authhttp.evaluateRequest'
           description: Bad Request
         "403":
           content:

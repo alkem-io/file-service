@@ -963,8 +963,13 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var expected []uuid.UUID
-	expectedBucket := r.URL.Query().Get("expectedStorageBucketId")
-	if values, present := r.URL.Query()["expectedStorageBucketId"]; present {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "malformed query string")
+		return
+	}
+	expectedBucket := query.Get("expectedStorageBucketId")
+	if values, present := query["expectedStorageBucketId"]; present {
 		if len(values) != 1 {
 			writeJSONError(w, http.StatusBadRequest, "expectedStorageBucketId must be a UUID")
 			return

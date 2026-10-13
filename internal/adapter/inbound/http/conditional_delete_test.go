@@ -26,6 +26,9 @@ func TestConditionalDeleteContract(t *testing.T) {
 		{"conditional backend failure", "?expectedStorageBucketId=" + bucket, errors.New("unavailable"), 500},
 		{"empty condition", "?expectedStorageBucketId=", nil, 400},
 		{"invalid condition", "?expectedStorageBucketId=invalid", nil, 400},
+		{"malformed condition", "?expectedStorageBucketId=%zz", nil, 400},
+		{"malformed condition key", "?expectedStorageBucketId%zz=" + bucket, nil, 400},
+		{"malformed condition after valid condition", "?expectedStorageBucketId=" + bucket + "&expectedStorageBucketId=%zz", nil, 400},
 		{"nil condition", "?expectedStorageBucketId=" + uuid.Nil.String(), nil, 400},
 		{"multiple conditions", "?expectedStorageBucketId=" + bucket + "&expectedStorageBucketId=" + bucket, nil, 400},
 	} {
@@ -42,6 +45,9 @@ func TestConditionalDeleteContract(t *testing.T) {
 			}
 			if repo.getByIDCalls != 0 {
 				t.Fatal("DELETE must not introduce a read then unconditional delete")
+			}
+			if tc.status == http.StatusBadRequest && repo.deleteCalls != 0 {
+				t.Fatal("malformed delete conditions must not reach the repository")
 			}
 		})
 	}
