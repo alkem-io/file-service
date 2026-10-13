@@ -1592,13 +1592,24 @@ func documentMetaResponse(doc model.Document) DocumentMetaResponse {
 }
 
 // ContentByReference handles internal GET/HEAD content by opaque reference.
+// An omitted bucketId selects global lookup; a supplied bucketId scopes it.
 func (h *DocumentHandler) ContentByReference(w http.ResponseWriter, r *http.Request) {
 	query, err := referenceQuery(r)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := h.Service.Repo.GetByReference(r.Context(), query.Get("ref"))
+	var doc model.Document
+	if values, present := query["bucketId"]; present {
+		bucketID, parseErr := uuid.Parse(query.Get("bucketId"))
+		if len(values) != 1 || parseErr != nil || bucketID == uuid.Nil {
+			writeJSONError(w, http.StatusBadRequest, "one valid bucketId is required")
+			return
+		}
+		doc, err = h.Service.Repo.GetByReferenceInBucket(r.Context(), query.Get("ref"), bucketID)
+	} else {
+		doc, err = h.Service.Repo.GetByReference(r.Context(), query.Get("ref"))
+	}
 	if err != nil {
 		handleReferenceLookupFailure(w, h.Logger, err)
 		return

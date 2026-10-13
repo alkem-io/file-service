@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -83,6 +84,43 @@ func TestReferenceContentRoutes(t *testing.T) {
 						t.Fatal("must not redirect")
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestInternalReferenceContentHonorsBucket(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, found := range []bool{true, false} {
+			t.Run(method+"/"+strconv.FormatBool(found), func(t *testing.T) {
+				repo, _, storage, router, ref := referenceFixture(t)
+				bucket := repo.doc.StorageBucketID
+				status := http.StatusOK
+				if !found {
+					repo.refInBucketDoc = nil
+					status = http.StatusNotFound
+				}
+				rr := httptest.NewRecorder()
+				router.ServeHTTP(rr, referenceRequest(method, "/internal/file/by-reference/content?bucketId="+bucket.String()+"&ref="+ref))
+				if rr.Code != status || repo.refCalls != 0 || repo.refInBucketCalls != 1 || repo.lastRefBucket != bucket {
+					t.Fatalf("status=%d global=%d scoped=%d bucket=%s", rr.Code, repo.refCalls, repo.refInBucketCalls, repo.lastRefBucket)
+				}
+				if !found && storage.readStreams != 0 {
+					t.Fatal("missing scoped association must not read the global blob")
+				}
+			})
+		}
+	}
+}
+
+func TestInternalReferenceContentRejectsMalformedBucket(t *testing.T) {
+	for _, bucketQuery := range []string{"bucketId=", "bucketId=invalid", "bucketId=" + uuid.Nil.String(), "bucketId=%zz", "bucketId=" + uuid.NewString() + "&bucketId=" + uuid.NewString()} {
+		t.Run(bucketQuery, func(t *testing.T) {
+			repo, _, storage, router, ref := referenceFixture(t)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, referenceRequest(http.MethodGet, "/internal/file/by-reference/content?"+bucketQuery+"&ref="+ref))
+			if rr.Code != http.StatusBadRequest || repo.refCalls != 0 || repo.refInBucketCalls != 0 || storage.readStreams != 0 {
+				t.Fatalf("status=%d global=%d scoped=%d reads=%d", rr.Code, repo.refCalls, repo.refInBucketCalls, storage.readStreams)
 			}
 		})
 	}

@@ -471,10 +471,17 @@ paths:
         - /internal
   /internal/file/by-reference/content:
     get:
+      description: |-
+        ContentByReference handles internal GET/HEAD content by opaque reference.
+        An omitted bucketId selects global lookup; a supplied bucketId scopes it.
       operationId: DocumentHandler.ContentByReference
       parameters:
         - in: query
           name: ref
+          schema:
+            type: string
+        - in: query
+          name: bucketId
           schema:
             type: string
       responses:
@@ -513,12 +520,17 @@ paths:
           name: ref
           schema:
             type: string
+        - in: query
+          name: bucketId
+          schema:
+            format: uuid
+            type: string
       responses:
         "0":
           content:
             application/octet-stream:
               schema:
-                $ref: '#/components/schemas/github.com_alkem-io_file-service_internal_adapter_inbound_http.DocumentHandler.Service.Storage'
+                $ref: '#/components/schemas/net_http.Request'
           description: Status code could not be determined
         "200":
           content:

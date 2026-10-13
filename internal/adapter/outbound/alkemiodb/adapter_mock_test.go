@@ -3,6 +3,7 @@ package alkemiodb
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
@@ -308,6 +309,31 @@ func TestMock_Delete_NotFound(t *testing.T) {
 	_, err = a.Delete(context.Background(), uuid.New())
 	if !errors.Is(err, model.ErrDocumentNotFound) {
 		t.Errorf("expected ErrDocumentNotFound, got %v", err)
+	}
+}
+
+func TestMock_DeleteInBucket_PassesBucket(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	docID, bucketID := uuid.New(), uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`DELETE FROM file WHERE id = $1 AND "storageBucketId" = $2`)).
+		WithArgs(uuidToPgx(docID), uuidToPgx(bucketID)).
+		WillReturnRows(mock.NewRows([]string{"externalID", "authorizationId", "tagsetId"}).
+			AddRow("abc123", pgtype.UUID{}, pgtype.UUID{}))
+
+	deleted, err := New(mock).DeleteInBucket(context.Background(), docID, bucketID)
+	if err != nil {
+		t.Fatalf("DeleteInBucket: %v", err)
+	}
+	if deleted.ExternalID != "abc123" {
+		t.Fatalf("externalID = %q", deleted.ExternalID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }
 
