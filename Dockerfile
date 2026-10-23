@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.27
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.26.10
 ARG ALPINE_VERSION=3.24
 
 # Build Stage — native build per target platform (CGO needs target-arch vips-dev)
@@ -8,7 +8,7 @@ ARG ALPINE_VERSION=3.24
 # Digest-pinned. The digest is the OCI INDEX (multi-arch), not a per-architecture
 # child — pinning a child would build amd64 and break the arm64 release build.
 # Verify with: docker buildx imagetools inspect <ref> -> lists linux/amd64 AND linux/arm64.
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:51a7c389a5ddaf82f527191a1e9bff9928655130a44e4975dd1d7e0acf59f1ae AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
 
 WORKDIR /app
 
