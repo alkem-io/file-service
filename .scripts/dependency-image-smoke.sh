@@ -46,6 +46,12 @@ func main(){p:=new(http.Protocols);p.SetHTTP1(true);p.SetUnencryptedHTTP2(true);
  auth=docker('create','--name',names[1],'--network',run,'--network-alias','auth','--entrypoint','go',builder,'run','/tmp/auth-fixture.go');ids.append(auth)
  subprocess.run(['docker','cp',str(E/'auth-fixture.go'),auth+':/tmp/auth-fixture.go'],check=True)
  docker('start',auth)
+ auth_info=json.loads(docker('inspect',auth))[0]
+ auth_ip=auth_info['NetworkSettings']['Networks'][run]['IPAddress']
+ def auth_ready():
+  request=urllib.request.Request('http://'+auth_ip+':6060/internal/auth/evaluate',data=b'{"actorId":"fixture"}',headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(request,timeout=2) as response:assert response.status==200
+ ready(auth_ready)
  app=docker('run','-d','--name',names[2],'--network',run,'--tmpfs','/storage:uid=65532,gid=65532,mode=0700','-e','ALKEMIO_DATABASE_HOST=db','-e','ALKEMIO_DATABASE_PORT=5432','-e','ALKEMIO_DATABASE_USERNAME=fixture','-e','ALKEMIO_DATABASE_PASSWORD=fixture','-e','ALKEMIO_DATABASE_NAME=fixture','-e','AUTH_SERVICE_URL=http://auth:6060','-e','STORAGE_TYPE=local','-e','LOCAL_STORAGE_PATH=/storage','-e','PORT=4003',image);ids.append(app)
  (E/'smoke-created.json').write_text(json.dumps({'network':network,'containers':ids},indent=2))
  info=json.loads(docker('inspect',app))[0];ip=info['NetworkSettings']['Networks'][run]['IPAddress']
