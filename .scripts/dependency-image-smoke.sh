@@ -60,13 +60,15 @@ func main(){p:=new(http.Protocols);p.SetHTTP1(true);p.SetUnencryptedHTTP2(true);
  check('native libvips linked', 'libvips.so.42' in links)
  for codec in ['heif','jxl','poppler']:check(codec+' native module linkage',codec in links)
  check('all native libraries resolved','not found' not in links and 'No such file' not in links)
- bucket=str(uuid.uuid4());authid=str(uuid.uuid4());actor=str(uuid.uuid4())
+ bucket=str(uuid.uuid4());actor=str(uuid.uuid4())
  def upload(name,mime,skip=False):
   payload=pathlib.Path('internal/imaging/testdata',name).read_bytes();boundary=uuid.uuid4().hex
-  body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\nContent-Type: {mime}\r\n\r\n').encode()+payload+b'\r\n'
+  filepart=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\nContent-Type: {mime}\r\n\r\n').encode()+payload+b'\r\n'
+  body=b''
   fields={'storageBucketId':bucket,'authorizationId':str(uuid.uuid4()),'displayName':name}
   if skip:fields['skipImageProcessing']='true'
   for k,v in fields.items():body+=(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode()
+  body+=filepart
   body+=(f'--{boundary}--\r\n').encode()
   status,headers,b=req('/internal/file',body,{'Content-Type':'multipart/form-data; boundary='+boundary})
   check(name+' upload created',status==201)
