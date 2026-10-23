@@ -90,7 +90,7 @@ type DatabaseConfig struct {
 	Host     string
 	Port     int
 	Username string
-	Password string
+	Password string //nolint:gosec // Database connection configuration; never serialized or logged.
 	Name     string
 }
 

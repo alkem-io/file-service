@@ -37,7 +37,7 @@ func (f *sweepRepoFake) ListCIDCandidates(context.Context) ([]port.CIDCandidate,
 
 func (f *sweepRepoFake) ListCIDCaseAliases(context.Context) ([]port.CIDAlias, error) {
 	f.events = append(f.events, "aliases")
-	var result []port.CIDAlias
+	result := make([]port.CIDAlias, 0, len(f.aliases))
 	for _, aliases := range f.aliases {
 		result = append(result, aliases...)
 	}

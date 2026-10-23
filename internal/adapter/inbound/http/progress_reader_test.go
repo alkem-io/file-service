@@ -84,7 +84,7 @@ func runStallScenario(t *testing.T, srv *httptest.Server, client *http.Client, r
 
 	done := make(chan struct{})
 	go func() {
-		resp, err := client.Do(req)
+		resp, err := client.Do(req) //nolint:gosec // URL is the test-owned loopback server.
 		_ = err
 		if resp != nil {
 			_ = resp.Body.Close()
@@ -139,7 +139,7 @@ func TestProgressReader_OverLimit(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL, io.NopCloser(io.LimitReader(neverEnding('x'), 64<<10)))
 	req.ContentLength = -1
-	resp, err := srv.Client().Do(req)
+	resp, err := srv.Client().Do(req) //nolint:gosec // URL is the test-owned loopback server.
 	if err == nil {
 		_ = resp.Body.Close()
 	}
