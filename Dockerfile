@@ -8,7 +8,7 @@ ARG ALPINE_VERSION=3.24
 # Digest-pinned. The digest is the OCI INDEX (multi-arch), not a per-architecture
 # child — pinning a child would build amd64 and break the arm64 release build.
 # Verify with: docker buildx imagetools inspect <ref> -> lists linux/amd64 AND linux/arm64.
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:51a7c389a5ddaf82f527191a1e9bff9928655130a44e4975dd1d7e0acf59f1ae AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:30b1e546a9c7fa3b747c2bdba3a0c7bdf3a02ebb4c5b8405d2f948d7e8aac4ec AS builder
 
 WORKDIR /app
 
