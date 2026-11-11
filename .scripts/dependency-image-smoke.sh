@@ -35,7 +35,7 @@ def ready(fn):
 try:
  network=docker('network','create','--internal',run)
  db=docker('run','-d','--name',names[0],'--network',run,'--network-alias','db','--tmpfs','/var/lib/postgresql/data','-e','POSTGRES_USER=fixture','-e','POSTGRES_PASSWORD=fixture','-e','POSTGRES_DB=fixture',pg);ids.append(db)
- ready(lambda:docker('exec',db,'pg_isready','-U','fixture','-d','fixture'))
+ ready(lambda:docker('exec',db,'pg_isready','-h','127.0.0.1','-U','fixture','-d','fixture'))
  schema='CREATE EXTENSION "uuid-ossp";\n'+pathlib.Path('db/schema/document.sql').read_text()
  docker('exec','-i',db,'psql','-v','ON_ERROR_STOP=1','-U','fixture','-d','fixture',input=schema)
  auth_source='''package main
