@@ -27,7 +27,7 @@ func run(ctx context.Context, args []string) int {
 
 func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, execute sweepExecutor) int {
 	if len(args) != 0 {
-		_, _ = fmt.Fprintf(stderr, "sweep-ipfs-cids: unexpected arguments: %v\n", args)
+		_, _ = fmt.Fprintf(stderr, "sweep-ipfs-cids: unexpected arguments: %v\n", args) //nolint:gosec // CLI diagnostic writer, never an HTML response.
 		return 2
 	}
 	result, runErr := execute(ctx)
