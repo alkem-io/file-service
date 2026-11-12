@@ -179,7 +179,7 @@ func TestReferenceGETAndHEADUseSameStoredBytes(t *testing.T) {
 	defer server.Close()
 	uri := server.URL + "/internal/file/by-reference/content?ref=" + ref
 	getRequest, _ := http.NewRequest("GET", uri, nil)
-	get, err := server.Client().Do(getRequest)
+	get, err := server.Client().Do(getRequest) //nolint:gosec // URL is the test-owned loopback server.
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestReferenceGETAndHEADUseSameStoredBytes(t *testing.T) {
 		t.Fatal("bytes changed")
 	}
 	req, _ := http.NewRequest("HEAD", uri, nil)
-	head, err := http.DefaultClient.Do(req)
+	head, err := http.DefaultClient.Do(req) //nolint:gosec // URL is the test-owned loopback server.
 	if err != nil {
 		t.Fatal(err)
 	}
