@@ -188,13 +188,8 @@ func TestServeDocument_NotModifiedCarriesHardening(t *testing.T) {
 			ExternalID: "abc", MimeType: tc.mime, DisplayName: "page.html", AuthorizationID: uuid.New(),
 		})
 
-		r := chi.NewRouter()
-		r.Get("/rest/storage/document/{id}", h.ServeDocument)
-		req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
-		req.Header.Set("If-None-Match", `"abc"`)
-		req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
+		etag := serveOne(h, docID).Header().Get("ETag")
+		rr := serveConditional(h, docID, map[string]string{"If-None-Match": etag})
 
 		if rr.Code != http.StatusNotModified {
 			t.Fatalf("%s: status = %d, want 304", tc.mime, rr.Code)

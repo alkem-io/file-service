@@ -313,10 +313,7 @@ func TestPublicHandler_Authorized(t *testing.T) {
 	if expires := rr.Header().Get("Expires"); expires == "" {
 		t.Error("missing Expires header")
 	}
-	wantETag := `"abc123"` // ETag is based on externalID (content hash)
-	if etag := rr.Header().Get("ETag"); etag != wantETag {
-		t.Errorf("ETag = %q, want %q", etag, wantETag)
-	}
+	assertValidatorHidesStorageID(t, rr.Header().Get("ETag"), "abc123")
 	if rr.Body.String() != "file-content" {
 		t.Errorf("body = %q, want %q", rr.Body.String(), "file-content")
 	}
@@ -436,30 +433,41 @@ func TestPublicHandler_FileNotFound(t *testing.T) {
 
 func TestPublicHandler_ConditionalRequest304(t *testing.T) {
 	docID := uuid.New()
+	storage := &mockStorage{data: []byte("file-content")}
 	h := &PublicHandler{
 		Repo: &mockDocRepo{doc: model.Document{
 			ID:              docID,
 			ExternalID:      "abc123",
 			MimeType:        "application/pdf",
+			DisplayName:     "report.pdf",
 			AuthorizationID: uuid.New(),
+			Version:         2,
 		}},
 		Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
-		Storage: &mockStorage{data: []byte("file-content")},
+		Storage: storage,
 		MaxAge:  86400,
 		Logger:  zap.NewNop(),
 	}
 
-	r := chi.NewRouter()
-	r.Get("/rest/storage/document/{id}", h.ServeDocument)
+	full := serveConditional(h, docID, nil)
+	if full.Code != http.StatusOK {
+		t.Fatalf("unconditional GET status = %d, want 200", full.Code)
+	}
+	etag := full.Header().Get("ETag")
+	assertValidatorHidesStorageID(t, etag, "abc123")
+	storage.readStreamCalls = 0
 
-	req := httptest.NewRequest(http.MethodGet, "/rest/storage/document/"+docID.String(), nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxKeyActorID, "actor-1"))
-	req.Header.Set("If-None-Match", `"abc123"`) // match externalID
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
+	rr := serveConditional(h, docID, map[string]string{"If-None-Match": etag})
 	if rr.Code != http.StatusNotModified {
 		t.Fatalf("status = %d, want 304", rr.Code)
+	}
+	if rr.Body.Len() != 0 || storage.readStreamCalls != 0 {
+		t.Fatalf("304 read the blob (calls=%d) or carried a body (%d bytes)", storage.readStreamCalls, rr.Body.Len())
+	}
+	for _, name := range []string{"X-Content-Type-Options", "Content-Disposition"} {
+		if got, want := rr.Header().Get(name), full.Header().Get(name); got != want || want == "" {
+			t.Errorf("304 %s = %q, want the 200's %q", name, got, want)
+		}
 	}
 }
 
