@@ -99,7 +99,7 @@ func (c *Client) doRequest(ctx context.Context, actorID, privilege, authorizatio
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // URL comes from operator configuration; request data is confined to the JSON body.
 	if err != nil {
 		c.logger.Warn("h2c auth request failed", zap.Error(err))
 		return model.AuthResult{}, fmt.Errorf("h2c auth request: %w", err)

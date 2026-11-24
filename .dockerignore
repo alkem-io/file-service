@@ -11,3 +11,4 @@ specs/
 .claude/
 Dockerfile*
 .dockerignore
+.forge-evidence/

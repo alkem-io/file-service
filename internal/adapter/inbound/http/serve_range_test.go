@@ -31,11 +31,12 @@ func (s *countingStorage) ReadStream(externalID string) (io.ReadCloser, int64, e
 }
 
 type rangeFixture struct {
-	handler *PublicHandler
-	storage *countingStorage
-	docID   uuid.UUID
-	etag    string
-	payload []byte
+	handler    *PublicHandler
+	storage    *countingStorage
+	docID      uuid.UUID
+	externalID string
+	etag       string
+	payload    []byte
 }
 
 // newRangeFixture stores a distinguishable 1000-byte video blob in the real
@@ -55,7 +56,7 @@ func newRangeFixture(t *testing.T) rangeFixture {
 	doc := model.Document{
 		ID: uuid.New(), ExternalID: stored.ExternalID, MimeType: "video/mp4", AuthorizationID: uuid.New(),
 	}
-	return rangeFixture{
+	f := rangeFixture{
 		handler: &PublicHandler{
 			Repo:    &mockDocRepo{doc: doc},
 			Auth:    &mockAuth{result: model.AuthResult{Allowed: true}},
@@ -63,11 +64,16 @@ func newRangeFixture(t *testing.T) rangeFixture {
 			MaxAge:  86400,
 			Logger:  zap.NewNop(),
 		},
-		storage: storage,
-		docID:   doc.ID,
-		etag:    `"` + stored.ExternalID + `"`,
-		payload: payload,
+		storage:    storage,
+		docID:      doc.ID,
+		externalID: stored.ExternalID,
+		payload:    payload,
 	}
+	// The validator is whatever an unconditional GET hands a client.
+	f.etag = f.serve(nil).Header().Get("ETag")
+	assertValidatorHidesStorageID(t, f.etag, f.externalID)
+	storage.readStreams = 0
+	return f
 }
 
 func (f rangeFixture) serve(header map[string]string) *httptest.ResponseRecorder {

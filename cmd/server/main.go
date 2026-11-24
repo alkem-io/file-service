@@ -31,7 +31,7 @@ func run(args []string) int {
 	case "sweep-dims":
 		return runSweepDims()
 	default:
-		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims)\n", cmd)
+		fmt.Fprintf(os.Stderr, "file-service: unknown command %q (want: serve | sweep-dims)\n", cmd) //nolint:gosec // CLI diagnostic writer, never an HTML response.
 		return 2
 	}
 }
