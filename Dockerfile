@@ -8,7 +8,7 @@ ARG ALPINE_VERSION=3.24
 # Digest-pinned. The digest is the OCI INDEX (multi-arch), not a per-architecture
 # child — pinning a child would build amd64 and break the arm64 release build.
 # Verify with: docker buildx imagetools inspect <ref> -> lists linux/amd64 AND linux/arm64.
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@sha256:87c65a688975c0b1d4585d204874c45ca78354670e3a5f11368c5a492303d696 AS builder
 
 WORKDIR /app
 
@@ -46,7 +46,7 @@ RUN CGO_ENABLED=1 go build -tags vips -trimpath -ldflags "-s -w" -o /bin/file-se
 # clean there and exits at container start. See alkem-io/file-service#67.
 #
 # Digest-pinned to the OCI INDEX (multi-arch), not a per-architecture child.
-FROM alpine:${ALPINE_VERSION}@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:${ALPINE_VERSION}@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 # Install libvips runtime only
 RUN apk add --no-cache vips vips-heif vips-jxl vips-poppler

@@ -42,8 +42,12 @@ func handleReferenceLookupFailure(w http.ResponseWriter, logger *zap.Logger, err
 
 // serveDocumentBlob is shared by the authorized document route and both reference
 // routes after lookup/authorization. It never returns a row or redirects to an ID.
+//
+// The validator is the file id and its row version: unique per logical file and
+// bumped by every write that changes bytes, type or name. It never carries the
+// storage identity (ADR 0012).
 func serveDocumentBlob(w http.ResponseWriter, r *http.Request, doc model.Document, storage port.StoragePort, logger *zap.Logger, maxAge int) {
-	etag := `"` + doc.ExternalID + `"`
+	etag := `"` + doc.ID.String() + "." + strconv.Itoa(doc.Version) + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		applyServeHardening(w, doc)
 		w.WriteHeader(http.StatusNotModified)
