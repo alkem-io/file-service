@@ -138,14 +138,17 @@ func TestPublicReferenceAuthorizationPrecedesConditionalAndRange(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, auth, storage, router, ref := referenceFixture(t)
+			path := "/rest/storage/file/by-reference?bucketId=" + repo.doc.StorageBucketID.String() + "&ref=" + ref
+			etag := servedValidator(t, router, path)
+			storage.readStreams = 0
 			auth.result.Allowed = tc.allowed
 			auth.err = tc.authErr
 			if !tc.policy {
 				repo.refInBucketDoc.AuthorizationID = uuid.Nil
 			}
-			req := referenceRequest("GET", "/rest/storage/file/by-reference?bucketId="+repo.doc.StorageBucketID.String()+"&ref="+ref)
+			req := referenceRequest("GET", path)
 			req.Header.Set("Range", "bytes=0-1")
-			req.Header.Set("If-None-Match", `"`+repo.doc.ExternalID+`"`)
+			req.Header.Set("If-None-Match", etag)
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
 			if rr.Code != tc.status || storage.readStreams != 0 {
@@ -226,8 +229,12 @@ func TestReferenceReadDeletionRaceReturnsUnavailable(t *testing.T) {
 func TestReferenceNotModifiedAndAnonymousBoundary(t *testing.T) {
 	repo, auth, storage, router, ref := referenceFixture(t)
 	path := "/rest/storage/file/by-reference?bucketId=" + repo.doc.StorageBucketID.String() + "&ref=" + ref
+	etag := servedValidator(t, router, path)
+	assertValidatorHidesStorageID(t, etag, repo.doc.ExternalID)
+	storage.readStreams = 0
+	auth.lastPrivilege = ""
 	req := referenceRequest("GET", path)
-	req.Header.Set("If-None-Match", `"`+repo.doc.ExternalID+`"`)
+	req.Header.Set("If-None-Match", etag)
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 	if rr.Code != 304 || storage.readStreams != 0 || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
@@ -261,6 +268,17 @@ func TestInternalReferenceMissingAndMalformed(t *testing.T) {
 	if rr.Code != 404 || storage.readStreams != 0 {
 		t.Fatal("missing reference did not return unavailable")
 	}
+}
+
+// servedValidator returns the validator an unconditional GET of path hands a client.
+func servedValidator(t *testing.T, router http.Handler, path string) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, referenceRequest(http.MethodGet, path))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unconditional GET %s: status %d", path, rr.Code)
+	}
+	return rr.Header().Get("ETag")
 }
 
 func assertReferenceMetadata(t *testing.T, rr *httptest.ResponseRecorder, method string, status int) {
