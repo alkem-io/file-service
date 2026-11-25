@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.27
+# syntax=docker/dockerfile:1.29
 
 ARG GO_VERSION=1.26.10
 ARG ALPINE_VERSION=3.24
